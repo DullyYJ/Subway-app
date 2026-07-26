@@ -1063,6 +1063,14 @@ input[type=time]{color-scheme:dark;}
     }
   } catch(e){}
 })();
+// ★ 전역 HTML 이스케이프 (게시판·댓글 등 사용자/서버 입력 XSS 방지)
+function _dcEsc(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+window._dcEsc = _dcEsc;
+
 // 오프라인 감지
 function updateOnlineStatus(){
   const b = document.getElementById('offlineBanner');
@@ -8160,6 +8168,24 @@ window.addEventListener('unhandledrejection', function(e) {
         </div>
 
       </div>
+
+      <!-- ★ 법적 고지: 개인정보처리방침 · 위치정보 이용 안내 -->
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-top:12px;">
+        <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:10px;">📄 약관 및 정책</div>
+        <div onclick="openPolicy('privacy')" style="display:flex;align-items:center;padding:11px 2px;cursor:pointer;border-bottom:1px solid var(--border2);">
+          <span style="flex:1;font-size:13px;color:var(--text);">개인정보처리방침</span>
+          <span style="font-size:13px;color:var(--sub);">&rsaquo;</span>
+        </div>
+        <div onclick="openPolicy('location')" style="display:flex;align-items:center;padding:11px 2px;cursor:pointer;border-bottom:1px solid var(--border2);">
+          <span style="flex:1;font-size:13px;color:var(--text);">위치기반서비스 이용약관</span>
+          <span style="font-size:13px;color:var(--sub);">&rsaquo;</span>
+        </div>
+        <div onclick="openPolicy('opensource')" style="display:flex;align-items:center;padding:11px 2px;cursor:pointer;">
+          <span style="flex:1;font-size:13px;color:var(--text);">데이터 출처 및 고지</span>
+          <span style="font-size:13px;color:var(--sub);">&rsaquo;</span>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -8219,6 +8245,13 @@ window.addEventListener('unhandledrejection', function(e) {
 
 <!-- SHOP TAB -->
 <div class="tab-body" id="tab-shop">
+  <!-- ★ 공정위 추천·보증 심사지침: 대가성 문구는 소비자가 쉽게 인식할 수 있는 위치에 표시 -->
+  <div style="background:rgba(255,149,0,.12);border:1px solid rgba(255,149,0,.35);border-radius:10px;padding:10px 12px;margin-bottom:10px;">
+    <p style="font-size:11.5px;line-height:1.55;color:var(--text);margin:0;">
+      이 페이지의 상품 링크는 <b>쿠팡 파트너스 활동</b>의 일환으로,
+      이에 따른 <b>일정액의 수수료를 제공받습니다.</b>
+    </p>
+  </div>
   <div class="shop-hero">
     <div><h2>출퇴근 추천 쇼핑</h2><p>10분마다 새로운 아이템 추천 🛍</p></div>
     <span style="font-size:34px;">🛒</span>
@@ -17504,16 +17537,16 @@ function _renderCmts(post){
             + c.replies.map(function(r){
                 return '<div class="dc-reply">'
                   +'<span class="dc-reply-arr">↳</span>'
-                  +'<span class="dc-cmt-nick">'+r.nick+'</span>'
-                  +'<span class="dc-cmt-txt">'+r.text+'</span>'
+                  +'<span class="dc-cmt-nick">'+_dcEsc(r.nick)+'</span>'
+                  +'<span class="dc-cmt-txt">'+_dcEsc(r.text)+'</span>'
                   +'<span class="dc-cmt-time">'+_timeAgo(r.time)+'</span>'
                   +'</div>';
               }).join('')
             +'</div>'
           : '';
         return '<div class="dc-cmt" id="cmt-'+c.id+'">'
-          +'<span class="dc-cmt-nick">'+c.nick+'</span>'
-          +'<span class="dc-cmt-txt">'+c.text+'</span>'
+          +'<span class="dc-cmt-nick">'+_dcEsc(c.nick)+'</span>'
+          +'<span class="dc-cmt-txt">'+_dcEsc(c.text)+'</span>'
           +'<span class="dc-cmt-time">'+_timeAgo(c.time)+'</span>'
           +'</div>'
           + replyHtml;
@@ -18054,8 +18087,8 @@ function _renderPost(post) {
 
   var cmtHtml = (post.cmts || []).map(function(c){
     return '<div class="dc-cmt">'
-      + '<span class="dc-cmt-nick">' + c.nick + '</span>'
-      + '<span class="dc-cmt-txt">' + c.text + '</span>'
+      + '<span class="dc-cmt-nick">' + _dcEsc(c.nick) + '</span>'
+      + '<span class="dc-cmt-txt">' + _dcEsc(c.text) + '</span>'
       + '<span class="dc-cmt-time">' + _timeAgo(c.time) + '</span>'
       + '</div>';
   }).join('');
@@ -18066,18 +18099,18 @@ function _renderPost(post) {
   var _ttl = String(post.title == null ? '' : post.title).replace(/\s*[\(（][^\(\)（）]*[\)）]\s*$/, '').trim();
   el.innerHTML =
     '<div class="dc-post-hdr">'
-      + (_hideBadge ? '' : '<span class="dc-cat-badge" style="background:' + col + ';">' + post.cat + '</span>')
-      + '<span class="dc-post-title">' + _ttl + '</span>'
+      + (_hideBadge ? '' : '<span class="dc-cat-badge" style="background:' + col + ';">' + _dcEsc(post.cat) + '</span>')
+      + '<span class="dc-post-title">' + _dcEsc(_ttl) + '</span>'
     + '</div>'
     + '<div class="dc-post-meta">'
-      + '<span class="dc-nick">' + post.nick + '</span>'
+      + '<span class="dc-nick">' + _dcEsc(post.nick) + '</span>'
       + '<span class="dc-dot">·</span>'
       + '<span class="dc-time">' + _timeAgo(post.time) + '</span>'
       + '<span class="dc-dot">·</span>'
       + '<span class="dc-views">👁 ' + (post.views || 0) + '</span>'
     + '</div>'
     + '<div class="dc-post-body" style="display:none;">'
-      + '<div class="dc-body-txt">' + (post.body || '').replace(/\n{2,}/g,'\n').replace(/\n/g,'<br>') + '</div>'
+      + '<div class="dc-body-txt">' + _dcEsc((post.body || '').replace(/\n{2,}/g,'\n')).replace(/\n/g,'<br>') + '</div>'
       + '<div class="dc-reactions">'
         + '<button class="dc-react-btn" onclick="dcReact(' + post.id + ',\'like\',this)">👍 <span>' + (post.like || 0) + '</span></button>'
         + '<button class="dc-react-btn" onclick="dcReact(' + post.id + ',\'lol\',this)">ㅋㅋ <span>' + (post.lol || 0) + '</span></button>'
@@ -26455,6 +26488,104 @@ function _getCommId(){
 window._getCommId = _getCommId;
 
 // 설정 탭 표시
+// ══════════════════════════════════════════════════════════════
+// ★ 약관 및 정책 모달 (스토어 심사 필수 고지)
+// ══════════════════════════════════════════════════════════════
+var _POLICY_UPDATED = '2026-07-26';
+var _POLICY_CONTACT = 'phg0643@naver.com';   // TODO: 실제 문의 이메일로 교체
+
+var _POLICY_DOCS = {
+  privacy: {
+    title: '개인정보처리방침',
+    html:
+      '<p><b>1. 수집하는 항목</b><br>'
+      + '· 위치정보(GPS 좌표): 실시간 경로 안내·주변 정류장 검색<br>'
+      + '· 이용자가 입력한 닉네임·게시글·댓글·채팅 내용<br>'
+      + '· 출발지/도착지 등 이용자가 직접 설정한 값<br>'
+      + '별도의 회원가입 절차가 없으며, 이름·연락처·주민등록번호 등은 수집하지 않습니다.</p>'
+      + '<p><b>2. 이용 목적</b><br>'
+      + '대중교통 경로 안내, 실시간 도착정보 제공, 커뮤니티 서비스 운영에만 사용합니다.</p>'
+      + '<p><b>3. 보관 및 파기</b><br>'
+      + '· 위치정보: 경로 안내 목적으로만 일시 사용하며 <b>서버에 저장하지 않습니다.</b><br>'
+      + '· 닉네임·설정값: 이용자 기기(단말)에 저장되며 앱 삭제 시 함께 삭제됩니다.<br>'
+      + '· 게시글·댓글·채팅: 작성일로부터 보관하며, 최신 글 기준 일정 수량 초과 시 오래된 순으로 자동 삭제됩니다.</p>'
+      + '<p><b>4. 제3자 제공 및 처리위탁</b><br>'
+      + '이용자의 개인정보를 제3자에게 판매·제공하지 않습니다. 다만 서비스 제공을 위해 아래 외부 API를 호출하며, '
+      + '이 과정에서 좌표·검색어 등 필요한 최소한의 정보가 전달됩니다.<br>'
+      + '· 국토교통부 TAGO(버스 정보) · 서울특별시 열린데이터광장(지하철 실시간)<br>'
+      + '· 카카오(장소·길찾기) · 네이버(장소 검색)<br>'
+      + '· Google Gemini(안내 문구 생성) · Cloudflare(서버 인프라)</p>'
+      + '<p><b>5. 이용자의 권리</b><br>'
+      + '기기 설정에서 위치 권한을 언제든지 철회할 수 있습니다. 권한을 끄면 실시간 안내 기능은 제한되지만 '
+      + '나머지 기능은 그대로 이용할 수 있습니다. 작성한 글·댓글은 직접 삭제할 수 있습니다.</p>'
+      + '<p><b>6. 아동의 개인정보</b><br>'
+      + '만 14세 미만 아동을 대상으로 하지 않으며, 해당 정보를 고의로 수집하지 않습니다.</p>'
+      + '<p><b>7. 문의</b><br>' + _POLICY_CONTACT + '</p>'
+  },
+  location: {
+    title: '위치기반서비스 이용약관',
+    html:
+      '<p><b>제1조 (목적)</b><br>'
+      + '본 약관은 이용자가 본 앱의 위치기반서비스를 이용함에 있어 권리·의무 및 책임사항을 규정합니다.</p>'
+      + '<p><b>제2조 (서비스 내용)</b><br>'
+      + '· 현재 위치 기준 경로 탐색 및 실시간 이동 안내<br>'
+      + '· 주변 지하철역·버스정류장 검색 및 도착정보 제공<br>'
+      + '· 도착역 주변 장소 추천</p>'
+      + '<p><b>제3조 (위치정보의 이용 및 보유)</b><br>'
+      + '위치정보는 서비스 제공 목적으로만 이용하며 <b>서버에 저장하거나 제3자에게 제공하지 않습니다.</b> '
+      + '경로 안내 종료 시 해당 정보는 이용되지 않습니다.</p>'
+      + '<p><b>제4조 (백그라운드 위치 이용)</b><br>'
+      + '이용자가 경로 안내를 시작한 경우에 한해, 앱이 화면에 없을 때도 하차역 알림 등을 위해 위치를 확인할 수 있습니다. '
+      + '경로 안내를 종료하면 즉시 중단됩니다.</p>'
+      + '<p><b>제5조 (동의 철회)</b><br>'
+      + '기기 설정 &gt; 앱 권한에서 언제든지 위치 권한을 철회할 수 있습니다.</p>'
+      + '<p><b>제6조 (면책)</b><br>'
+      + '실시간 정보는 공공기관 및 외부 API가 제공하는 데이터에 기반하며, 통신 상태·운행 사정 등에 따라 '
+      + '실제와 다를 수 있습니다. 이로 인한 손해에 대해 책임을 지지 않습니다.</p>'
+      + '<p><b>제7조 (문의)</b><br>' + _POLICY_CONTACT + '</p>'
+  },
+  opensource: {
+    title: '데이터 출처 및 고지',
+    html:
+      '<p><b>제휴 및 광고 고지</b><br>'
+      + '쇼핑 탭의 상품 링크는 <b>쿠팡 파트너스 활동</b>의 일환으로, 이에 따른 '
+      + '<b>일정액의 수수료를 제공받습니다.</b> 구매자에게 추가 비용은 발생하지 않습니다.</p>'
+      + '<p><b>데이터 출처</b><br>'
+      + '· 국토교통부 TAGO (버스 노선·정류장·도착정보)<br>'
+      + '· 서울특별시 열린데이터광장 (지하철 실시간 도착·열차 위치)<br>'
+
+      + '· 카카오 (장소 검색·길찾기) · 네이버 (지역 검색)<br>'
+      + '· Open-Meteo (날씨)</p>'
+      + '<p><b>안내</b><br>'
+      + '시각표·혼잡도 등 일부 정보는 공개 데이터를 가공한 <b>추정치</b>이며 실제 운행과 다를 수 있습니다. '
+      + '커뮤니티 및 실시간 대화의 일부 내용은 AI가 생성한 것입니다.</p>'
+      + '<p><b>문의</b><br>' + _POLICY_CONTACT + '</p>'
+  }
+};
+
+function openPolicy(kind){
+  var doc = _POLICY_DOCS[kind];
+  if(!doc) return;
+  var old = document.getElementById('policyOv'); if(old) old.remove();
+  var ov = document.createElement('div');
+  ov.id = 'policyOv';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100000;display:flex;align-items:flex-end;justify-content:center;';
+  ov.onclick = function(e){ if(e.target === ov) closePolicy(); };
+  ov.innerHTML =
+    '<div style="background:var(--card);width:100%;max-width:520px;max-height:86vh;border-radius:18px 18px 0 0;display:flex;flex-direction:column;overflow:hidden;">'
+    + '<div style="display:flex;align-items:center;gap:10px;padding:15px 16px;border-bottom:1px solid var(--border);flex-shrink:0;">'
+      + '<div style="flex:1;font-size:16px;font-weight:800;color:var(--text);">' + _dcEsc(doc.title) + '</div>'
+      + '<button onclick="closePolicy()" style="background:none;border:none;color:var(--sub);font-size:22px;line-height:1;cursor:pointer;padding:0 4px;">&times;</button>'
+    + '</div>'
+    + '<div style="padding:16px;overflow-y:auto;-webkit-overflow-scrolling:touch;font-size:12.5px;line-height:1.75;color:var(--text);">'
+      + doc.html
+      + '<p style="color:var(--sub);font-size:11.5px;margin-top:18px;">시행일 · 최종 개정일: ' + _POLICY_UPDATED + '</p>'
+    + '</div></div>';
+  document.body.appendChild(ov);
+}
+function closePolicy(){ var o = document.getElementById('policyOv'); if(o) o.remove(); }
+window.openPolicy = openPolicy; window.closePolicy = closePolicy;
+
 function showSettingsTab(el){
   document.querySelectorAll('#filterRow .chip').forEach(function(c){c.classList.remove('on');});
   if(el) el.classList.add('on');
