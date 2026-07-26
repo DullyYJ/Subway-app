@@ -1071,6 +1071,88 @@ function _dcEsc(s){
 }
 window._dcEsc = _dcEsc;
 
+// ══════════════════════════════════════════════════════════════
+// ★ 명시적 인앱 공개 (Prominent Disclosure) — Google Play 위치 정책 필수
+//   위치 런타임 권한 요청 "전에" 반드시 표시되어야 함.
+//   필수 요소: '위치' 용어 / '앱이 종료되었거나 사용 중이 아닐 때' / 사용 기능 목록
+//   정책상 명시적 동의는 불필요 — 닫아도 다음 런타임 프롬프트로 진행됨.
+// ══════════════════════════════════════════════════════════════
+var _LOC_DISC_KEY = 'gdm_loc_disclosed';
+
+function _locDisclosed(){
+  try { return localStorage.getItem(_LOC_DISC_KEY) === '1'; } catch(e){ return true; }
+}
+function _markLocDisclosed(){
+  try { localStorage.setItem(_LOC_DISC_KEY, '1'); } catch(e){}
+}
+
+function _showLocDisclosure(done){
+  if(document.getElementById('locDiscOv')){ return; }
+  var proceed = function(){
+    _markLocDisclosed();
+    var o = document.getElementById('locDiscOv'); if(o) o.remove();
+    try { if(typeof done === 'function') done(); } catch(e){}
+  };
+  var ov = document.createElement('div');
+  ov.id = 'locDiscOv';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.68);z-index:100001;display:flex;align-items:center;justify-content:center;padding:22px;';
+  ov.innerHTML =
+    '<div style="background:#fff;color:#1c1c1e;border-radius:18px;max-width:380px;width:100%;padding:24px 20px;box-shadow:0 12px 40px rgba(0,0,0,.35);">'
+    + '<div style="font-size:17px;font-weight:800;margin-bottom:14px;">📍 위치 정보 이용 안내</div>'
+    + '<div style="font-size:14px;line-height:1.75;margin-bottom:14px;">'
+      + '<b>길동무</b>는 앱이 <b>종료되었거나 사용 중이 아닐 때도</b> 위치 데이터를 수집하여 '
+      + '<b>하차역·환승역 도착 알림</b>과 <b>실시간 경로 안내</b> 기능을 지원합니다.'
+    + '</div>'
+    + '<div style="font-size:12.5px;line-height:1.7;color:#6b7280;margin-bottom:18px;">'
+      + '· 위치 정보는 경로 안내 목적으로만 이용하며 <b>서버에 저장하지 않습니다.</b><br>'
+      + '· 백그라운드 위치 이용은 <b>경로 안내를 시작한 경우에만</b> 작동하고, 안내를 종료하면 즉시 중단됩니다.<br>'
+      + '· 기기 설정에서 언제든지 위치 권한을 철회할 수 있습니다.'
+    + '</div>'
+    + '<button id="locDiscOk" style="width:100%;padding:13px;border-radius:11px;border:none;cursor:pointer;font-size:14.5px;font-weight:800;background:#0a84ff;color:#fff;font-family:inherit;">확인</button>'
+    + '<div style="text-align:center;margin-top:10px;"><a href="#" id="locDiscPolicy" style="font-size:12px;color:#0a84ff;text-decoration:none;">개인정보처리방침 보기</a></div>'
+    + '</div>';
+  document.body.appendChild(ov);
+  document.getElementById('locDiscOk').onclick = proceed;
+  ov.addEventListener('click', function(e){ if(e.target === ov) proceed(); });   // 닫아도 진행(정책 허용)
+  var pl = document.getElementById('locDiscPolicy');
+  if(pl) pl.onclick = function(e){
+    e.preventDefault();
+    try { if(typeof openPolicy === 'function') openPolicy('privacy'); } catch(e2){}
+  };
+}
+window._showLocDisclosure = _showLocDisclosure;
+
+// ── 모든 위치 요청을 감싸서, 최초 1회 공개 표시 후 진행 ──
+(function(){
+  try {
+    if(!navigator.geolocation) return;
+    var g = navigator.geolocation;
+    var _get = g.getCurrentPosition.bind(g);
+    var _watch = g.watchPosition.bind(g);
+
+    g.getCurrentPosition = function(ok, err, opt){
+      if(_locDisclosed()) return _get(ok, err, opt);
+      _showLocDisclosure(function(){ _get(ok, err, opt); });
+    };
+    g.watchPosition = function(ok, err, opt){
+      if(_locDisclosed()) return _watch(ok, err, opt);
+      // watchPosition은 즉시 id를 반환해야 하므로, 공개 후 실제 감시를 시작하고 id를 넘겨받음
+      var pending = { id: null, cleared: false };
+      _showLocDisclosure(function(){
+        if(pending.cleared) return;
+        pending.id = _watch(ok, err, opt);
+      });
+      return pending;   // clearWatch에서 객체도 처리 (아래 래핑)
+    };
+    var _clear = g.clearWatch.bind(g);
+    g.clearWatch = function(id){
+      if(id && typeof id === 'object'){ id.cleared = true; if(id.id != null) _clear(id.id); return; }
+      return _clear(id);
+    };
+  } catch(e){}
+})();
+
+
 // 오프라인 감지
 function updateOnlineStatus(){
   const b = document.getElementById('offlineBanner');
@@ -18428,7 +18510,8 @@ function _askBgPermOnce(){
   ov.innerHTML =
     '<div style="background:var(--card);border-radius:18px;max-width:360px;width:100%;padding:22px 20px;">'
     + '<div style="font-size:17px;font-weight:800;color:var(--text);margin-bottom:12px;">🔔 앱을 꺼도 도착 알림 받기</div>'
-    + '<div style="font-size:14px;color:var(--text);line-height:1.7;margin-bottom:8px;">앱을 닫아도 2정거장·1정거장 전에 알려드리려면 두 가지만 확인해주세요:</div>'
+    + '<div style="font-size:13.5px;color:var(--text);line-height:1.75;margin-bottom:10px;">길동무는 앱이 <b>종료되었거나 사용 중이 아닐 때도</b> 위치 데이터를 수집하여 <b>하차역·환승역 도착 알림</b>과 <b>실시간 경로 안내</b> 기능을 지원합니다.</div>'
+    + '<div style="font-size:13.5px;color:var(--text);line-height:1.7;margin-bottom:8px;">앱을 닫아도 2정거장·1정거장 전에 알려드리려면 두 가지만 확인해주세요:</div>'
     + '<div style="font-size:13px;color:var(--sub);line-height:1.9;margin-bottom:18px;">① 위치 권한을 <b style="color:var(--text);">항상 허용</b>으로<br>② 배터리 설정에서 이 앱 <b style="color:var(--text);">최적화 제외</b></div>'
     + '<button onclick="document.getElementById(\'bgPermOv\').remove()" style="width:100%;padding:13px;border-radius:11px;border:none;cursor:pointer;font-size:14px;font-weight:800;background:var(--gold);color:#121214;font-family:inherit;">알겠어요</button>'
     + '</div>';
