@@ -1119,6 +1119,21 @@ function _exitCancel(){
 // ══════════════════════════════════════════════════════════════
 // 카카오 키는 서버(Cloudflare Worker)로 이전 — 클라이언트에 노출하지 않음
 var _KAKAO_PROXY_BASE = 'https://gentle-lab-7e47subway-api.phg0643.workers.dev';
+// ★ 키를 클라이언트에 두지 않기 위한 공용 프록시 베이스 (Worker가 서버에서 키를 붙임)
+var _API_PROXY_BASE = _KAKAO_PROXY_BASE;
+// ODsay 경로탐색 프록시: qs에는 SX/SY/EX/EY/SearchType/SearchPathType만 (apiKey는 서버가 부착)
+function _odsayUrl(qs){
+  return _API_PROXY_BASE + '/odsay?' + qs;
+}
+// 공공데이터포털(TAGO) 프록시: path=엔드포인트경로, qs=serviceKey 제외한 쿼리
+function _tagoUrl(path, qs){
+  return _API_PROXY_BASE + '/tago?path=' + encodeURIComponent(path) + '&qs=' + encodeURIComponent(qs || '');
+}
+// 서울 열린데이터 실시간 프록시: path 예) 'realtimeStationArrival/0/5/서울역'
+function _seoulUrl(path){
+  return _API_PROXY_BASE + '/seoul?path=' + encodeURIComponent(path);
+}
+window._odsayUrl = _odsayUrl; window._tagoUrl = _tagoUrl; window._seoulUrl = _seoulUrl;
 // dapi.kakao.com/v2/local/* 프록시
 function _kakaoLocal(path, qs){
   return _fetchT(_KAKAO_PROXY_BASE + '/kakao-local?path=' + encodeURIComponent(path) + '&qs=' + encodeURIComponent(qs || ''), {}, 8000);
@@ -2623,7 +2638,7 @@ window._serverPostComment = _serverPostComment;
 // ══════════════════════════════════════════════════════════════
 // 🚌 버스 탭 (TAGO 공공데이터 API)
 // ══════════════════════════════════════════════════════════════
-var _BUS_TAGO_KEY = 'fbdaeef19e93c7490ee53f87ae076ba752ff4fb89183d1e34d9798306d7b652d';
+var _BUS_TAGO_KEY = '';   // ★ 키는 클라이언트에 두지 않음 — Worker /tago 가 서버에서 주입
 var _busStops     = [];    // 주변 정류장 목록
 var _busCache     = {};    // 정류장별 도착 정보 캐시
 var _busGpsLat    = null;
@@ -2706,7 +2721,7 @@ function _fetchBusArrival(cityCode, nodeId, callback) {
     '&nodeId=' + nodeId +
     '&_type=json';
 
-  var proxyUrl = _SERVER_URL + '/bus-proxy?url=' + encodeURIComponent(url);
+  var proxyUrl = _SERVER_URL + '/tago?url=' + encodeURIComponent(url);
 
   fetch(proxyUrl)
     .then(function(r) { return r.json(); })
@@ -2822,7 +2837,7 @@ function _renderBusStop(stop, arrivals) {
 // 🚌 버스 노선 추적 (전체 정류장 + 현재 버스 위치)
 // ════════════════════════════════════════════════════════════
 
-// TAGO 프록시 GET 헬퍼 (Worker /bus-proxy 우선, 실패 시 직접)
+// TAGO 프록시 GET 헬퍼 (Worker /tago 경유 — 서버가 serviceKey 주입)
 // ④ fetch 타임아웃 래퍼 (기본 8초) — 응답 지연 시 무한 스피너 방지
 function _fetchT(url, opts, ms){
   opts = opts || {};
@@ -2838,15 +2853,12 @@ function _fetchT(url, opts, ms){
 window._fetchT = _fetchT;
 
 function _busProxyGet(apiUrl, cb){
-  var proxyUrl = _SERVER_URL + '/bus-proxy?url=' + encodeURIComponent(apiUrl);
+  // 키는 서버(Worker /tago)가 주입하므로 직접 호출 폴백은 없음
+  var proxyUrl = _SERVER_URL + '/tago?url=' + encodeURIComponent(apiUrl);
   fetch(proxyUrl)
     .then(function(r){ return r.json(); })
     .then(function(d){ cb(null, d); })
-    .catch(function(){
-      fetch(apiUrl).then(function(r){ return r.json(); })
-        .then(function(d){ cb(null, d); })
-        .catch(function(e){ cb(e, null); });
-    });
+    .catch(function(e){ cb(e, null); });
 }
 
 function _busItems(data){
@@ -3272,7 +3284,7 @@ function _busStopSearchByName(q, callback) {
     '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY) +
     '&nodeNm=' + encodeURIComponent(q) +
     '&_type=json';
-  var proxyUrl = _SERVER_URL + '/bus-proxy?url=' + encodeURIComponent(url);
+  var proxyUrl = _SERVER_URL + '/tago?url=' + encodeURIComponent(url);
   fetch(proxyUrl)
     .then(function(r){ return r.json(); })
     .then(function(data){
@@ -4552,10 +4564,9 @@ function fmapDoRoute() {
       return;
     }
 
-    var odsayBase = 'https://api.odsay.com/v1/api/searchPubTransPathT'
-      + '?SX=' + start.lng + '&SY=' + start.lat
+    var odsayBase = _odsayUrl('SX=' + start.lng + '&SY=' + start.lat
       + '&EX=' + dest.lng  + '&EY=' + dest.lat
-      + '&SearchType=0&apiKey=' + encodeURIComponent('TIZm4dwMq1Uw4UgWJhhstA');
+      + '&SearchType=0');
 
     // 복합경로(0) + 지하철우선(1) + 버스우선(2) 동시 호출
     var urls = [
@@ -4917,12 +4928,9 @@ function _selectSubwayNearestRoute(){
 
   // 출발지 좌표로 직접 ODsay 지하철우선 요청
   // → ODsay가 출발지→역 접근을 버스(있으면)/도보로 자동 구성
-  var apiKey = 'TIZm4dwMq1Uw4UgWJhhstA';
-  var url = 'https://api.odsay.com/v1/api/searchPubTransPathT'
-    + '?SX=' + start.lng + '&SY=' + start.lat
+  var url = _odsayUrl('SX=' + start.lng + '&SY=' + start.lat
     + '&EX=' + dest.lng + '&EY=' + dest.lat
-    + '&SearchType=0&SearchPathType=1'  // 지하철 우선
-    + '&apiKey=' + encodeURIComponent(apiKey);
+    + '&SearchType=0&SearchPathType=1');   // 지하철 우선 (키는 서버가 부착)
 
   fetch(url).then(function(r){ return r.json(); }).then(function(odsayData){
     var paths = ((odsayData||{}).result||{}).path || [];
@@ -5051,10 +5059,9 @@ function _computeAccessLeg(data, start, dest, source){
     if(!board || board.lat==null) return;
     var boardLng = board.lon!=null?board.lon:board.lng;
     if(boardLng==null) return;
-    var url = 'https://api.odsay.com/v1/api/searchPubTransPathT'
-      + '?SX=' + start.lng + '&SY=' + start.lat
+    var url = _odsayUrl('SX=' + start.lng + '&SY=' + start.lat
       + '&EX=' + boardLng + '&EY=' + board.lat
-      + '&SearchType=0&SearchPathType=2&apiKey=' + encodeURIComponent('TIZm4dwMq1Uw4UgWJhhstA');
+      + '&SearchType=0&SearchPathType=2');
     var seq = (window._accessLegSeq = (window._accessLegSeq||0) + 1);
     fetch(url).then(function(r){ return r.json(); }).then(function(d){
       if(seq !== window._accessLegSeq) return;   // 더 최신 요청이 있으면 무시
@@ -7081,7 +7088,7 @@ function _loadMapBusArrival(stop, cardIdx) {
   var nodeId   = stop.nodeId   || stop.nodeid   || '';
   if(!nodeId) return;
 
-  var proxyUrl = _SERVER_URL + '/bus-proxy?url=' +
+  var proxyUrl = _SERVER_URL + '/tago?url=' +
     encodeURIComponent(
       'https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList' +
       '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY) +
@@ -11376,7 +11383,7 @@ var RT_API_KEY = (function(h){var s='';for(var i=0;i<h.length;i+=2)s+=String.fro
 var RT_API_BASE = 'https://swopenapi.seoul.go.kr/api/subway';
 
 // [2] 지하철역 최단 이동경로 (getShtrmPath) — dptreSttnNm/arvlStnNm 파라미터
-var ROUTE_API_KEY  = (function(h){var s='';for(var i=0;i<h.length;i+=2)s+=String.fromCharCode(parseInt(h.substr(i,2),16));return s;})('6857664971796a773834774e4b744b');
+var ROUTE_API_KEY  = '';   // ★ 서버(Worker)가 주입 — 클라이언트 미보관
 var ROUTE_API_BASE = 'https://swopenapi.seoul.go.kr/api/subway';
 
 /* ══ 노선 색상 ══ */
@@ -15999,37 +16006,9 @@ async function fetchRealtimeArrival(stnName, lineName) {
     }
   } catch(e){ /* 다음 단계 */ }
 
-  // 2순위: _SEOUL_KEYS_NET 로테이션 직접 호출
-  for(var ki=0;ki<_SEOUL_KEYS_NET.length;ki++){
-    try{
-      var url2=_buildUrl(_SEOUL_KEYS_NET[ki]);
-      var res2=await _fetchWithTimeout(url2,{},5000);
-      var raw2=await _safeParseResponse(res2,'SEOUL_KEY'+ki);
-      var items2=_parseSeoulResponse(raw2);
-      if(items2&&items2.length){
-        console.log('[API] 키'+ki+' 성공:',items2.length+'건');
-        return _filterByDirection(items2);
-      }
-    }catch(e){}
-  }
+  // (키 직접 호출·공개 프록시 경유 단계 제거 — 키 노출 방지. Worker가 키 로테이션 담당)
 
-  // 3순위: 프록시 로테이션 (_proxyIdx++ 순회)
-  var directUrl=_buildUrl(apiKey);
-  for(var pi=0;pi<_PROXY_LIST.length;pi++){
-    try{
-      var pUrl=_PROXY_LIST[(_proxyIdx+pi)%_PROXY_LIST.length](directUrl);
-      var res3=await _fetchWithTimeout(pUrl,{},7000);
-      var raw3=await _safeParseResponse(res3,'PROXY'+pi);
-      var items3=_parseSeoulResponse(raw3);
-      if(items3&&items3.length){
-        _proxyIdx=(_proxyIdx+pi+1)%_PROXY_LIST.length;
-        console.log('[API] 프록시'+pi+' 성공');
-        return _filterByDirection(items3);
-      }
-    }catch(e){}
-  }
-
-  // 4순위: 정적 시각표 fallback
+  // 2순위: 정적 시각표 fallback
   console.log('[API] 실시간 전부 실패 → 시각표 fallback ('+cleanName+')');
   return null;
 }
@@ -19055,7 +19034,7 @@ function _rebaseAllFromNow(nowMs) {
 
 // ── TAGO API 인천 실시간 도착정보 ───────────────────────────────────
 // ── TAGO API (국토교통부) — 전국 지하철 실시간 시간표 ──────────────
-var _TAGO_KEY = 'fbdaeef19e93c7490ee53f87ae076ba752ff4fb89183d1e34d9798306d7b652d';
+var _TAGO_KEY = '';       // ★ 키는 클라이언트에 두지 않음 — Worker /tago 가 서버에서 주입
 var _tagoCache     = {};  // 실시간 도착정보 캐시 (1분)
 var _tagoTTCache   = {};  // 시간표 캐시 (1시간)
 var _tagoEnabled   = true; // 실패 시 자동 비활성화
@@ -20786,25 +20765,13 @@ function _fetchViaProxy(urlStr, ms) {
 var _H=function(h){var s='';for(var i=0;i<h.length;i+=2)s+=String.fromCharCode(parseInt(h.substr(i,2),16));return s;};
 
 // _SEOUL_KEYS_NET[0] (최신 키)를 기본으로 사용, 실패 시 로테이션
-var apiKey = _H('757a596c51796a773130374f77675166'); // 최신 키 (2026/06/20)
+var apiKey = '';   // ★ 서버(Worker)가 주입 — 클라이언트 미보관 // (2026/06/20)
 // 상수화 (fetchRealtimeArrival 에서 RT_API_KEY 동의어로 사용)
 var RT_API_KEY  = apiKey;
 var RT_API_BASE = 'https://swopenapi.seoul.go.kr/api/subway';
 
 // [일괄 도착정보] + [열차 위치정보] 멀티 키 로테이션 (11개 전체)
-var _SEOUL_KEYS_NET = [
-  _H('757a596c51796a773130374f77675166'), // 2026/06/20 (최신)
-  _H('6d784a4364796a7739375a56646151'),   // 2026/06/16
-  _H('6857664971796a773834774e4b744b'),   // 2026/06/01
-  _H('696575486d796a7734376d6c656162'),   // 2026/06/01
-  _H('6c4857535a796a7733325755704647'),   // 2026/06/01
-  _H('746156434b796a7733306f776d4253'),   // 2026/06/01
-  _H('486c4f6850796a77313132436f636b62'), // 2026/05/29
-  _H('414b76594d796a7735344a654d4255'),   // 2026/05/20
-  _H('74495a4e49796a7735366a56436667'),   // 2026/05/20
-  _H('6967647456796a773731726a764a74'),   // 2026/05/20
-  _H('7261424c43796a7737394559616d73'),   // 2026/05/20
-];
+var _SEOUL_KEYS_NET = [];   // ★ 키는 서버(Worker)에서 관리 — 클라이언트 미보관
 var _skIdx=0;
 var SEOUL_API_BASE='https://swopenapi.seoul.go.kr/api/subway';
 
@@ -20819,43 +20786,16 @@ async function seoulFetch(path, timeoutMs) {
   if(spinner) spinner.style.display = 'block';
 
   try {
-    // 1순위: RT_API_KEY(apiKey) 직접 호출
-    var primaryUrl = SEOUL_API_BASE+'/'+apiKey+'/json/'+path;
+    // ★ Worker 경유 단일 경로 (서버가 키 주입 + 키 로테이션 수행)
+    //   클라이언트에 키를 두지 않고, 공개 CORS 프록시로 키가 새지 않도록 함
     try{
-      var res0=await _fetchWithTimeout(primaryUrl,{},timeoutMs);
-      var raw0=await _safeParseResponse(res0,'SEOUL_PRIMARY');
+      var res0=await _fetchWithTimeout(_seoulUrl(path),{},timeoutMs);
+      var raw0=await _safeParseResponse(res0,'SEOUL_PROXY');
       if(raw0){
         var code0=raw0.errorMessage&&raw0.errorMessage.code;
         if(!code0||code0==='INFO-000') return raw0;
       }
     }catch(e){}
-
-    // 2순위: _SEOUL_KEYS_NET 로테이션
-    for(var i=0;i<_SEOUL_KEYS_NET.length;i++){
-      var key=_SEOUL_KEYS_NET[(_skIdx+i)%_SEOUL_KEYS_NET.length];
-      var url=SEOUL_API_BASE+'/'+key+'/json/'+path;
-      try{
-        var res=await _fetchWithTimeout(url,{},timeoutMs);
-        var raw=await _safeParseResponse(res,'서울시'+i);
-        if(!raw) continue;
-        if(raw.errorMessage&&raw.errorMessage.code==='INFO-000'){
-          _skIdx=(_skIdx+i+1)%_SEOUL_KEYS_NET.length; return raw;
-        }
-        if(!raw.errorMessage){ _skIdx=(_skIdx+i+1)%_SEOUL_KEYS_NET.length; return raw; }
-      }catch(e){}
-    }
-
-    // 3순위: 프록시 로테이션
-    for(var pi=0;pi<_PROXY_LIST.length;pi++){
-      try{
-        var res2=await _fetchViaProxy(primaryUrl, timeoutMs+3000);
-        var raw2=await _safeParseResponse(res2,'proxy'+pi);
-        if(raw2){
-          var code2=raw2.errorMessage&&raw2.errorMessage.code;
-          if(!code2||code2==='INFO-000') return raw2;
-        }
-      }catch(e){}
-    }
 
     // 모든 경로 실패 → 정적 시각표 폴백 (정상 동작). 경고는 세션당 1회만
     if(!window._seoulFetchWarned){
@@ -28770,29 +28710,17 @@ async function _fetchPublicRouteTime(startStn, endStn) {
   }
 
   try {
-    var url = _buildRouteUrl(ROUTE_API_KEY);
-    console.log('[getShtrmPath] 요청:', startNm,'→',endNm, '기준:',_searchDt());
+    // ★ Worker 경유 (서버가 키 주입) — 클라이언트 키/공개프록시 사용 안 함
+    var _rpath = 'getShtrmPath/1/1/' + encodeURIComponent(startNm) + '/'
+               + encodeURIComponent(endNm) + '/' + encodeURIComponent(_searchDt());
+    var url = _seoulUrl(_rpath);
 
-    // 1순위: 직접 호출
     var res = await _fetchWithTimeout(url, {}, 6000);
-    var raw = await _safeParseResponse(res, 'ROUTE_DIRECT');
+    var raw = await _safeParseResponse(res, 'ROUTE_PROXY');
     var sec = _parseRouteApiResponse(raw);
-    if(sec > 0){ console.log('[getShtrmPath] 성공:', sec+'초'); return sec; }
+    if(sec > 0) return sec;
 
-    // 2순위: 프록시 로테이션 (_proxyIdx++ 순회)
-    for(var pi=0; pi<_PROXY_LIST.length; pi++){
-      try{
-        var pUrl = _PROXY_LIST[(_proxyIdx+pi)%_PROXY_LIST.length](url);
-        var res2 = await _fetchWithTimeout(pUrl,{},8000);
-        var raw2 = await _safeParseResponse(res2,'ROUTE_PROXY'+pi);
-        var sec2 = _parseRouteApiResponse(raw2);
-        if(sec2>0){
-          _proxyIdx=(_proxyIdx+pi+1)%_PROXY_LIST.length;
-          console.log('[getShtrmPath] 프록시'+pi+' 성공:',sec2+'초');
-          return sec2;
-        }
-      }catch(e){}
-    }
+    // (공개 프록시 경유 제거 — 키 노출 방지)
   }catch(e){ if(!window._shtrmWarned){ window._shtrmWarned=true; console.warn('[getShtrmPath] API 미응답 — 로컬 경로로 진행(정상)'); } }
   return 0;
 }
