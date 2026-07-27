@@ -2311,7 +2311,8 @@ function _renderHomeBriefLocal(fromName, toName, hour, congPct){
       ? '<p><b>' + _dateTxt + '</b> 기준, <b>' + fromName + '</b>에서 <b>' + toName + '</b>까지는 약 <b>' + (tmin||'?') + '분</b> 걸릴 것으로 보입니다.</p>'
       : '<p><b>' + _dateTxt + '</b> 기준으로 <b>' + fromName + '</b> 일대를 안내해 드리겠습니다.</p>';
     var _fc;
-    if(peak)                  _fc = '그 시간대는 ' + (_hol?'주말이지만 ':'') + '출퇴근 피크라 <b>' + congTxt + '</b> 수준의 혼잡이 예상됩니다. 여유 있게 출발하시길 권합니다.';
+    if(peak && congPct>=45)   _fc = '그 시간대는 ' + (_hol?'주말이지만 ':'') + '출퇴근 피크라 <b>' + congTxt + '</b> 수준의 혼잡이 예상됩니다. 여유 있게 출발하시길 권합니다.';
+    else if(peak)             _fc = '출퇴근 시간대이지만 <b>' + congTxt + '</b> 수준으로 비교적 여유로울 전망입니다.';
     else if(hour>=22||hour<6) _fc = '심야 시간대라 한산하겠지만, <b>막차 시간</b>을 꼭 확인하세요.';
     else if(_hol)             _fc = '주말·공휴일이라 평일보다 여유로울 전망입니다. 혼잡도는 <b>' + congTxt + '</b> 수준으로 예상됩니다.';
     else                      _fc = '해당 시간대 혼잡도는 <b>' + congTxt + '</b> 수준으로 예상됩니다. 무난하게 이동하실 수 있습니다.';
@@ -2476,7 +2477,11 @@ function _renderHomeConductorBrief(fromName, toName, hour, congPct, serverMsg){
       if(wF&&wT&&Math.abs(wF.temp-wT.temp)>=4) prep.push('출발지와 목적지 기온차가 크니 참고하세요');
       if(prep.length) ps.push(prep.join(', ') + '.');
       // 3) 교통상황 + 환승 안내
-      var t = '교통상황은 ' + (peak ? '출퇴근 피크로 다소 붐빕니다' : (hol ? '주말이라 여유로운 편입니다' : (congTxt==='원활' ? '원활한 편입니다' : (congTxt + '한 편입니다'))));
+      var _peakBusy = peak && congPct >= 45;   // 피크 '시간대'라도 실제 혼잡할 때만 붐빔으로 안내
+      var t = '교통상황은 ' + (
+        congPct >= 70 ? (_peakBusy ? '출퇴근 피크로 매우 붐빕니다' : '매우 혼잡한 편입니다') :
+        congPct >= 45 ? (_peakBusy ? '출퇴근 피크로 다소 붐빕니다' : '다소 혼잡한 편입니다') :
+        (hol ? '주말이라 여유로운 편입니다' : '원활한 편입니다'));
       if(rb && rb.segments && rb.segments.length>1){
         var _sg = rb.segments;
         var lead = '';
@@ -2524,7 +2529,7 @@ function _renderHomeConductorBrief(fromName, toName, hour, congPct, serverMsg){
       else if(mr>=40) prep2.push('비가 올 수 있어 우산을 준비하시면 좋습니다');
       if(wF){ if(wF.temp<=2) prep2.push('날이 매우 추우니 따뜻하게 입으세요'); else if(wF.temp<=8) prep2.push('쌀쌀하니 겉옷을 챙기세요'); else if(wF.temp>=28) prep2.push('덥습니다, 물 한 병 챙기시면 좋아요'); }
       if(prep2.length) ps.push(prep2.join(', ') + '.');
-      ps.push('현재 <b>' + esc(fromName) + '</b> 일대 교통은 ' + (peak?'피크로 다소 붐빕니다':(congTxt==='원활'?'원활합니다':(congTxt+'한 편입니다'))) + '. 목적지를 설정하시면 소요시간과 환승까지 상세히 안내해 드리겠습니다.');
+      ps.push('현재 <b>' + esc(fromName) + '</b> 일대 교통은 ' + (congPct>=70?(peak&&congPct>=45?'피크로 매우 붐빕니다':'매우 혼잡합니다'):congPct>=45?(peak?'피크로 다소 붐빕니다':'다소 혼잡합니다'):'원활합니다') + '. 목적지를 설정하시면 소요시간과 환승까지 상세히 안내해 드리겠습니다.');
     }
 
     // 5) 서버(AI) 코멘트 — 이모지 제거 후 결합
@@ -2962,18 +2967,27 @@ function _busItems(data){
 
 // ① 노선 전체 경유 정류장 목록
 function _fetchRouteStations(cityCode, routeId, cb){
-  var url = 'https://apis.data.go.kr/1613000/BusRouteInfoInqireService/getRouteAcctoThrghSttnList' +
-    '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY) +
-    '&cityCode=' + cityCode +
-    '&routeId='  + encodeURIComponent(routeId) +
-    '&numOfRows=300&pageNo=1&_type=json';
-  _busProxyGet(url, function(err, data){
-    if(err){ cb(err, []); return; }
-    var items = _busItems(data);
-    // nodeord 오름차순 정렬
+  // ★ 데이터 소스: TAGO API → 크롤링 완료된 D1 (Cloudflare Worker /bus-route-stops)
+  //   TAGO 쿼터 소모 없음. route_key = cityCode + '_' + routeId
+  var routeKey = String(cityCode) + '_' + String(routeId);
+  var url = _SERVER_URL + '/bus-route-stops?key=' + encodeURIComponent(routeKey);
+  fetch(url).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){
+    var rows = (d && d.stops) ? d.stops : [];
+    if(!rows.length){ cb(null, []); return; }
+    // D1 컬럼(seq,node_id,node_nm,lat,lng,updown) → 기존 호출부가 쓰는 TAGO 필드명으로 매핑
+    var items = rows.map(function(s){
+      return {
+        nodeord: s.seq,
+        nodeid:  s.node_id,
+        nodenm:  s.node_nm,
+        gpslati: s.lat,
+        gpslong: s.lng,
+        updowncd: s.updown
+      };
+    });
     items.sort(function(a,b){ return (parseInt(a.nodeord)||0) - (parseInt(b.nodeord)||0); });
     cb(null, items);
-  });
+  }).catch(function(e){ cb(e, []); });
 }
 
 // ② 노선별 현재 버스 위치 목록
@@ -26614,7 +26628,7 @@ window._getCommId = _getCommId;
 // ★ 약관 및 정책 모달 (스토어 심사 필수 고지)
 // ══════════════════════════════════════════════════════════════
 var _POLICY_UPDATED = '2026-07-26';
-var _POLICY_CONTACT = 'phg0643@naver.com';   // TODO: 실제 문의 이메일로 교체
+var _POLICY_CONTACT = 'phg0643@gmail.com';
 
 var _POLICY_DOCS = {
   privacy: {
