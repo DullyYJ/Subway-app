@@ -4592,6 +4592,12 @@ function fmapDoRoute() {
 
   // ── 위치 해석: STNDB 역명 → 기존좌표 → 카카오 키워드 ──
   function _resolve(q, existing, cb) {
+    // ★ '내 위치'는 절대 키워드 검색하지 않음 — GPS 좌표만 사용
+    if(q === '내 위치' || q === '내 위치 찾는 중...'){
+      if(existing && existing.lat && existing.lng){ cb(existing); return; }
+      if(window._lastGPSLat!=null && window._lastGPSLng!=null){ cb({type:'gps', name:'내 위치', lat:window._lastGPSLat, lng:window._lastGPSLng}); return; }
+      cb(null); return;
+    }
     // 이미 좌표 있고 이름 일치하면 그대로
     if(existing && existing.lat && existing.lng && existing.name === q) {
       cb(existing); return;
@@ -4605,14 +4611,25 @@ function fmapDoRoute() {
     }
     // 기존 좌표 있으면 사용
     if(existing && existing.lat && existing.lng) { cb(existing); return; }
-    // 카카오 키워드 검색
-    _kakaoLocal('search/keyword.json', 'query=' + encodeURIComponent(q) + '&size=1')
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      var doc = (d.documents || [])[0];
-      if(doc) cb({type:'address', name:q, lat:parseFloat(doc.y), lng:parseFloat(doc.x)});
-      else    cb(null);
-    }).catch(function(){ cb(null); });
+    // 카카오 키워드 검색 (현위치 바이어스 → 흔한 이름을 근처로 결정론적 해석)
+    var _bx=null,_by=null;
+    if(window._lastGPSLat!=null && window._lastGPSLng!=null){ _by=window._lastGPSLat; _bx=window._lastGPSLng; }
+    else if(_fmapStart && _fmapStart.lat && _fmapStart.lng){ _by=_fmapStart.lat; _bx=_fmapStart.lng; }
+    function _kwSearch(qs, next){
+      _kakaoLocal('search/keyword.json', qs)
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var doc = (d.documents || [])[0];
+        if(doc){ cb({type:'address', name:q, lat:parseFloat(doc.y), lng:parseFloat(doc.x)}); }
+        else if(next){ next(); } else { cb(null); }
+      }).catch(function(){ if(next){ next(); } else { cb(null); } });
+    }
+    var _kbase = 'query=' + encodeURIComponent(q) + '&size=1';
+    if(_bx!=null && _by!=null){
+      _kwSearch(_kbase + '&x=' + _bx + '&y=' + _by + '&radius=20000&sort=distance', function(){ _kwSearch(_kbase, null); });
+    } else {
+      _kwSearch(_kbase, null);
+    }
   }
 
   var _done = {s: false, d: false, start: null, dest: null};
@@ -4670,6 +4687,7 @@ function fmapDoRoute() {
 
     var _coordQs = 'SX=' + start.lng + '&SY=' + start.lat
       + '&EX=' + dest.lng  + '&EY=' + dest.lat;
+    console.log('[route-v2-req]', _coordQs, '|', start.name+'('+start.type+') → '+dest.name+'('+dest.type+')');
 
     // 자체 경로엔진(route-v2): 1회 호출로 3모드(minTime/minTransfer/minWalk) 반환
     var urls = [ _routeV2Url(_coordQs) ];
