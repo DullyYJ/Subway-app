@@ -1211,9 +1211,9 @@ function _exitCancel(){
 var _KAKAO_PROXY_BASE = 'https://gentle-lab-7e47subway-api.phg0643.workers.dev';
 // ★ 키를 클라이언트에 두지 않기 위한 공용 프록시 베이스 (Worker가 서버에서 키를 붙임)
 var _API_PROXY_BASE = _KAKAO_PROXY_BASE;
-// ODsay 경로탐색 프록시: qs에는 SX/SY/EX/EY/SearchType/SearchPathType만 (apiKey는 서버가 부착)
-function _odsayUrl(qs){
-  return _API_PROXY_BASE + '/odsay?' + qs;
+var _ROUTE_V2_BASE = 'https://route-v2.phg0643.workers.dev';
+function _routeV2Url(qs){
+  return _ROUTE_V2_BASE + '/route-v2-odsay?' + qs;
 }
 // 공공데이터포털(TAGO) 프록시: path=엔드포인트경로, qs=serviceKey 제외한 쿼리
 function _tagoUrl(path, qs){
@@ -1223,7 +1223,7 @@ function _tagoUrl(path, qs){
 function _seoulUrl(path){
   return _API_PROXY_BASE + '/seoul?path=' + encodeURIComponent(path);
 }
-window._odsayUrl = _odsayUrl; window._tagoUrl = _tagoUrl; window._seoulUrl = _seoulUrl;
+window._tagoUrl = _tagoUrl; window._seoulUrl = _seoulUrl;
 // dapi.kakao.com/v2/local/* 프록시
 function _kakaoLocal(path, qs){
   return _fetchT(_KAKAO_PROXY_BASE + '/kakao-local?path=' + encodeURIComponent(path) + '&qs=' + encodeURIComponent(qs || ''), {}, 8000);
@@ -3644,7 +3644,7 @@ function _renderKakaoTransitResult(data, startName, endName, cacheSource) {
   var hasBus    = sections.some(function(s){ return (s.transportation||{}).type === 2; });
   var typeLabel = hasSubway && hasBus ? '🚇+🚌 복합' : (hasBus ? '🚌 버스' : '🚇 지하철');
   var apiSource  = (data && data._source) || 'kakao';
-  var apiLabel   = apiSource === 'odsay' ? '🔄ODsay' : (apiSource === 'kakao' ? '🟡카카오' : '🌐실시간');
+  var apiLabel   = (apiSource === 'route-v2' || apiSource === 'v2_sub') ? '🧭길동무' : (apiSource === 'kakao' ? '🟡카카오' : (apiSource === 'bfs' ? '🚇지하철' : '🌐실시간'));
   var cacheLabel = cacheSource === 'memory' ? '⚡메모리캐시' : (cacheSource === 'd1' ? '💾서버캐시' : apiLabel);
 
   var html = '<div style="padding:14px 16px;border-bottom:1px solid var(--border);">' +
@@ -4668,16 +4668,11 @@ function fmapDoRoute() {
       return;
     }
 
-    var odsayBase = _odsayUrl('SX=' + start.lng + '&SY=' + start.lat
-      + '&EX=' + dest.lng  + '&EY=' + dest.lat
-      + '&SearchType=0');
+    var _coordQs = 'SX=' + start.lng + '&SY=' + start.lat
+      + '&EX=' + dest.lng  + '&EY=' + dest.lat;
 
-    // 복합경로(0) + 지하철우선(1) + 버스우선(2) 동시 호출
-    var urls = [
-      odsayBase + '&SearchPathType=0',  // 혼합
-      odsayBase + '&SearchPathType=1',  // 지하철우선
-      odsayBase + '&SearchPathType=2',  // 버스우선
-    ];
+    // 자체 경로엔진(route-v2): 1회 호출로 3모드(minTime/minTransfer/minWalk) 반환
+    var urls = [ _routeV2Url(_coordQs) ];
 
     Promise.all(urls.map(function(url) {
       return fetch(url).then(function(r){ return r.json(); }).catch(function(){ return null; });
@@ -4717,7 +4712,7 @@ function fmapDoRoute() {
       // 기본: 최단시간
       var fastRoute = _allRouteResults ? _allRouteResults.fast : null;
       var routeData = fastRoute ? { routes: [_convertSinglePathToRoute(fastRoute)] } : _convertODsayToRoutes(combinedData);
-      _renderTransitResultCard(routeData, start, dest, 'odsay');
+      _renderTransitResultCard(routeData, start, dest, 'route-v2');
 
       // ★ 미탑승 재동기화: 확정 경로였다면 같은 유형으로 다시 확정 (시각표만 다음 차편)
       if(window._relockAfterReroute){
@@ -5028,37 +5023,16 @@ function _selectSubwayNearestRoute(){
     return;
   }
 
-  toast('🚇 지하철 경로 검색 중...');
-
-  // 출발지 좌표로 직접 ODsay 지하철우선 요청
-  // → ODsay가 출발지→역 접근을 버스(있으면)/도보로 자동 구성
-  var url = _odsayUrl('SX=' + start.lng + '&SY=' + start.lat
-    + '&EX=' + dest.lng + '&EY=' + dest.lat
-    + '&SearchType=0&SearchPathType=1');   // 지하철 우선 (키는 서버가 부착)
-
-  fetch(url).then(function(r){ return r.json(); }).then(function(odsayData){
-    var paths = ((odsayData||{}).result||{}).path || [];
-    // 지하철 포함 경로만 필터
-    var subPaths = paths.filter(function(p){
-      return (p.subPath||[]).some(function(s){return s.trafficType===1;});
-    });
-    if(!subPaths.length){
-      toast('지하철로 가는 경로가 없어요.');
+  // route-v2가 이미 지하철 포함 경로(sub)를 계산해 둠 → 재요청 불필요
+  var sub = _allRouteResults && _allRouteResults.sub;
+  if(sub){
+    var routeObj = _convertSinglePathToRoute(sub);
+    if(routeObj && routeObj.sections && routeObj.sections.length){
+      _renderTransitResultCard({routes:[routeObj]}, start, dest, 'v2_sub');
       return;
     }
-    // 가장 빠른 지하철 경로 선택
-    subPaths.sort(function(a,b){ return ((a.info||{}).totalTime||999)-((b.info||{}).totalTime||999); });
-    var best = subPaths[0];
-    var routeObj = _convertSinglePathToRoute(best);
-    if(routeObj && routeObj.sections && routeObj.sections.length){
-      // ODsay가 출발지→역 접근(버스/도보)을 이미 포함하므로 그대로 표시
-      _renderTransitResultCard({routes:[routeObj]}, start, dest, 'odsay_sub');
-    } else {
-      toast('지하철 경로를 표시할 수 없어요.');
-    }
-  }).catch(function(e){
-    toast('지하철 경로 검색 실패: ' + (e&&e.message||''));
-  });
+  }
+  toast('지하철로 가는 경로가 없어요.');
 }
 window._selectSubwayNearestRoute = _selectSubwayNearestRoute;
 
@@ -5141,79 +5115,8 @@ window._convertODsayToRoutes = _convertODsayToRoutes;
 
 window.fmapDoRoute = fmapDoRoute;
 
-// ★ 접근 대안: 확정 경로의 첫 교통 지점까지 도보가 길면, 현위치→첫역을 ODsay 버스우선으로
-//   재조회해 '도보보다 빠른 접근 버스'가 있으면 window._accessLeg에 저장 (브리핑에서 안내)
-function _computeAccessLeg(data, start, dest, source){
-  try {
-    window._accessLeg = null;
-    var route = data && data.routes && data.routes[0];
-    if(!route || !start || start.lat==null || start.lng==null) return;
-    var secs = route.sections || [];
-    var firstTransit = null, walkMin = 0;
-    for(var i=0;i<secs.length;i++){
-      var tt = (secs[i].transportation||{}).type;
-      if(tt===3){ walkMin += Math.round((secs[i].duration||0)/60); continue; }  // 도보 누적
-      if(tt===1 || tt===2){ firstTransit = secs[i]; break; }
-    }
-    if(!firstTransit) return;
-    if((firstTransit.transportation||{}).type === 2) return;   // 첫 교통이 이미 버스면 접근 버스 불필요 (재렌더 루프 방지)
-    if(walkMin < 6) return;                                     // 접근 도보가 짧으면(걷는 게 나음) 스킵
-    var sl = ((firstTransit.passStopList||{}).stationList) || [];
-    var board = sl[0];
-    if(!board || board.lat==null) return;
-    var boardLng = board.lon!=null?board.lon:board.lng;
-    if(boardLng==null) return;
-    var url = _odsayUrl('SX=' + start.lng + '&SY=' + start.lat
-      + '&EX=' + boardLng + '&EY=' + board.lat
-      + '&SearchType=0&SearchPathType=2');
-    var seq = (window._accessLegSeq = (window._accessLegSeq||0) + 1);
-    fetch(url).then(function(r){ return r.json(); }).then(function(d){
-      if(seq !== window._accessLegSeq) return;   // 더 최신 요청이 있으면 무시
-      var paths = (d.result||{}).path || [];
-      if(!paths.length) return;
-      paths.sort(function(a,b){ return ((a.info||{}).totalTime||999) - ((b.info||{}).totalTime||999); });
-      var p = paths[0], info = p.info||{}, subs = p.subPath||[], busLeg = null;
-      for(var k=0;k<subs.length;k++){
-        if(subs[k].trafficType===2){ busLeg = subs[k]; break; }
-        if(subs[k].trafficType===1){ break; }   // 버스 전에 지하철이 나오면 접근 버스 아님
-      }
-      if(!busLeg) return;
-      var accMin = info.totalTime || 999;
-      if(accMin + 1 >= walkMin) return;          // 버스가 도보보다 확실히 빠르지 않으면 스킵
-
-      // ★ 접근 경로(현위치→첫역: 도보-버스-도보) 전체를 sections로 변환해 경로에 삽입
-      var accSections = subs.map(function(sp){
-        var ttype = sp.trafficType, lane = (sp.lane||[])[0]||{};
-        var stops = ((sp.passStopList||{}).stations||[]).map(function(s){
-          return { stationName: s.stationName||s.name||'', lat: s.y||s.lat||null, lon: s.x||s.lon||null };
-        });
-        return {
-          transportation: { type: ttype, name: ttype===1?(lane.name||lane.subwayCode||''):ttype===2?(lane.busNo||lane.busID||''):'도보' },
-          duration: (sp.sectionTime||0)*60, distance: sp.distance||0,
-          passStopList: stops.length ? { stationList: stops } : null
-        };
-      });
-      var origSecs = route.sections || [];
-      var idxFirst = origSecs.indexOf(firstTransit);
-      if(idxFirst < 0) return;
-      // 원래 총 소요시간(분) 보존
-      var origTotalMin = Math.round(((route.summary && route.summary.duration) || 0)/60);
-      // 접근경로(도보-버스-도보) 소요시간(분)
-      var accTotalMin = accMin;
-      route.sections = accSections.concat(origSecs.slice(idxFirst));   // 앞 도보 → (도보-버스-도보)로 교체
-      // ★ 총시간 = 원래 총시간 - 원래 접근도보 + 접근경로시간 (sections 합으로 덮지 않음: 지하철 duration 누락 방지)
-      var newTotalMin = Math.max(1, origTotalMin - walkMin + accTotalMin);
-      route.summary = route.summary || {};
-      route.summary.duration = newTotalMin * 60;
-
-      window._accessLeg = null;   // 텍스트 안내는 세그먼트로 통합 (경로/타임라인/브리핑 일원화)
-      // 접근 버스가 첫 교통이 되어 재렌더해도 위 조기 return으로 재요청 안 함 → 루프 없음
-      if(typeof _renderTransitResultCard==='function'){
-        _renderTransitResultCard(data, start, dest || _transitResultDest, source || 'odsay');
-      }
-    }).catch(function(){});
-  } catch(e){}
-}
+// 접근버스 보강: route-v2가 출발지→첫 정류장 접근을 경로에 이미 포함하므로 미사용
+function _computeAccessLeg(){ window._accessLeg = null; }
 window._computeAccessLeg = _computeAccessLeg;
 
 // ══════════════════════════════════════════════════════════════
