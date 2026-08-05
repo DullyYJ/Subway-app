@@ -3852,8 +3852,43 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
   // ── 포인트 목록 ──
   var allStops=[]; segs.forEach(function(sg){ if(sg.type!==3) allStops=allStops.concat(sg.stops); });
   var totalCnt=allStops.length;
-  var cumMs=(typeof getBaseTimeMs==='function')?getBaseTimeMs():Date.now();   // 기준시각 반영
-  var segMs=segs.map(function(sg){var t=cumMs;cumMs+=sg.dur*1000;return t;});
+  // ── 세그먼트 시작시각 계산 (기준시각 + 누적) ──
+  // ★ Bug2: 지하철 세그먼트는 승차역 도착시각 이후 '실제 다음 열차' 출발시각까지 대기 반영
+  //         (버스는 시각표가 없어 배차 추정만 가능 → 대기 미적용. _REAL_TT=서울1~9호선만 존재)
+  var _baseMs0=(typeof getBaseTimeMs==='function')?getBaseTimeMs():Date.now();
+  var _bd0=new Date(_baseMs0);
+  var _isWkTT=(_bd0.getDay()===0||_bd0.getDay()===6);
+  var MAX_TT_WAIT=30;   // 분: 이 이상 대기(막차 지남·데이터공백)면 시각표 미반영
+  // 세그먼트 상/하행 판정 (lineOrder RAW 순번 기준: 승차역 idx > 하차역 idx면 상행)
+  function _segDir(sg){
+    try{
+      if(typeof lineOrder==='undefined') return null;
+      var ord=lineOrder[sg.name]; if(!ord||sg.stops.length<2) return null;
+      var bn=_nm(sg.stops[0].stationName||''), an=_nm(sg.stops[sg.stops.length-1].stationName||'');
+      var bi=-1,ai=-1;
+      for(var q=0;q<ord.length;q++){ var on=_nm(ord[q].name); if(bi<0&&on===bn)bi=q; if(on===an)ai=q; }
+      if(bi<0||ai<0) return null;
+      return (ai<bi)?'상':'하';
+    }catch(e){ return null; }
+  }
+  var cumMs=_baseMs0;   // 기준시각 반영
+  var segMs=segs.map(function(sg){
+    var t=cumMs;   // 승차역/정류장 도착 시각
+    // ★ 지하철 세그먼트: 실제 시각표상 다음 열차까지 대기 후 승차
+    if(sg.type===1 && sg.stops.length && typeof _realNextDep==='function'){
+      try{
+        var _ad=new Date(t);
+        var _arrMin=_ad.getHours()*60+_ad.getMinutes();
+        var _nd=_realNextDep(sg.name, sg.stops[0].stationName, _segDir(sg), _arrMin, _isWkTT);
+        if(_nd!=null){
+          var _wait=_nd-_arrMin;
+          if(_wait>0 && _wait<=MAX_TT_WAIT){ t+=_wait*60000; }   // 다음 열차 출발까지 대기 반영
+        }
+      }catch(e){}
+    }
+    cumMs=t+sg.dur*1000;
+    return t;
+  });
   var gIdx=0;
 
   // 노선/번호 라벨: 지하철=노선명, 버스=숫자면 "N번"
