@@ -4836,15 +4836,16 @@ function _parseODsayAllOptions(odsayData) {
   // 지하철 포함 경로만 필터
   var subwayPaths = paths.filter(_hasSubway);
   var subFirst;
-  if(subwayPaths.length > 0){
+  // ★ 워커가 pathType:1로 '최근접 역 승차' 지하철 경로를 이미 계산해 보냄 → 그걸 최우선 사용
+  if(byType[1].length > 0){
+    subFirst = byType[1][0];
+  } else if(subwayPaths.length > 0){
     // ★ 가까운 역 우선, 단 같은 역(±500m)이면 '가장 빨리 닿는(버스 포함)' 경로 선택
     subFirst = subwayPaths.slice().sort(function(a,b){
       var ta=_accessTimeToFirstSub(a), tb=_accessTimeToFirstSub(b);
       if(Math.abs(ta-tb) > 60) return ta - tb;                        // 지하철 빨리 타는(버스 포함) 경로 우선
       return _distToFirstSub(a) - _distToFirstSub(b);                 // 비슷하면 가까운 역
     })[0];
-  } else if(byType[1].length > 0){
-    subFirst = byType[1][0];
   } else {
     // 지하철 포함 경로가 아예 없음 → null 표시 (탭에서 안내)
     subFirst = null;
