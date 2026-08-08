@@ -702,9 +702,13 @@ header h1 em{color:var(--gold);font-style:normal;}
 .lf-item.on .lf-name{color:var(--gold);}
 
 /* ── SHOP ── */
-.shop-hero{background:var(--shop-hero-bg,linear-gradient(135deg,#1a1208,#252010));border:1px solid var(--shop-hero-border,rgba(212,175,55,.2));border-radius:16px;padding:16px;display:flex;justify-content:space-between;align-items:center;}
+.shop-hero{background:var(--shop-hero-bg,linear-gradient(135deg,#1a1208,#252010));border:1px solid var(--shop-hero-border,rgba(212,175,55,.2));border-radius:14px;padding:9px 14px;display:flex;justify-content:space-between;align-items:center;}
 .shop-hero h2{font-size:14px;font-weight:900;color:var(--gold);}
 .shop-hero p{font-size:11px;color:var(--sub);margin-top:3px;}
+/* 쇼핑 카테고리 탭 — 파스텔 테마의 #gmBody button !important 를 이기도록 특이도↑ */
+#gmBody #shopCats{align-items:center;min-height:36px;}
+#gmBody #shopCats button.shop-cat-chip{flex:0 0 auto;height:30px;line-height:28px;padding:0 12px;border-radius:15px;font-size:12px;font-weight:700;white-space:nowrap;cursor:pointer;border:1px solid var(--border,#dce8f0) !important;background:var(--card2,#fff) !important;color:var(--text) !important;}
+#gmBody #shopCats button.shop-cat-chip.on{background:var(--orange,#ff6b35) !important;color:#fff !important;border-color:var(--orange,#ff6b35) !important;}
 .shop-timer{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--sub);padding:7px 10px;background:rgba(255,159,10,.08);border:1px solid rgba(255,159,10,.2);border-radius:10px;}
 .shop-timer b{color:var(--orange);font-size:13px;font-variant-numeric:tabular-nums;}
 .shop-sec{font-size:12px;color:var(--sub);font-weight:500;letter-spacing:.4px;margin:4px 0 8px;display:flex;justify-content:space-between;align-items:center;}
@@ -8478,7 +8482,7 @@ window.addEventListener('unhandledrejection', function(e) {
   </div>
   <div class="shop-hero">
     <div><h2>출퇴근 추천 쇼핑</h2><p>오늘의 추천 100선 🛍</p></div>
-    <span style="font-size:34px;">🛒</span>
+    <span style="font-size:26px;">🛒</span>
   </div>
 
   <!-- 카테고리(시트별) 탭 -->
@@ -26925,10 +26929,7 @@ function _renderShopCats(pick){
   host.innerHTML=tabs.map(function(o){
     var on=(o.c===_shopActiveCat);
     var emo=(o.c==='\uC804\uCCB4')?'\uD83D\uDECD\uFE0F':(SHOP_CAT_EMOJI[o.c]||'');
-    return '<button onclick="_shopSelCat(this.dataset.c)" data-c="'+o.c+'" '
-      +'style="flex:0 0 auto;padding:6px 12px;border-radius:16px;font-size:12px;font-weight:700;white-space:nowrap;cursor:pointer;'
-      +'border:1px solid '+(on?'var(--orange,#ff6b35)':'var(--line,rgba(150,150,150,.35))')+';'
-      +'background:'+(on?'var(--orange,#ff6b35)':'transparent')+';color:'+(on?'#fff':'var(--text)')+';">'
+    return '<button class="shop-cat-chip'+(on?' on':'')+'" onclick="_shopSelCat(this.dataset.c)" data-c="'+o.c+'">'
       +emo+' '+o.c+' <span style="opacity:.75;font-weight:600;">'+o.n+'</span></button>';
   }).join('');
 }
