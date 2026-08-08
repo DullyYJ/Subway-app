@@ -8486,7 +8486,7 @@ window.addEventListener('unhandledrejection', function(e) {
   </div>
 
   <!-- 카테고리(시트별) 탭 -->
-  <div class="prod-cats" id="shopCats" style="display:flex;gap:6px;overflow-x:auto;padding:2px 0 6px;margin-bottom:6px;-webkit-overflow-scrolling:touch;"></div>
+  <div class="prod-cats" id="shopCats" style="display:flex;gap:6px;overflow-x:auto;align-items:center;min-height:40px;padding:4px 0 8px;margin-bottom:4px;-webkit-overflow-scrolling:touch;"></div>
 
   <div class="shop-sec">
     <span id="shopCatLabel">지금 추천 아이템</span>
@@ -26929,8 +26929,11 @@ function _renderShopCats(pick){
   host.innerHTML=tabs.map(function(o){
     var on=(o.c===_shopActiveCat);
     var emo=(o.c==='\uC804\uCCB4')?'\uD83D\uDECD\uFE0F':(SHOP_CAT_EMOJI[o.c]||'');
-    return '<button class="shop-cat-chip'+(on?' on':'')+'" onclick="_shopSelCat(this.dataset.c)" data-c="'+o.c+'">'
-      +emo+' '+o.c+' <span style="opacity:.75;font-weight:600;">'+o.n+'</span></button>';
+    return '<span onclick="_shopSelCat(this.dataset.c)" data-c="'+o.c+'" '
+      +'style="display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;height:30px;line-height:1;padding:0 12px;border-radius:15px;font-size:12px;font-weight:700;white-space:nowrap;cursor:pointer;'
+      +'border:1px solid '+(on?'var(--orange,#f07830)':'rgba(140,140,140,.45)')+';'
+      +'background:'+(on?'var(--orange,#f07830)':'transparent')+';color:'+(on?'#fff':'var(--text,#1a2533)')+';">'
+      +emo+' '+o.c+'<b style="opacity:.7;font-weight:600;margin-left:2px;">'+o.n+'</b></span>';
   }).join('');
 }
 
