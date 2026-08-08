@@ -5647,7 +5647,7 @@ function _estimateTimeBasedPos(){
     var a = timed[j], b = timed[j+1];
     if(nowMin >= a.min && nowMin <= b.min){
       var span = (b.min - a.min) || 1;
-      var r = (nowMin - a.min) / span;
+      var r = _rtDwellRatio(nowMin - a.min, span, _rtDwellMin(a.nd || _transitNodeData[a.idx]));  // 미커버 노선 30초 정차 반영
       return {
         fromIdx: a.idx, toIdx: b.idx, ratio: r,
         curLat: a.lat + (b.lat - a.lat) * r,
@@ -5658,6 +5658,26 @@ function _estimateTimeBasedPos(){
   return null;
 }
 window._estimateTimeBasedPos = _estimateTimeBasedPos;
+
+// ── 실시간 위치 미커버 노선 정차(dwell) 모델 ─────────────────────
+//   실시간 열차위치 API가 없는 지하철 노선(인천1·2호선, 지방선 등)은 시각표+GPS로만
+//   위치를 그려서, 열차가 아직 역에 서 있는데 마커가 먼저 출발해 앞서가는 일이 있었음.
+//   → 역 도착 후 30초간은 출발역에 고정(정차)했다가 이후 다음 역으로 이동시킨다.
+//   실시간 커버 노선(서울1~9호선 등)은 API가 위치를 직접 보정하므로 정차 미적용.
+var _RT_NOCOVER_DWELL_MIN = 0.5;   // 30초
+function _rtDwellMin(nd){
+  if(!nd || !nd.isSub) return 0;
+  if(typeof _rtCovered==='function' && _rtCovered(nd.lineName||'')) return 0;  // 커버 노선=API 보정
+  return _RT_NOCOVER_DWELL_MIN;
+}
+// 경과분(elapsed)·구간분(span)·정차분(dwell) → 진행률. 정차 동안은 0(역에 고정), 이후 이동.
+function _rtDwellRatio(elapsedMin, spanMin, dwellMin){
+  if(!(spanMin>0)) spanMin=0.01;
+  if(dwellMin<=0) return Math.max(0, Math.min(1, elapsedMin/spanMin));
+  if(elapsedMin<=dwellMin) return 0;
+  var moveSpan=Math.max(spanMin-dwellMin, 0.01);
+  return Math.max(0, Math.min(1, (elapsedMin-dwellMin)/moveSpan));
+}
 
 // ── 실측 도착시간 보정 ──────────────────────────────
 // GPS로 정류장/역 통과가 확인되면 실제 시각을 기록하고,
@@ -5907,7 +5927,8 @@ function _estimateTimelinePos(){
     var a = timed[j], b = timed[j+1];
     if(nowMin >= a.min && nowMin <= b.min){
       var span = (b.min - a.min) || 1;
-      return { fromIdx: a.idx, toIdx: b.idx, ratio: (nowMin - a.min)/span };
+      var r = _rtDwellRatio(nowMin - a.min, span, _rtDwellMin(_transitNodeData[a.idx]));  // 미커버 노선 30초 정차 반영
+      return { fromIdx: a.idx, toIdx: b.idx, ratio: r };
     }
   }
   return null;
