@@ -3852,43 +3852,8 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
   // ── 포인트 목록 ──
   var allStops=[]; segs.forEach(function(sg){ if(sg.type!==3) allStops=allStops.concat(sg.stops); });
   var totalCnt=allStops.length;
-  // ── 세그먼트 시작시각 계산 (기준시각 + 누적) ──
-  // ★ Bug2: 지하철 세그먼트는 승차역 도착시각 이후 '실제 다음 열차' 출발시각까지 대기 반영
-  //         (버스는 시각표가 없어 배차 추정만 가능 → 대기 미적용. _REAL_TT=서울1~9호선만 존재)
-  var _baseMs0=(typeof getBaseTimeMs==='function')?getBaseTimeMs():Date.now();
-  var _bd0=new Date(_baseMs0);
-  var _isWkTT=(_bd0.getDay()===0||_bd0.getDay()===6);
-  var MAX_TT_WAIT=30;   // 분: 이 이상 대기(막차 지남·데이터공백)면 시각표 미반영
-  // 세그먼트 상/하행 판정 (lineOrder RAW 순번 기준: 승차역 idx > 하차역 idx면 상행)
-  function _segDir(sg){
-    try{
-      if(typeof lineOrder==='undefined') return null;
-      var ord=lineOrder[sg.name]; if(!ord||sg.stops.length<2) return null;
-      var bn=_nm(sg.stops[0].stationName||''), an=_nm(sg.stops[sg.stops.length-1].stationName||'');
-      var bi=-1,ai=-1;
-      for(var q=0;q<ord.length;q++){ var on=_nm(ord[q].name); if(bi<0&&on===bn)bi=q; if(on===an)ai=q; }
-      if(bi<0||ai<0) return null;
-      return (ai<bi)?'상':'하';
-    }catch(e){ return null; }
-  }
-  var cumMs=_baseMs0;   // 기준시각 반영
-  var segMs=segs.map(function(sg){
-    var t=cumMs;   // 승차역/정류장 도착 시각
-    // ★ 지하철 세그먼트: 실제 시각표상 다음 열차까지 대기 후 승차
-    if(sg.type===1 && sg.stops.length && typeof _realNextDep==='function'){
-      try{
-        var _ad=new Date(t);
-        var _arrMin=_ad.getHours()*60+_ad.getMinutes();
-        var _nd=_realNextDep(sg.name, sg.stops[0].stationName, _segDir(sg), _arrMin, _isWkTT);
-        if(_nd!=null){
-          var _wait=_nd-_arrMin;
-          if(_wait>0 && _wait<=MAX_TT_WAIT){ t+=_wait*60000; }   // 다음 열차 출발까지 대기 반영
-        }
-      }catch(e){}
-    }
-    cumMs=t+sg.dur*1000;
-    return t;
-  });
+  var cumMs=(typeof getBaseTimeMs==='function')?getBaseTimeMs():Date.now();   // 기준시각 반영
+  var segMs=segs.map(function(sg){var t=cumMs;cumMs+=sg.dur*1000;return t;});
   var gIdx=0;
 
   // 노선/번호 라벨: 지하철=노선명, 버스=숫자면 "N번"
@@ -5513,6 +5478,7 @@ function _startTransitGpsTracking(nodes) {
     window._hadValidTransitFix = false;
     window._reanchorAt = 0;
     _transitStartTime = Date.now();
+    try { if(typeof _rtReset==='function') _rtReset(); } catch(e){}   // 새 경로 → 실시간 편성추적 리셋
   } else {
     // 재렌더 직후: 기록해 둔 실제 통과시각 앵커를 다시 적용해 시각표(지연/다음열차 보정)를 유지
     try {
@@ -5743,6 +5709,142 @@ function _maybeRecordPass(idx, dist){
   _recalcArrivalsFrom(idx);
 }
 window._maybeRecordPass = _maybeRecordPass;
+
+// ═══════════════════════════════════════════════════════════════════
+// ★ 실시간 열차위치 보정 (서울 열린데이터광장 공공데이터) — GPS 대체/우선
+//   지하철 탑승 시 그 편성(trainNo)을 실시간 열차위치 API로 추적하고,
+//   백그라운드에서 GPS가 불안정/끊겨도 공공데이터 위치를 1순위 기준으로
+//   타임라인(_transitNodeData)을 보정한다. 서울 1~9호선 등 API 커버 노선만
+//   동작하고, 인천1·2호선 등 미커버 노선은 기존 시각표+GPS로 자동 폴백.
+//   조회는 워커 프록시(seoulFetch→_seoulUrl)로만 → SEOUL_KEYS 비노출.
+// ═══════════════════════════════════════════════════════════════════
+// lineName → subwayId(응답 필터용). 여기 없는 노선 = 미커버 → 보정 미동작(폴백)
+var _RT_LINE2ID = {
+  '1호선':'1001','2호선':'1002','3호선':'1003','4호선':'1004','5호선':'1005',
+  '6호선':'1006','7호선':'1007','8호선':'1008','9호선':'1009',
+  '경의중앙선':'1063','수인분당선':'1075','공항철도':'1065','경춘선':'1067',
+  '신분당선':'1077','우이신설선':'1092'
+};
+// realtimePosition 선명 파라미터(호출 선명이 lineName과 다른 노선 보정)
+var _RT_POSPARAM = { '경의중앙선':'경의중앙','수인분당선':'수인분당','공항철도':'공항철도','경춘선':'경춘','신분당선':'신분당','우이신설선':'우이신설' };
+function _rtLineId(ln){ return _RT_LINE2ID[ln] || null; }
+function _rtCovered(ln){ return !!_rtLineId(ln); }
+function _rtPosParam(ln){ return _RT_POSPARAM[ln] || ln; }
+function _rtNorm(s){ return (s||'').replace(/\(.*?\)/g,'').replace(/역$/,'').trim(); }
+
+window._rtTrain = null;          // { lineName, subwayId, trainNo, boardIdx, alightIdx, lastIdx, backCnt }
+window._rtFreshUntil = 0;        // 이 시각 이전엔 실시간 위치가 1순위(GPS보다 우선)
+
+// 현재/다음 지하철 구간을 _transitNodeData에서 뽑기(진행 이후 첫 미완료 지하철 leg)
+function _rtCurrentSubLeg(){
+  var nd=_transitNodeData; if(!nd || !nd.length) return null;
+  var prog=(window._gpsMaxIdx==null?-1:window._gpsMaxIdx);
+  var boardIdx=-1;
+  for(var i=0;i<nd.length;i++){
+    if(nd[i].isSub && !nd[i].isWalk){
+      if(i>=prog){ boardIdx=i; break; }
+      if(boardIdx<0) boardIdx=i;   // 이미 탑승한 구간이라도 최소 하나 확보
+    }
+  }
+  if(boardIdx<0) return null;
+  var ln=nd[boardIdx].lineName||'';
+  var alightIdx=boardIdx;
+  for(var j=boardIdx+1;j<nd.length;j++){
+    if(nd[j].isWalk) break;
+    if(nd[j].isSub && (nd[j].lineName||'')===ln){ alightIdx=j; } else break;
+  }
+  return { boardIdx:boardIdx, alightIdx:alightIdx, lineName:ln };
+}
+
+// 열차 현재역명(statnNm) → 우리 경로상의 노드 idx(같은 노선·경로 내만)
+function _rtNodeIdxByStn(statnNm, leg){
+  var nd=_transitNodeData, target=_rtNorm(statnNm);
+  var lo=Math.max(0, leg.boardIdx-1), hi=leg.alightIdx;
+  for(var i=lo;i<=hi;i++){
+    if(nd[i] && nd[i].isSub && (nd[i].lineName||'')===leg.lineName && _rtNorm(nd[i].name)===target) return i;
+  }
+  return -1;
+}
+
+function _rtReset(){ window._rtTrain=null; window._rtFreshUntil=0; window._rtLockTries=0; }
+window._rtReset=_rtReset;
+
+// 위치 리스트(우리 노선 열차만) — seoulFetch(워커 프록시) 사용
+async function _rtFetchPositions(leg){
+  var raw=await seoulFetch('realtimePosition/0/100/'+encodeURIComponent(_rtPosParam(leg.lineName)), 5000);
+  if(!raw) return null;
+  var items=raw.realtimePositionList; if(!items||!items.length) return null;
+  var sid=leg.subwayId;
+  return items.filter(function(t){ return !sid || (t.subwayId&&String(t.subwayId)===sid); });
+}
+
+// 탑승역 근처에서 우리 방향 열차의 편성(trainNo) 잠금
+async function _rtLock(leg){
+  var trains=await _rtFetchPositions(leg);
+  if(!trains) return false;
+  var cand=null, best=1e9;
+  for(var k=0;k<trains.length;k++){
+    var t=trains[k]; var idx=_rtNodeIdxByStn(t.statnNm, leg);
+    if(idx<0) continue;                    // 경로에 없는 역 = 반대방향/타경로
+    if(idx>leg.boardIdx+2) continue;       // 탑승역 근처(막 지난 열차 포함)만
+    var score=Math.abs(idx-leg.boardIdx);
+    if(score<best){ best=score; cand=t; }
+  }
+  if(!cand || !cand.trainNo) return false;
+  window._rtTrain={ lineName:leg.lineName, subwayId:leg.subwayId, trainNo:String(cand.trainNo),
+                    boardIdx:leg.boardIdx, alightIdx:leg.alightIdx, lastIdx:-1, backCnt:0 };
+  console.log('[RT열차] 편성 잠금:', cand.trainNo, '@', cand.statnNm, leg.lineName);
+  return true;
+}
+
+// 실시간 위치를 앵커로 타임라인 보정(GPS 통과와 동일 메커니즘, 더 자주·정확)
+function _rtApplyAnchor(nodeIdx, sttus){
+  var nd=_transitNodeData[nodeIdx]; if(!nd || nd._schedMin==null) return;
+  window._nodePassMs=window._nodePassMs||{};
+  window._nodePassMs[nodeIdx]=Date.now();
+  window._gpsMaxIdx=Math.max((window._gpsMaxIdx==null?-1:window._gpsMaxIdx), nodeIdx);
+  window._timeMaxIdx=Math.max((window._timeMaxIdx==null?-1:window._timeMaxIdx), nodeIdx);
+  window._hadValidTransitFix=true;
+  if(typeof _recalcArrivalsFrom==='function') _recalcArrivalsFrom(nodeIdx);
+  var toNd=_transitNodeData[Math.min(nodeIdx+1,_transitNodeData.length-1)]||nd;
+  var isDepart=(sttus==='2'||sttus==='3');   // 출발/전역출발이면 다음역으로 진행
+  if(typeof _placeGpsMarkerSmooth==='function') _placeGpsMarkerSmooth(nd, isDepart?toNd:nd, isDepart?0.15:0);
+  window._rtFreshUntil=Date.now()+45000;     // 45초간 실시간이 1순위
+  try {
+    var locCur=document.getElementById('transitLocCur'), locNext=document.getElementById('transitLocNext'), locEta=document.getElementById('transitLocEta');
+    if(locCur) locCur.textContent=nd.name||'';
+    if(locNext && toNd && toNd!==nd) locNext.textContent=toNd.name||'';
+    if(locEta && toNd && toNd.arrTime && typeof _arrTimeToMin==='function'){
+      var mm=_arrTimeToMin(toNd.arrTime);
+      if(mm!=null){ var now=new Date(); var nm=now.getHours()*60+now.getMinutes()+now.getSeconds()/60; var d=mm-nm; if(d<-720)d+=1440; if(d>=0) locEta.textContent='약 '+Math.round(d)+'분'; }
+    }
+  } catch(e){}
+}
+
+// 메인 폴: 커버 노선이면 잠금·추적·보정. 미커버/실패면 조용히 폴백.
+async function _rtPoll(){
+  try {
+    var card=document.getElementById('transitResultCard');
+    if(!card || card.style.display==='none') return;
+    var leg=_rtCurrentSubLeg();
+    if(!leg || !_rtCovered(leg.lineName)){ window._rtFreshUntil=0; return; }  // 미커버 → GPS/시각표
+    leg.subwayId=_rtLineId(leg.lineName);
+    var tr=window._rtTrain;
+    if(!tr || tr.lineName!==leg.lineName){ await _rtLock(leg); tr=window._rtTrain; if(!tr) return; }
+    var trains=await _rtFetchPositions(leg); if(!trains) return;
+    var me=null;
+    for(var i=0;i<trains.length;i++){ if(String(trains[i].trainNo)===tr.trainNo){ me=trains[i]; break; } }
+    if(!me){ window._rtTrain=null; return; }                 // 편성 사라짐 → 재잠금
+    var idx=_rtNodeIdxByStn(me.statnNm, leg);
+    if(idx<0){ tr.backCnt=(tr.backCnt||0)+1; if(tr.backCnt>=2) window._rtTrain=null; return; }
+    if(idx<tr.lastIdx){ tr.backCnt=(tr.backCnt||0)+1; if(tr.backCnt>=2){ window._rtTrain=null; return; } }
+    else { tr.backCnt=0; }
+    tr.lastIdx=idx;
+    _rtApplyAnchor(idx, String(me.trainSttus));
+    if(idx>=leg.alightIdx){ window._rtTrain=null; }          // 하차역 도달 → 다음 구간 재잠금
+  } catch(e){ /* 조용히 폴백 */ }
+}
+window._rtPoll=_rtPoll;
 
 // ★ 탑승 전 재동기화: 첫 열차를 놓쳤을 때 '현재 시각'이 아니라 '다음 열차 시각'으로 시각표를 맞춤
 function _resyncBoardToNextTrain(){
@@ -5988,6 +6090,11 @@ function _startTransitWatch(){
       try { navigator.geolocation.getCurrentPosition(_apply, function(){}, {enableHighAccuracy:true, maximumAge:5000, timeout:9000}); } catch(e){}
     }, 10000);
   }
+  // ★ 실시간 열차위치 폴링(15초): 지하철 탑승 중 공공데이터로 위치 보정 (백그라운드에서도 동작)
+  if(window._rtTrainInt == null){
+    window._rtTrainInt = setInterval(function(){ try { if(typeof _rtPoll==='function') _rtPoll(); } catch(e){} }, 15000);
+    setTimeout(function(){ try { if(typeof _rtPoll==='function') _rtPoll(); } catch(e){} }, 1200);
+  }
 }
 // ★ GPS 미확인 시 마커는 '그 자리 대기' — 시간표만으로는 절대 이동하지 않음.
 //   (마커 이동은 GPS 확인(_updateTransitGps)에서만. GPS가 다시 잡히면 자동 재개)
@@ -6000,6 +6107,8 @@ function _stopTransitWatch(){
   window._transitWatchId=null;
   if(window._transitTimeTickInt != null){ clearInterval(window._transitTimeTickInt); window._transitTimeTickInt = null; }
   if(window._transitGpsPollInt != null){ clearInterval(window._transitGpsPollInt); window._transitGpsPollInt = null; }
+  if(window._rtTrainInt != null){ clearInterval(window._rtTrainInt); window._rtTrainInt = null; }
+  try { if(typeof _rtReset==='function') _rtReset(); } catch(e){}
 }
 window._startTransitWatch=_startTransitWatch;
 window._stopTransitWatch=_stopTransitWatch;
@@ -6009,6 +6118,8 @@ function _updateTransitGps() {
   if(!card || card.style.display==='none') { clearInterval(_transitGpsTimer); return; }
   // ★ 예상 남은시간(시간 기반) 갱신 → 경로카드 헤더 + AI 승무원 반영
   try { _updateRouteRemaining(); } catch(e){}
+  // ★ 공공데이터 실시간 열차위치가 신선하면 그 위치가 1순위 — 백그라운드 GPS 창발/드리프트로 마커를 흔들지 않음
+  if(window._rtFreshUntil && Date.now() < window._rtFreshUntil) return;
   // ── GPS 좌표 취득 (여러 소스 순서대로 시도) ──
   var lat = null, lng = null, _gpsTs = 0;
   if(typeof S !== 'undefined' && S.lastGPSFix && S.lastGPSFix.lat) {
