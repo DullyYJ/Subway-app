@@ -4415,8 +4415,8 @@ function prefetchFoodForDest(){
     if(_foodCache[destStn] && Date.now()-_foodCache[destStn].ts < 10*60*1000) return;
     var c=(typeof _foodResolveCoord==='function') ? _foodResolveCoord(destStn) : null;
     if(!c) return;
-    if(typeof _fetchKakaoFood==='function') _fetchKakaoFood(destStn, c.lat, c.lng);
-    if(typeof _fetchPublicFood==='function') _fetchPublicFood(destStn, c.lat, c.lng);
+    // 맛집은 오프라인 CSV(STN_FOOD)만 사용 — 네트워크 프리페치 제거(좌표없는 항목이 목록을 덮어써 지도 미표시 방지)
+    if(typeof _foodFromStn==='function' && typeof _stnFoodLookup==='function' && _stnFoodLookup(destStn)){ _foodCache[destStn]={ts:Date.now(), data:(_stnFoodLookup(destStn)||[]).map(function(it){return {place_name:it.n,category_name:it.c,road_address_name:it.a||'',distance:it.d,x:String(it.lo),y:String(it.la),source:'local'};})}; }
   } catch(e){}
 }
 window.prefetchFoodForDest = prefetchFoodForDest;
