@@ -3711,29 +3711,19 @@ function _busItems(data){
   return items;
 }
 
-// ① 노선 전체 경유 정류장 목록
+// ① 노선 전체 경유 정류장 목록 (TAGO 경유정류소 API — Worker /tago가 serviceKey 주입)
 function _fetchRouteStations(cityCode, routeId, cb){
-  // ★ 데이터 소스: TAGO API → 크롤링 완료된 D1 (Cloudflare Worker /bus-route-stops)
-  //   TAGO 쿼터 소모 없음. route_key = cityCode + '_' + routeId
-  var routeKey = String(cityCode) + '_' + String(routeId);
-  var url = _SERVER_URL + '/bus-route-stops?key=' + encodeURIComponent(routeKey);
-  fetch(url).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){
-    var rows = (d && d.stops) ? d.stops : [];
-    if(!rows.length){ cb(null, []); return; }
-    // D1 컬럼(seq,node_id,node_nm,lat,lng,updown) → 기존 호출부가 쓰는 TAGO 필드명으로 매핑
-    var items = rows.map(function(s){
-      return {
-        nodeord: s.seq,
-        nodeid:  s.node_id,
-        nodenm:  s.node_nm,
-        gpslati: s.lat,
-        gpslong: s.lng,
-        updowncd: s.updown
-      };
-    });
+  var url = 'https://apis.data.go.kr/1613000/BusRouteInfoInqireService/getRouteAcctoThrghSttnList' +
+    '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY) +
+    '&cityCode=' + cityCode +
+    '&routeId='  + encodeURIComponent(routeId) +
+    '&numOfRows=300&pageNo=1&_type=json';
+  _busProxyGet(url, function(err, data){
+    if(err){ cb(err, []); return; }
+    var items = _busItems(data);   // nodeord/nodeid/nodenm/gpslati/gpslong/updowncd 그대로
     items.sort(function(a,b){ return (parseInt(a.nodeord)||0) - (parseInt(b.nodeord)||0); });
     cb(null, items);
-  }).catch(function(e){ cb(e, []); });
+  });
 }
 
 // ② 노선별 현재 버스 위치 목록
