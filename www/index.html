@@ -7938,11 +7938,14 @@ function _renderMapBusCard(stop, idx, mode, total) {
       ' <span class="bus-lm" style="font-size:11px;font-weight:700;color:var(--gold);white-space:nowrap;">' +
         (function(){ var c = (typeof _busLmCached === 'function') ? _busLmCached(nodeId) : undefined; return c ? '(' + _ltEsc(c) + ' 방향)' : ''; })() + '</span>' +
       '<button class="bus-alias-edit" title="이름 설정" style="background:none;border:none;cursor:pointer;font-size:12px;padding:0 3px;line-height:1;opacity:.55;">✏️</button>' +
+      '<button class="bus-map-btn" title="정류장 위치 지도" style="background:none;border:none;cursor:pointer;font-size:13px;padding:0 3px;line-height:1;opacity:.7;">🗺️</button>' +
       rightBtn + '</div>' +
     (dir ? '<div class="map-bus-stop-sub">' + _ltEsc(dir) + ' 방면</div>' : '') +
     '<div class="map-bus-row" style="color:var(--sub);font-size:13px;">도착 정보 불러오는 중...</div>';
   var eb = card.querySelector('.bus-alias-edit');
   if(eb) eb.addEventListener('click', function(ev){ ev.stopPropagation(); _busEditAlias(nodeId, name, mode); });
+  var mb = card.querySelector('.bus-map-btn');
+  if(mb) mb.addEventListener('click', function(ev){ ev.stopPropagation(); if(typeof _busShowMap==='function') _busShowMap(card, stop); });
   var fb = card.querySelector('.bus-fav-toggle');
   if(fb){
     // 길게눌러 순서변경(드래그)과 충돌하지 않도록 터치 시작도 차단
@@ -8012,6 +8015,92 @@ function _fetchBusNextStop(cityCode, routeId, curNodeId, cb){
 }
 window._fetchBusNextStop = _fetchBusNextStop;
 
+// ── 버스 도착 초단위 카운트다운 (깜박임 없이 제자리 갱신) ──
+var _BUSARR = {};   // elId -> {sec, at}
+function _busFmtCd(sec){
+  if(sec==null||isNaN(sec)) return '-';
+  sec=Math.round(sec);
+  if(sec<=0) return '곧 도착';
+  if(sec<60) return sec+'초';
+  var m=Math.floor(sec/60), s=sec%60;
+  return m+'분 '+(s<10?'0'+s:s)+'초';
+}
+function _busArrHtml(cardIdx, rid, slot, arr){
+  var id='busarr_'+cardIdx+'_'+rid+'_'+slot;
+  if(!arr) return slot===0 ? '<div class="kbus-arr kbus-none">도착정보 없음</div>' : '';
+  var cnt = arr.cnt>0 ? '<span class="kbus-cnt">'+arr.cnt+'번째전</span>' : '';
+  return '<div class="kbus-arr'+(arr.sec<=60?' soon':'')+'" id="'+id+'"><span class="kbus-time">'+_busFmtCd(arr.sec)+'</span>'+cnt+'</div>';
+}
+function _busArrReg(cardIdx, rid, slot, arr){
+  var id='busarr_'+cardIdx+'_'+rid+'_'+slot;
+  if(arr){ _BUSARR[id]={sec:arr.sec, at:Date.now()}; } else { delete _BUSARR[id]; }
+}
+function _busArrUpd(cardIdx, rid, slot, arr){
+  var id='busarr_'+cardIdx+'_'+rid+'_'+slot, el=document.getElementById(id);
+  if(!arr){ delete _BUSARR[id]; return; }
+  _BUSARR[id]={sec:arr.sec, at:Date.now()};
+  if(el){
+    var t=el.querySelector('.kbus-time'); if(t) t.textContent=_busFmtCd(arr.sec);
+    var c=el.querySelector('.kbus-cnt');
+    if(arr.cnt>0){ if(c){ c.textContent=arr.cnt+'번째전'; } else { el.insertAdjacentHTML('beforeend','<span class="kbus-cnt">'+arr.cnt+'번째전</span>'); } }
+    else if(c){ c.remove(); }
+    if(arr.sec<=60) el.classList.add('soon'); else el.classList.remove('soon');
+  }
+}
+if(!window._busCdTick){
+  window._busCdTick = setInterval(function(){
+    if(document.hidden) return;
+    var now=Date.now();
+    for(var id in _BUSARR){
+      var el=document.getElementById(id);
+      if(!el){ delete _BUSARR[id]; continue; }
+      var st=_BUSARR[id], rem=st.sec-(now-st.at)/1000;
+      var t=el.querySelector('.kbus-time'); if(t) t.textContent=_busFmtCd(rem);
+      if(rem<=60) el.classList.add('soon'); else el.classList.remove('soon');
+    }
+  }, 1000);
+}
+
+// ── 정류장 위치 지도 (맛집탭과 동일한 인앱 Leaflet 패널) ──
+var _busMapPanel=null,_busMapObj=null,_busMapForCard=null;
+function _busCloseMap(){
+  if(_busMapObj){ try{_busMapObj.remove();}catch(e){} _busMapObj=null; }
+  if(_busMapPanel && _busMapPanel.parentNode) _busMapPanel.parentNode.removeChild(_busMapPanel);
+  _busMapPanel=null; _busMapForCard=null;
+}
+window._busCloseMap=_busCloseMap;
+function _busShowMap(card, stop){
+  if(_busMapForCard===card && _busMapPanel){ _busCloseMap(); return; }
+  _busCloseMap();
+  if(typeof _foodMapCssInject==='function') _foodMapCssInject();
+  var la=parseFloat(stop.gpslati||stop.gpsLati||stop.lat), lo=parseFloat(stop.gpslong||stop.gpsLong||stop.lng);
+  var nm=stop.nodenm||stop.nodeName||stop.name||'정류장';
+  if(isNaN(la)||isNaN(lo)){ if(typeof toast==='function') toast('이 정류장은 위치 정보가 없어요'); return; }
+  var panel=document.createElement('div'); panel.className='food-map-panel';
+  panel.innerHTML='<div class="food-map-head"><b>'+_ltEsc(nm)+'</b>'
+    +'<span class="food-map-x" onclick="_busCloseMap()">\u2715</span></div>'
+    +'<div id="busMapCanvas" class="food-map-canvas"></div>'
+    +'<div class="food-map-foot">\uD83D\uDCCD '+_ltEsc(nm)+' \uc815\ub958\uc7a5 \uc704\uce58</div>';
+  card.parentNode.insertBefore(panel, card.nextSibling);
+  _busMapPanel=panel; _busMapForCard=card;
+  _ensureLeaflet(function(){
+    if(!_busMapPanel) return;
+    try{
+      var map=L.map('busMapCanvas',{zoomControl:true}); _busMapObj=map;
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'\u00a9 OpenStreetMap'}).addTo(map);
+      L.circleMarker([la,lo],{radius:9,color:'#fff',weight:2,fillColor:'#2b7cff',fillOpacity:1}).addTo(map).bindPopup(nm);
+      var pts=[[la,lo]];
+      var myLat=(typeof _busGpsLat!=='undefined'&&_busGpsLat)||(typeof S!=='undefined'&&S.lastGPSFix&&S.lastGPSFix.lat);
+      var myLng=(typeof _busGpsLng!=='undefined'&&_busGpsLng)||(typeof S!=='undefined'&&S.lastGPSFix&&S.lastGPSFix.lng);
+      if(myLat&&myLng){ L.circleMarker([myLat,myLng],{radius:7,color:'#fff',weight:2,fillColor:'#e8482e',fillOpacity:1}).addTo(map).bindPopup('\ub0b4 \uc704\uce58'); pts.push([myLat,myLng]); }
+      if(pts.length>1) map.fitBounds(pts,{padding:[40,40]}); else map.setView([la,lo],17);
+      setTimeout(function(){ try{map.invalidateSize();}catch(e){} },220);
+    }catch(e){}
+  });
+  setTimeout(function(){ try{panel.scrollIntoView({behavior:'smooth',block:'center'});}catch(e){} },120);
+}
+window._busShowMap=_busShowMap;
+
 function _loadMapBusArrival(stop, cardIdx) {
   var cityCode = stop.cityCode || stop.citycode || '25';
   var nodeId   = stop.nodeId   || stop.nodeid   || '';
@@ -8044,21 +8133,23 @@ function _loadMapBusArrival(stop, cardIdx) {
         });
       }
 
-      var busListEl = card.querySelector('.map-bus-stop-name').nextSibling ||
-                     card.querySelector('.map-bus-row');
-
-      // 기존 rows 제거 후 새로 렌더링
-      var rows = card.querySelectorAll('.map-bus-row');
-      rows.forEach(function(r) { r.remove(); });
+      // 초기 '불러오는 중' placeholder만 제거 (실제 도착행은 아래 reconcile에서 제자리 갱신)
+      var _ph = card.querySelector('.map-bus-row:not(.kbus-row)');
+      if(_ph) _ph.remove();
 
       if(!items.length) {
-        var empty = document.createElement('div');
-        empty.className = 'map-bus-row';
-        empty.style.cssText = 'color:var(--sub);font-size:12px;';
-        empty.textContent = '운행 정보 없음';
-        card.appendChild(empty);
+        card._busSig = null;
+        card.querySelectorAll('.kbus-row').forEach(function(r){ r.remove(); });
+        if(!card.querySelector('.kbus-empty-row')){
+          var empty = document.createElement('div');
+          empty.className = 'map-bus-row kbus-empty-row';
+          empty.style.cssText = 'color:var(--sub);font-size:12px;';
+          empty.textContent = '운행 정보 없음';
+          card.appendChild(empty);
+        }
         return;
       }
+      var _ce = card.querySelector('.kbus-empty-row, .kbus-err-row'); if(_ce) _ce.remove();
 
       // 같은 정류장·같은 노선은 한 칸으로 합치고, 도착시간 2개까지 표시
       var _tpOrder = function(tp){ tp = tp||'';
@@ -8086,62 +8177,74 @@ function _loadMapBusArrival(stop, cardIdx) {
         var aa=A.arrs.length?A.arrs[0].sec:99999, bb=B.arrs.length?B.arrs[0].sec:99999;
         return aa-bb;
       });
-      var _fmt = function(sec){ return sec>0 ? (sec<=60 ? '곧 도착' : Math.round(sec/60)+'분') : '-'; };
-      routes.slice(0, 12).forEach(function(g, i) {
-        var a = g.info;
-        var routeNo = a.routeno || a.routeNo || '-';
-        var routeId = a.routeid || a.routeId || '';
-        var routeTp = a.routetp || a.routeTp || '';
-        var numCls = _busNumClass ? _busNumClass(routeNo) : 'other';
-        var a1 = g.arrs[0], a2 = g.arrs[1];
+      var ridOf = function(g){ return String(g.info.routeid||g.info.routeId||g.info.routeno||g.info.routeNo||''); };
+      routes = routes.slice(0, 12);
+      var sig = routes.map(ridOf).slice().sort().join(',');
+      var sameSet = (card._busSig === sig) && (card.querySelectorAll('.kbus-row').length === routes.length);
 
-        var arr1 = a1
-          ? '<div class="kbus-arr' + (a1.sec<=60?' soon':'') + '">' + _fmt(a1.sec) + (a1.cnt>0 ? '<span class="kbus-cnt">' + a1.cnt + '번째전</span>' : '') + '</div>'
-          : '<div class="kbus-arr kbus-none">도착정보 없음</div>';
-        var arr2 = a2
-          ? '<div class="kbus-arr' + (a2.sec<=60?' soon':'') + '">' + _fmt(a2.sec) + (a2.cnt>0 ? '<span class="kbus-cnt">' + a2.cnt + '번째전</span>' : '') + '</div>'
-          : '';
+      if(sameSet){
+        // 같은 노선 구성 → 도착시간만 제자리 갱신 (깜박임 없음)
+        routes.forEach(function(g){
+          var rid=ridOf(g);
+          _busArrUpd(cardIdx, rid, 0, g.arrs[0]);
+          _busArrUpd(cardIdx, rid, 1, g.arrs[1]);
+        });
+      } else {
+        // 노선 구성이 바뀜 → 재구성
+        card.querySelectorAll('.kbus-row').forEach(function(r){ r.remove(); });
+        card._busSig = sig;
+        routes.forEach(function(g, i) {
+          var a = g.info;
+          var routeNo = a.routeno || a.routeNo || '-';
+          var routeId = a.routeid || a.routeId || '';
+          var routeTp = a.routetp || a.routeTp || '';
+          var rid = ridOf(g);
+          var numCls = _busNumClass ? _busNumClass(routeNo) : 'other';
+          _busArrReg(cardIdx, rid, 0, g.arrs[0]);
+          _busArrReg(cardIdx, rid, 1, g.arrs[1]);
 
-        var row = document.createElement('div');
-        row.className = 'map-bus-row kbus-row';
-        row.innerHTML =
-          '<div class="kbus-left">' +
-            '<div class="bus-num ' + numCls + '">' + _ltEsc(routeNo) + '</div>' +
-            '<div class="kbus-dir" id="busdir_' + cardIdx + '_' + i + '">방향 확인 중…</div>' +
-          '</div>' +
-          '<div class="kbus-arrs">' + arr1 + arr2 + '</div>' +
-          '<svg class="map-bus-bell" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>';
+          var row = document.createElement('div');
+          row.className = 'map-bus-row kbus-row';
+          row.setAttribute('data-rid', rid);
+          row.innerHTML =
+            '<div class="kbus-left">' +
+              '<div class="bus-num ' + numCls + '">' + _ltEsc(routeNo) + '</div>' +
+              '<div class="kbus-dir" id="busdir_' + cardIdx + '_' + i + '">방향 확인 중…</div>' +
+            '</div>' +
+            '<div class="kbus-arrs">' + _busArrHtml(cardIdx, rid, 0, g.arrs[0]) + _busArrHtml(cardIdx, rid, 1, g.arrs[1]) + '</div>' +
+            '<svg class="map-bus-bell" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>';
 
-        if(routeId){
-          row.style.cursor = 'pointer';
-          row.addEventListener('click', function(ev){
-            if(ev.target.closest && ev.target.closest('.map-bus-bell')) return;
-            openBusRoute(cityCode, routeId, routeNo, routeTp);
-          });
-        }
-        card.appendChild(row);
+          if(routeId){
+            row.style.cursor = 'pointer';
+            row.addEventListener('click', function(ev){
+              if(ev.target.closest && ev.target.closest('.map-bus-bell')) return;
+              openBusRoute(cityCode, routeId, routeNo, routeTp);
+            });
+          }
+          card.appendChild(row);
 
-        // 다음 정류장 방향 표시
-        (function(_cc, _rid, _nid, _did){
-          if(!_rid){ var e0=document.getElementById(_did); if(e0) e0.textContent=''; return; }
-          _fetchBusNextStop(_cc, _rid, _nid, function(next){
-            var el = document.getElementById(_did);
-            if(!el) return;
-            el.textContent = next ? ('→ ' + next + '방향') : '';
-          });
-        })(cityCode, routeId, nodeId, 'busdir_' + cardIdx + '_' + i);
-      });
+          (function(_cc, _rid, _nid, _did){
+            if(!_rid){ var e0=document.getElementById(_did); if(e0) e0.textContent=''; return; }
+            _fetchBusNextStop(_cc, _rid, _nid, function(next){
+              var el = document.getElementById(_did);
+              if(!el) return;
+              el.textContent = next ? ('→ ' + next + '방향') : '';
+            });
+          })(cityCode, routeId, nodeId, 'busdir_' + cardIdx + '_' + i);
+        });
+      }
     })
     .catch(function() {
       var card = document.getElementById('mapBusCard_' + cardIdx);
-      if(card) {
-        var rows = card.querySelectorAll('.map-bus-row');
-        rows.forEach(function(r) { r.remove(); });
-        var err = document.createElement('div');
-        err.className = 'map-bus-row';
-        err.style.cssText = 'color:var(--sub);font-size:12px;';
-        err.textContent = '정보 불러오기 실패';
-        card.appendChild(err);
+      if(card && !card.querySelector('.kbus-row')) {   // 이미 도착행이 있으면 유지(일시적 실패 시 깜박임 방지)
+        var _ph = card.querySelector('.map-bus-row:not(.kbus-row)'); if(_ph) _ph.remove();
+        if(!card.querySelector('.kbus-err-row')){
+          var err = document.createElement('div');
+          err.className = 'map-bus-row kbus-err-row';
+          err.style.cssText = 'color:var(--sub);font-size:12px;';
+          err.textContent = '정보 불러오기 실패';
+          card.appendChild(err);
+        }
       }
     });
 }
