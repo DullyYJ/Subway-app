@@ -2040,53 +2040,64 @@ function _foodCloseMap(){
   _foodMapPanel=null; _foodMapForCard=null;
 }
 window._foodCloseMap=_foodCloseMap;
+var _foodMapSeq=0;
 function _foodShowMap(card, p){
   if(_foodMapForCard===card && _foodMapPanel){ _foodCloseMap(); return; }   // 토글
   _foodCloseMap();
   _foodMapCssInject();
   var dLat=parseFloat(p.y), dLng=parseFloat(p.x);
-  if(isNaN(dLat)||isNaN(dLng)){ _openFoodLink(_naverMapWebUrl(p),'naver://search?query='+encodeURIComponent(p.place_name)); return; }
+  if(isNaN(dLat)||isNaN(dLng)){
+    if(_foodStnCoord){ dLat=_foodStnCoord.lat; dLng=_foodStnCoord.lng; }
+    else { if(typeof toast==='function') toast('위치 정보가 없어요'); return; }
+  }
   var stnNm=(_foodStnCoord&&_foodStnCoord.name)?_foodStnCoord.name:'';
+  var cid='foodMapCanvas_'+(++_foodMapSeq);
   var panel=document.createElement('div');
   panel.className='food-map-panel';
   panel.innerHTML='<div class="food-map-head"><b>'+_ltEsc(p.place_name)+'</b>'
-    +'<span class="food-map-dist">\uD83D\uDCCD '+_foodDist(p.distance)+'</span>'
-    +'<span class="food-map-x" onclick="_foodCloseMap()">\u2715</span></div>'
-    +'<div id="foodMapCanvas" class="food-map-canvas"></div>'
-    +'<div class="food-map-foot">\uD83D\uDEB6 '+(stnNm?(_ltEsc(stnNm)+'\uc5ed \u2192 '):'')+_ltEsc(p.place_name)+' \ub3c4\ubcf4 \uacbd\ub85c</div>';
+    +'<span class="food-map-dist">📍 '+_foodDist(p.distance)+'</span>'
+    +'<span class="food-map-x" onclick="_foodCloseMap()">✕</span></div>'
+    +'<div id="'+cid+'" class="food-map-canvas"></div>'
+    +'<div class="food-map-foot">🚶 '+(stnNm?(_ltEsc(stnNm)+'역 → '):'')+_ltEsc(p.place_name)+' 도보 경로</div>';
   card.parentNode.insertBefore(panel, card.nextSibling);
   _foodMapPanel=panel; _foodMapForCard=card;
-  _ensureLeaflet(function(){
-    if(!_foodMapPanel) return;
-    try{
-      var sLat=_foodStnCoord?_foodStnCoord.lat:dLat, sLng=_foodStnCoord?_foodStnCoord.lng:dLng;
-      var map=L.map('foodMapCanvas',{zoomControl:true});
-      _foodMapObj=map;
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'\u00a9 OpenStreetMap'}).addTo(map);
-      L.circleMarker([dLat,dLng],{radius:9,color:'#fff',weight:2,fillColor:'#e8482e',fillOpacity:1}).addTo(map).bindPopup(p.place_name);
-      var pts=[[dLat,dLng]];
-      if(_foodStnCoord){ L.circleMarker([sLat,sLng],{radius:9,color:'#fff',weight:2,fillColor:'#2b7cff',fillOpacity:1}).addTo(map).bindPopup((stnNm||'\ucd9c\ubc1c')+'\uc5ed'); pts.push([sLat,sLng]); }
-      if(pts.length>1){ map.fitBounds(pts,{padding:[40,40]}); } else { map.setView([dLat,dLng],17); }
-      if(_foodStnCoord){
-        var line=L.polyline([[sLat,sLng],[dLat,dLng]],{color:'#f07830',weight:4,opacity:.55,dashArray:'6,8'}).addTo(map);
-        fetch('https://router.project-osrm.org/route/v1/foot/'+sLng+','+sLat+';'+dLng+','+dLat+'?overview=full&geometries=geojson')
-          .then(function(r){ return r.ok?r.json():null; })
-          .then(function(d){
-            if(!_foodMapObj) return;
-            if(d&&d.routes&&d.routes[0]&&d.routes[0].geometry){
-              var cs=d.routes[0].geometry.coordinates.map(function(c){ return [c[1],c[0]]; });
-              try{ map.removeLayer(line); }catch(e){}
-              var rl=L.polyline(cs,{color:'#f07830',weight:5,opacity:.9}).addTo(map);
-              try{ map.fitBounds(rl.getBounds(),{padding:[40,40]}); }catch(e){}
-              var foot=panel.querySelector('.food-map-foot');
-              if(foot&&d.routes[0].distance){ foot.innerHTML+=' \u00b7 \uc57d '+Math.round(d.routes[0].distance)+'m'; }
-            }
-          }).catch(function(){});
-      }
-      setTimeout(function(){ try{ map.invalidateSize(); }catch(e){} },220);
-    }catch(e){}
-  });
-  setTimeout(function(){ try{ panel.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} },120);
+  setTimeout(function(){ try{ panel.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} },100);
+  // 레이아웃 확정 뒤 초기화(컨테이너 높이 0 경합 방지 → 일부만 뜨던 문제 해결)
+  requestAnimationFrame(function(){ setTimeout(function(){
+    if(_foodMapPanel!==panel) return;
+    _ensureLeaflet(function(){
+      if(_foodMapPanel!==panel) return;
+      var el=document.getElementById(cid); if(!el) return;
+      try{
+        var sLat=_foodStnCoord?_foodStnCoord.lat:dLat, sLng=_foodStnCoord?_foodStnCoord.lng:dLng;
+        var map=L.map(el,{zoomControl:true}); _foodMapObj=map;
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+        L.circleMarker([dLat,dLng],{radius:9,color:'#fff',weight:2,fillColor:'#e8482e',fillOpacity:1}).addTo(map).bindPopup(p.place_name);
+        var pts=[[dLat,dLng]];
+        var hasStn=_foodStnCoord && (sLat!==dLat||sLng!==dLng);
+        if(hasStn){ L.circleMarker([sLat,sLng],{radius:9,color:'#fff',weight:2,fillColor:'#2b7cff',fillOpacity:1}).addTo(map).bindPopup((stnNm||'출발')+'역'); pts.push([sLat,sLng]); }
+        if(pts.length>1){ map.fitBounds(pts,{padding:[40,40]}); } else { map.setView([dLat,dLng],17); }
+        var inval=function(){ try{map.invalidateSize();}catch(e){} };
+        inval(); setTimeout(inval,150); setTimeout(inval,400); setTimeout(inval,800);
+        if(hasStn){
+          var line=L.polyline([[sLat,sLng],[dLat,dLng]],{color:'#f07830',weight:4,opacity:.55,dashArray:'6,8'}).addTo(map);
+          fetch('https://router.project-osrm.org/route/v1/foot/'+sLng+','+sLat+';'+dLng+','+dLat+'?overview=full&geometries=geojson')
+            .then(function(r){ return r.ok?r.json():null; })
+            .then(function(d){
+              if(_foodMapObj!==map) return;
+              if(d&&d.routes&&d.routes[0]&&d.routes[0].geometry){
+                var cs=d.routes[0].geometry.coordinates.map(function(c){ return [c[1],c[0]]; });
+                try{ map.removeLayer(line); }catch(e){}
+                var rl=L.polyline(cs,{color:'#f07830',weight:5,opacity:.9}).addTo(map);
+                try{ map.fitBounds(rl.getBounds(),{padding:[40,40]}); }catch(e){}
+                var foot=panel.querySelector('.food-map-foot');
+                if(foot&&d.routes[0].distance){ foot.innerHTML+=' · 약 '+Math.round(d.routes[0].distance)+'m'; }
+              }
+            }).catch(function(){});
+        }
+      }catch(e){}
+    });
+  },0); });
 }
 window._foodShowMap=_foodShowMap;
 
@@ -5687,6 +5698,63 @@ function _showRouteConfirm(optName, onConfirm){
 window._showRouteConfirm = _showRouteConfirm;
 
 // 실제 경로 선택/렌더 (팝업 확인 후 호출)
+// ── 즐겨찾기 버스정류장 승차 (버스 경로 전용) ──
+// 출발지 반경 radiusM 내 즐겨찾기 정류장을 가까운 순으로 반환
+function _favStopsNear(lat, lng, radiusM){
+  var out=[];
+  (typeof _savedBusStops!=='undefined' ? _savedBusStops : []).forEach(function(sv){
+    var la=parseFloat(sv.gpslati||sv.gpsLati||sv.lat), lo=parseFloat(sv.gpslong||sv.gpsLong||sv.lng);
+    if(isNaN(la)||isNaN(lo)) return;
+    var d=haversineM(lat, lng, la, lo);
+    if(d<=radiusM) out.push({ nodenm:(sv.nodenm||sv.nodeName||sv.name||'즐겨찾기 정류장'), la:la, lo:lo, d:d, citycode:(sv.citycode||sv.cityCode), nodeid:(sv.nodeid||sv.nodeId) });
+  });
+  out.sort(function(a,b){ return a.d-b.d; });
+  return out;
+}
+// 일반 버스경로 렌더(폴백)
+function _renderNormalBus(){
+  if(!_allRouteResults){ toast('경로를 찾을 수 없습니다.'); return; }
+  var r=null;
+  try{ r=_convertSinglePathToRoute(_allRouteResults.bus); }catch(e){}
+  ['less','fast','sub'].forEach(function(t){
+    if(!(r&&r.sections&&r.sections.length)){ try{ r=_convertSinglePathToRoute(_allRouteResults[t]); }catch(e){} }
+  });
+  if(!(r&&r.sections&&r.sections.length)){ toast('버스 경로를 찾을 수 없습니다.'); return; }
+  _renderTransitResultCard({routes:[r]}, _transitResultStart, _transitResultDest, 'odsay_bus');
+}
+// 버스 탭: 500m 내 즐겨찾기 정류장에서 승차하는 경로 재탐색. 처리하면 true.
+function _selectBusFavRoute(){
+  var st=_transitResultStart, dst=_transitResultDest;
+  if(!st||!st.lat||!st.lng||!dst||!dst.lat||!dst.lng) return false;
+  var favs=_favStopsNear(st.lat, st.lng, 500);
+  if(!favs.length) return false;
+  var fav=favs[0], walkM=Math.round(fav.d);
+  var qs='SX='+fav.lo+'&SY='+fav.la+'&EX='+dst.lng+'&EY='+dst.lat;
+  toast('⭐'+fav.nodenm+'에서 승차 (도보 '+walkM+'m)');
+  fetch(_routeV2Url(qs)).then(function(r){ return r.json(); }).then(function(data){
+    var busPath=null;
+    try{
+      if(data&&data.result&&data.result.path){
+        var opts=_parseODsayAllOptions({result:{path:data.result.path}});
+        busPath = opts ? (opts.bus || opts.less || opts.fast) : null;
+      }
+    }catch(e){}
+    var routeObj=null;
+    if(busPath){ try{ routeObj=_convertSinglePathToRoute(busPath); }catch(e){} }
+    if(routeObj&&routeObj.sections&&routeObj.sections.length){
+      var favStart={ name:'⭐ '+fav.nodenm, lat:fav.la, lng:fav.lo, type:(st.type||1) };
+      _renderTransitResultCard({routes:[routeObj]}, favStart, dst, 'odsay_bus');
+      _transitResultStart = st;   // 전역 출발지는 실제 출발지로 복원(다른 탭 영향 방지)
+      var bx=document.getElementById('transitResultBox')||document.getElementById('transitDetailBox');
+    } else {
+      _renderNormalBus();
+    }
+    _highlightRouteTab('bus');
+  }).catch(function(){ _renderNormalBus(); _highlightRouteTab('bus'); });
+  return true;
+}
+window._selectBusFavRoute=_selectBusFavRoute;
+
 function _doSelectRouteOption(type) {
   if(!_allRouteResults) return;
 
@@ -5707,6 +5775,12 @@ function _doSelectRouteOption(type) {
     // 탭 UI만 즉시 활성화 (결과는 비동기로 채워짐)
     _highlightRouteTab('sub');
     return;
+  }
+
+  // 버스 탭 특별 처리: 출발지 500m 내 즐겨찾기 정류장이 있으면 그 정류장에서 승차하는 경로(조금 느려도)
+  if(type === 'bus'){
+    if(_selectBusFavRoute()){ _highlightRouteTab('bus'); return; }
+    // 즐겨찾기 없음/좌표없음 → 아래 일반 버스경로 로직으로 진행
   }
 
   // 1) 요청 타입 경로 우선 시도 (sub 외)
@@ -8069,6 +8143,7 @@ function _busCloseMap(){
   _busMapPanel=null; _busMapForCard=null;
 }
 window._busCloseMap=_busCloseMap;
+var _busMapSeq=0;
 function _busShowMap(card, stop){
   if(_busMapForCard===card && _busMapPanel){ _busCloseMap(); return; }
   _busCloseMap();
@@ -8076,28 +8151,34 @@ function _busShowMap(card, stop){
   var la=parseFloat(stop.gpslati||stop.gpsLati||stop.lat), lo=parseFloat(stop.gpslong||stop.gpsLong||stop.lng);
   var nm=stop.nodenm||stop.nodeName||stop.name||'정류장';
   if(isNaN(la)||isNaN(lo)){ if(typeof toast==='function') toast('이 정류장은 위치 정보가 없어요'); return; }
+  var cid='busMapCanvas_'+(++_busMapSeq);
   var panel=document.createElement('div'); panel.className='food-map-panel';
   panel.innerHTML='<div class="food-map-head"><b>'+_ltEsc(nm)+'</b>'
-    +'<span class="food-map-x" onclick="_busCloseMap()">\u2715</span></div>'
-    +'<div id="busMapCanvas" class="food-map-canvas"></div>'
-    +'<div class="food-map-foot">\uD83D\uDCCD '+_ltEsc(nm)+' \uc815\ub958\uc7a5 \uc704\uce58</div>';
+    +'<span class="food-map-x" onclick="_busCloseMap()">✕</span></div>'
+    +'<div id="'+cid+'" class="food-map-canvas"></div>'
+    +'<div class="food-map-foot">📍 '+_ltEsc(nm)+' 정류장 위치</div>';
   card.parentNode.insertBefore(panel, card.nextSibling);
   _busMapPanel=panel; _busMapForCard=card;
-  _ensureLeaflet(function(){
-    if(!_busMapPanel) return;
-    try{
-      var map=L.map('busMapCanvas',{zoomControl:true}); _busMapObj=map;
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'\u00a9 OpenStreetMap'}).addTo(map);
-      L.circleMarker([la,lo],{radius:9,color:'#fff',weight:2,fillColor:'#2b7cff',fillOpacity:1}).addTo(map).bindPopup(nm);
-      var pts=[[la,lo]];
-      var myLat=(typeof _busGpsLat!=='undefined'&&_busGpsLat)||(typeof S!=='undefined'&&S.lastGPSFix&&S.lastGPSFix.lat);
-      var myLng=(typeof _busGpsLng!=='undefined'&&_busGpsLng)||(typeof S!=='undefined'&&S.lastGPSFix&&S.lastGPSFix.lng);
-      if(myLat&&myLng){ L.circleMarker([myLat,myLng],{radius:7,color:'#fff',weight:2,fillColor:'#e8482e',fillOpacity:1}).addTo(map).bindPopup('\ub0b4 \uc704\uce58'); pts.push([myLat,myLng]); }
-      if(pts.length>1) map.fitBounds(pts,{padding:[40,40]}); else map.setView([la,lo],17);
-      setTimeout(function(){ try{map.invalidateSize();}catch(e){} },220);
-    }catch(e){}
-  });
-  setTimeout(function(){ try{panel.scrollIntoView({behavior:'smooth',block:'center'});}catch(e){} },120);
+  setTimeout(function(){ try{panel.scrollIntoView({behavior:'smooth',block:'center'});}catch(e){} },100);
+  requestAnimationFrame(function(){ setTimeout(function(){
+    if(_busMapPanel!==panel) return;
+    _ensureLeaflet(function(){
+      if(_busMapPanel!==panel) return;
+      var el=document.getElementById(cid); if(!el) return;
+      try{
+        var map=L.map(el,{zoomControl:true}); _busMapObj=map;
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+        L.circleMarker([la,lo],{radius:9,color:'#fff',weight:2,fillColor:'#2b7cff',fillOpacity:1}).addTo(map).bindPopup(nm);
+        var pts=[[la,lo]];
+        var myLat=(typeof _busGpsLat!=='undefined'&&_busGpsLat)||(typeof S!=='undefined'&&S.lastGPSFix&&S.lastGPSFix.lat);
+        var myLng=(typeof _busGpsLng!=='undefined'&&_busGpsLng)||(typeof S!=='undefined'&&S.lastGPSFix&&S.lastGPSFix.lng);
+        if(myLat&&myLng){ L.circleMarker([myLat,myLng],{radius:7,color:'#fff',weight:2,fillColor:'#e8482e',fillOpacity:1}).addTo(map).bindPopup('내 위치'); pts.push([myLat,myLng]); }
+        if(pts.length>1) map.fitBounds(pts,{padding:[40,40]}); else map.setView([la,lo],17);
+        var inval=function(){ try{map.invalidateSize();}catch(e){} };
+        inval(); setTimeout(inval,150); setTimeout(inval,400); setTimeout(inval,800);
+      }catch(e){}
+    });
+  },0); });
 }
 window._busShowMap=_busShowMap;
 
