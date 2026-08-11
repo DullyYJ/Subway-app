@@ -3845,7 +3845,7 @@ function _renderBusStop(stop, arrivals) {
     var row = ev.target.closest ? ev.target.closest('.bus-row-tap') : null;
     if(!row) return;
     if(ev.target.closest('.bus-bell')) return; // 벨은 별도 동작
-    openBusRoute(row.dataset.cc, row.dataset.rid, row.dataset.rno, row.dataset.rtp);
+    openBusRoute(row.dataset.cc, row.dataset.rid, row.dataset.rno, row.dataset.rtp, stop);
   });
   hdr.addEventListener('click', function(){
     busListDiv.style.display = busListDiv.style.display === 'none' ? 'block' : 'none';
@@ -3922,11 +3922,26 @@ function _fetchBusLocations(cityCode, routeId, cb){
 }
 
 // 버스 행 탭 → 노선 추적 모달 열기
-function openBusRoute(cityCode, routeId, routeNo, routeTp){
+function openBusRoute(cityCode, routeId, routeNo, routeTp, originStop){
   if(!routeId || routeId === 'undefined' || routeId === ''){
     if(typeof toast==='function') toast('이 버스는 노선 정보가 없어요');
     return;
   }
+  // ★ 어느 정류장에서 눌렀는지 기억 → 내 GPS가 아니라 '그 정류장' 기준으로 방향·순서 표시
+  window._brOrigin = null;
+  try{
+    if(originStop){
+      var _oid = String(originStop.nodeid || originStop.nodeId || originStop.arsId || '');
+      var _ola = parseFloat(originStop.gpslati || originStop.gpsLati || originStop.lat || originStop.la);
+      var _olo = parseFloat(originStop.gpslong || originStop.gpsLong || originStop.lng || originStop.lo);
+      window._brOrigin = {
+        id:  _oid,
+        nm:  String(originStop.nodenm || originStop.nodeName || originStop.name || ''),
+        lat: isNaN(_ola) ? null : _ola,
+        lng: isNaN(_olo) ? null : _olo
+      };
+    }
+  }catch(e){}
   var modal = document.getElementById('busRouteModal');
   var body  = document.getElementById('busRouteBody');
   var titleEl = document.getElementById('busRouteTitle');
@@ -3968,6 +3983,7 @@ function refreshBusRoute(){
 function closeBusRoute(){
   var modal = document.getElementById('busRouteModal');
   if(modal) modal.style.display = 'none';
+  window._brOrigin = null;   // 기준 정류장 해제 (다음에 열 때 잘못 적용 방지)
 }
 
 // ── 정류장 목록 + 버스 위치 (노선도 스타일 렌더) ──────────────
@@ -3998,20 +4014,59 @@ function _renderBusRoute(stations, buses){
     (busAtOrd[ord] = busAtOrd[ord] || []).push(b);
   });
 
-  // ★ 내 위치에서 가장 가까운 정류장
-  var myLat = (typeof _busGpsLat!=='undefined' && _busGpsLat) || (typeof S!=='undefined' && S.lastGPSFix && S.lastGPSFix.lat) || null;
-  var myLng = (typeof _busGpsLng!=='undefined' && _busGpsLng) || (typeof S!=='undefined' && S.lastGPSFix && S.lastGPSFix.lng) || null;
-  var myOrd = null, myBd = 1e18;
-  if(myLat && myLng && typeof haversineM==='function'){
-    stations.forEach(function(s){
-      var la=parseFloat(s.gpslati), ln=parseFloat(s.gpslong);
-      if(isNaN(la)||isNaN(ln)) return;
-      var d = haversineM(myLat, myLng, la, ln);
-      if(d < myBd){ myBd = d; myOrd = parseInt(s.nodeord)||0; }
-    });
+  // ★ 기준 정류장 = 눌러서 들어온 그 정류장 (없을 때만 내 GPS 위치)
+  var org = window._brOrigin || null;
+  var myOrd = null, myBd = 1e18, anchorNm = '', anchorIsStop = false;
+
+  if(org){
+    // ①-a 정류장 ID로 정확히 매칭 (같은 이름이 상·하행 양쪽에 있어도 올바른 쪽을 잡음)
+    if(org.id){
+      for(var i0=0; i0<stations.length; i0++){
+        var sid = String(stations[i0].nodeid || stations[i0].nodeno || '');
+        if(sid && sid === org.id){ myOrd = parseInt(stations[i0].nodeord)||0; break; }
+      }
+    }
+    // ①-b 좌표로 최근접 매칭
+    if(myOrd == null && org.lat != null && org.lng != null && typeof haversineM==='function'){
+      stations.forEach(function(s){
+        var la=parseFloat(s.gpslati), ln=parseFloat(s.gpslong);
+        if(isNaN(la)||isNaN(ln)) return;
+        var d = haversineM(org.lat, org.lng, la, ln);
+        if(d < myBd){ myBd = d; myOrd = parseInt(s.nodeord)||0; }
+      });
+      if(myBd > 300) myOrd = null;   // 너무 멀면 이 노선의 정류장이 아님
+    }
+    // ①-c 이름으로 매칭
+    if(myOrd == null && org.nm){
+      var onm = org.nm.replace(/\s/g,'');
+      for(var i1=0; i1<stations.length; i1++){
+        if(String(stations[i1].nodenm||'').replace(/\s/g,'') === onm){
+          myOrd = parseInt(stations[i1].nodeord)||0; break;
+        }
+      }
+    }
+    if(myOrd != null){ anchorNm = org.nm || ''; anchorIsStop = true; }
   }
-  // ★ 내 정류장으로 접근 중인 가장 가까운 버스
+
+  // ② 기준 정류장을 못 찾은 경우에만 내 GPS 위치 사용
+  if(myOrd == null){
+    var myLat = (typeof _busGpsLat!=='undefined' && _busGpsLat) || (typeof S!=='undefined' && S.lastGPSFix && S.lastGPSFix.lat) || null;
+    var myLng = (typeof _busGpsLng!=='undefined' && _busGpsLng) || (typeof S!=='undefined' && S.lastGPSFix && S.lastGPSFix.lng) || null;
+    myBd = 1e18;
+    if(myLat && myLng && typeof haversineM==='function'){
+      stations.forEach(function(s){
+        var la=parseFloat(s.gpslati), ln=parseFloat(s.gpslong);
+        if(isNaN(la)||isNaN(ln)) return;
+        var d = haversineM(myLat, myLng, la, ln);
+        if(d < myBd){ myBd = d; myOrd = parseInt(s.nodeord)||0; }
+      });
+      // 노선에서 800m 이상 떨어져 있으면 이 노선과 무관 → 내 위치 마커 표시 안 함
+      if(myBd > 800) myOrd = null;
+    }
+  }
+  // ★ 기준 정류장으로 접근 중인 가장 가까운 버스
   var myEtaTxt = '', myEtaMin = null;
+  var anchorLabel = anchorIsStop ? ('🚏 ' + (anchorNm || '이 정류장')) : '📍 내 위치';
   if(myOrd != null){
     var approaching = buses.filter(function(b){ return (parseInt(b.nodeord)||0) <= myOrd; })
       .sort(function(a,b){ return (parseInt(b.nodeord)||0) - (parseInt(a.nodeord)||0); })[0];
@@ -4034,15 +4089,37 @@ function _renderBusRoute(stations, buses){
     cur.items.push({ s: s, idx: idx });
   });
 
+  // ★ 기준 정류장이 속한 구간의 방향 (상행/하행) 및 그 방향의 종점
+  var myDirTxt = '', myDirEnd = '', myDirCls = '';
+  if(myOrd != null){
+    var mine = null;
+    for(var im=0; im<stations.length; im++){
+      if((parseInt(stations[im].nodeord)||0) === myOrd){ mine = stations[im]; break; }
+    }
+    if(mine){
+      myDirCls = _brDirCls(mine.updowncd);
+      myDirTxt = (myDirCls==='up' ? '상행' : (myDirCls==='down' ? '하행' : ''));
+      // 같은 방향 구간의 마지막 정류장 = 이 정류장에서 가는 방면
+      for(var ie=stations.length-1; ie>=0; ie--){
+        if(_brDirCls(stations[ie].updowncd) === myDirCls){ myDirEnd = stations[ie].nodenm || ''; break; }
+      }
+    }
+  }
+
   var html = '';
   // 상단 요약 (방향 · 운행 대수)
   var runN = buses.length;
   html += '<div class="brs-top">'
-        +   '<div class="brs-route-dir"><b>' + _ltEsc(firstNm) + '</b><span class="brs-arrow">→</span><b>' + _ltEsc(lastNm) + '</b></div>'
+        +   (anchorIsStop && myDirEnd
+              ? '<div class="brs-route-dir"><b>' + _ltEsc(anchorNm) + '</b><span class="brs-arrow">→</span><b>'
+                + _ltEsc(myDirEnd) + '</b> 방면'
+                + (myDirTxt ? '<span class="brs-dirtag brs-dirtag-' + myDirCls + '">' + myDirTxt + '</span>' : '')
+                + '</div>'
+              : '<div class="brs-route-dir"><b>' + _ltEsc(firstNm) + '</b><span class="brs-arrow">→</span><b>' + _ltEsc(lastNm) + '</b></div>')
         +   '<div class="brs-top-meta">'
         +     '<span class="brs-chip ' + (runN ? 'on' : '') + '">🚌 운행 ' + runN + '대</span>'
         +     '<span class="brs-chip">정류장 ' + stations.length + '개</span>'
-        +     (myEtaTxt ? '<span class="brs-chip me">📍 ' + _ltEsc(myEtaTxt) + '</span>' : '')
+        +     (myEtaTxt ? '<span class="brs-chip me">' + _ltEsc(anchorLabel) + ' · ' + _ltEsc(myEtaTxt) + '</span>' : '')
         +   '</div>'
         + '</div>';
 
@@ -4071,7 +4148,7 @@ function _renderBusRoute(stations, buses){
 
       var mark = '<span class="brs-dot"></span>';
       if(here)        mark = '<span class="brs-bus">🚌</span>';
-      else if(isMine) mark = '<span class="brs-me">📍</span>';
+      else if(isMine) mark = '<span class="brs-me">' + (anchorIsStop ? '🚏' : '📍') + '</span>';
 
       var note = '';
       if(here){
@@ -4079,7 +4156,8 @@ function _renderBusRoute(stations, buses){
         note += '<div class="brs-note bus">🚌 ' + (vno ? _ltEsc(vno) : '버스 도착') + '</div>';
       }
       if(isMine){
-        note += '<div class="brs-note me">📍 내 위치' + (myEtaTxt ? ' · ' + _ltEsc(myEtaTxt) : '') + '</div>';
+        note += '<div class="brs-note me">' + _ltEsc(anchorLabel) + ' 승차'
+              + (myEtaTxt ? ' · ' + _ltEsc(myEtaTxt) : '') + '</div>';
       }
 
       html += '<div class="brs-row' + (here?' brs-here':'') + (isMine?' brs-mine':'') + '" onclick="_brStopMap(this,' + o.idx + ')">'
@@ -8697,7 +8775,7 @@ function _loadMapBusArrival(stop, cardIdx) {
             row.style.cursor = 'pointer';
             row.addEventListener('click', function(ev){
               if(ev.target.closest && ev.target.closest('.map-bus-bell')) return;
-              openBusRoute(cityCode, routeId, routeNo, routeTp);
+              openBusRoute(cityCode, routeId, routeNo, routeTp, stop);
             });
           }
           card.appendChild(row);
@@ -32495,6 +32573,10 @@ document.addEventListener('DOMContentLoaded', function() {
   font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .brs-route-dir b{font-weight:800;overflow:hidden;text-overflow:ellipsis;}
 .brs-arrow{color:var(--sub);font-weight:700;flex-shrink:0;}
+.brs-dirtag{margin-left:auto;flex-shrink:0;font-size:11px;font-weight:800;padding:2px 8px;border-radius:20px;}
+.brs-dirtag-up{background:rgba(0,179,65,.14);color:#00b341;}
+.brs-dirtag-down{background:rgba(255,159,10,.16);color:#ff9f0a;}
+.brs-dirtag-na{background:rgba(47,124,246,.14);color:#2f7cf6;}
 .brs-top-meta{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
 .brs-chip{font-size:11.5px;font-weight:700;padding:4px 9px;border-radius:20px;
   background:var(--card2);color:var(--sub);border:1px solid var(--border);}
