@@ -4600,7 +4600,31 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
   var allStops=[]; segs.forEach(function(sg){ if(sg.type!==3) allStops=allStops.concat(sg.stops); });
   var totalCnt=allStops.length;
   var cumMs=(typeof getBaseTimeMs==='function')?getBaseTimeMs():Date.now();   // 기준시각 반영
-  var segMs=segs.map(function(sg){var t=cumMs;cumMs+=sg.dur*1000;return t;});
+  // ★ 지하철 세그먼트: 승차역 도착시각 기준 '다음 열차 출발시각'까지 대기 반영(Bug2)
+  //    시각표 미보유·막차 지남·대기 30분 초과 시에는 기존 방식(즉시 탑승) 유지
+  var _ttWaitTotal=0;
+  var segMs=segs.map(function(sg){
+    var t=cumMs;
+    if(sg.type===1 && sg.stops && sg.stops.length && typeof _ttNextDepForSeg==='function'){
+      try{
+        var _d=new Date(t);
+        var _bm=_d.getHours()*60+_d.getMinutes();
+        var _dep=_ttNextDepForSeg(sg,_bm);
+        if(_dep!=null){
+          var _w=_dep-_bm; if(_w<0) _w+=1440;
+          if(_w>0 && _w<=_TT_MAX_WAIT){
+            var _nd=new Date(t); _nd.setSeconds(0,0);
+            _nd.setMinutes(_nd.getMinutes()+_w);
+            t=_nd.getTime(); _ttWaitTotal+=_w;
+          }
+        }
+      }catch(e){}
+    }
+    cumMs=t+sg.dur*1000;
+    return t;
+  });
+  window._htlWaitMin=_ttWaitTotal;
+  if(typeof _htlTagoWarm==='function') setTimeout(function(){ _htlTagoWarm(segs); }, 300);
   var gIdx=0;
 
   // 노선/번호 라벨: 지하철=노선명, 버스=숫자면 "N번"
@@ -14031,6 +14055,388 @@ function getNextDepartureMins(lineName, stnName, direction, baseMin) {
   return nextT;
 }
 
+
+// ══════════════════════════════════════════════════════════════════════
+// ★ 시간표 기반 출발시각 엔진 (Bug2) — 지하철 전용 / 기존 기능 무변경
+//   · 공식 시각표 보유: 서울1~9(_REAL_TT) · 인천1·2(_INCHEON_TT) · 김포(_GIMPO_TT)
+//   · 미보유 노선: 기점 배차격자 + 실측 역간시간(_REAL_SEG) 누적 → 역별 시각 생성
+// ══════════════════════════════════════════════════════════════════════
+var _TT_MAX_WAIT = 30;   // 대기 상한(분) — 초과 시 미반영(기존 표시 유지)
+var _TT_SCHED_ALIAS = { '의정부선':'의정부경전철', '에버라인선':'용인경전철', '인천공항철도':'공항철도' };
+// _REAL_SEG 인접 체인이 데이터 잡음으로 끊기는 노선만 순서 고정
+var _TT_ORDER_HARD = {
+  '경강선':['판교','이매','성남','삼동','경기광주','초월','곤지암','신둔도예촌','이천','부발','세종대왕릉','여주'],
+  '서해선':['일산','풍산','백마','곡산','대곡','능곡','김포공항','원종','부천종합운동장','소사','소새울','시흥대야','신천','신현','시흥시청','시흥능곡','달미','선부','초지','시우','원시'],
+  'GTX-A':['운정중앙','킨텍스','대곡','연신내','서울역','수서','성남','구성','동탄']
+};
+
+function _ttNm(n){ return String(n||'').replace(/\(.*?\)/g,'').replace(/역$/,'').replace(/\s+/g,'').trim(); }
+
+// ── 노선 역순서: _TT_ORDER_HARD → _REAL_SEG 인접체인 → STNDB 순 ──
+function _ttOrderOf(lineName){
+  if(!window._TT_ORD_CACHE) window._TT_ORD_CACHE = {};
+  if(window._TT_ORD_CACHE[lineName]) return window._TT_ORD_CACHE[lineName];
+  var out = null;
+  if(_TT_ORDER_HARD[lineName]) out = _TT_ORDER_HARD[lineName].map(_ttNm);
+  if(!out && typeof _REAL_SEG !== 'undefined'){
+    var adj = {};
+    for(var k in _REAL_SEG){
+      var p = k.split('|'); if(p.length !== 3 || p[0] !== lineName) continue;
+      var a = _ttNm(p[1]), b = _ttNm(p[2]), w = _REAL_SEG[k] || 120;
+      if(!adj[a]) adj[a] = {};
+      if(!adj[b]) adj[b] = {};
+      if(adj[a][b] == null || w < adj[a][b]) adj[a][b] = w;
+      if(adj[b][a] == null || w < adj[b][a]) adj[b][a] = w;
+    }
+    var nodes = Object.keys(adj);
+    if(nodes.length > 2){
+      // 급행 스킵간선 등 잡음 제거: 매 단계 '역간시간이 가장 짧은 미방문 이웃'으로 전진
+      var ends = nodes.filter(function(n){ return Object.keys(adj[n]).length === 1; });
+      var starts = ends.length ? ends : [nodes[0]];
+      var best = [];
+      for(var si=0; si<starts.length && si<8; si++){
+        var seen = {}, seq = [starts[si]], cur = starts[si], guard = 0;
+        seen[cur] = 1;
+        while(guard++ < 600){
+          var nb = null, nv = Infinity;
+          for(var c in adj[cur]){ if(!seen[c] && adj[cur][c] < nv){ nv = adj[cur][c]; nb = c; } }
+          if(nb == null) break;
+          seen[nb] = 1; seq.push(nb); cur = nb;
+        }
+        if(seq.length > best.length) best = seq;
+      }
+      if(best.length >= 3) out = best;
+    }
+  }
+  if(!out && typeof STNDB !== 'undefined'){
+    out = STNDB.filter(function(s){ return s.line === lineName; }).map(function(s){ return _ttNm(s.name); });
+  }
+  window._TT_ORD_CACHE[lineName] = out || [];
+  return window._TT_ORD_CACHE[lineName];
+}
+
+// ── 공식 시각표 시각배열(분) 조회: dk='상'|'하' ──
+function _ttOfficialTimes(lineName, stnNm, dk, isHol){
+  var nm = _ttNm(stnNm);
+  // ① 서울 1~9호선
+  if(typeof _REAL_TT !== 'undefined' && _REAL_TT){
+    var rec = _REAL_TT[lineName + '|' + nm];
+    if(rec){
+      var day = isHol ? (rec.W || rec.D) : (rec.D || rec.W);
+      if(day){
+        var arr = day[dk] || null;
+        if(arr && arr.length && typeof _rttDecode === 'function') return _rttDecode(arr);
+      }
+    }
+  }
+  // ② 인천1·2호선
+  if(typeof _INCHEON_TT !== 'undefined' && _INCHEON_TT && _INCHEON_TT[lineName]){
+    var sd = _INCHEON_TT[lineName][nm];
+    if(sd){
+      var t2 = sd[(isHol ? '휴일' : '평일') + dk];
+      if(t2 && t2.length) return t2.slice();
+    }
+  }
+  // ③ 김포골드라인 (상=김포공항방면)
+  if(lineName === '김포골드라인' && typeof _GIMPO_TT !== 'undefined' && _GIMPO_TT[nm]){
+    var g = _GIMPO_TT[nm];
+    var br = (dk === '상') ? g.up : g.down;
+    if(br){
+      var lst = isHol ? br.hd : br.wd;
+      if(lst && lst.length){
+        return lst.map(function(x){ return (x[0] >= 24 ? (x[0]-24)*60 + x[1] + 1440 : x[0]*60 + x[1]); });
+      }
+    }
+  }
+  // ④ TAGO(국토부) 방향별 실제 시각표 캐시 — 시각표 미보유 노선 보강
+  if(typeof _tagoTTCache2 !== 'undefined' && _tagoTTCache2){
+    var tc = _tagoTTCache2[lineName + '|' + nm] || _tagoTTCache2[lineName + '|' + stnNm];
+    if(tc && Date.now() - tc.ts < 3600000){
+      var side = (dk === '상') ? tc.U : tc.D;
+      if(side && side.length) return side.slice();
+    }
+  }
+  return null;
+}
+
+// ── 공식 시각표 보유 여부 ──
+function _ttHasOfficial(lineName, stnNm, isHol){
+  return !!(_ttOfficialTimes(lineName, stnNm, '상', isHol) || _ttOfficialTimes(lineName, stnNm, '하', isHol));
+}
+// ── 원격/TAGO 캐시 보유 여부 (getNextDepartureMins 상위 우선순위) ──
+function _ttHasCache(lineName, stnNm){
+  var nm = _ttNm(stnNm);
+  try{
+    if(typeof _tagoTTCache !== 'undefined' && _tagoTTCache){
+      var c = _tagoTTCache[lineName + '|' + nm] || _tagoTTCache[lineName + '|' + stnNm];
+      if(c && Date.now() - c.ts < 3600000 && c.times && c.times.length) return true;
+    }
+    if(typeof _TT !== 'undefined' && _TT){
+      var lk = /^[1-9]호선$/.test(lineName) ? lineName.replace('호선','') : lineName;
+      if(_TT[lk + '|' + nm] || _TT[lk + '|' + stnNm]) return true;
+    }
+  }catch(e){}
+  return false;
+}
+
+// ── 역별 첫차(분, 04:00 이후) ──
+function _ttFirst(lineName, stnNm, dk, isHol){
+  var t = _ttOfficialTimes(lineName, stnNm, dk, isHol);
+  if(!t || !t.length) return null;
+  for(var i=0;i<t.length;i++){ if(t[i] >= 240) return t[i]; }
+  return t[0];
+}
+
+// ── 노선 내 위치(기준 종점으로부터 누적 초) — 지선·급행간선 있어도 단조 ──
+function _ttPosOf(lineName){
+  if(!window._TT_POS_CACHE) window._TT_POS_CACHE = {};
+  if(window._TT_POS_CACHE[lineName]) return window._TT_POS_CACHE[lineName];
+  var g = {};
+  if(typeof _REAL_SEG !== 'undefined'){
+    for(var k in _REAL_SEG){
+      var p = k.split('|'); if(p.length !== 3 || p[0] !== lineName) continue;
+      var a = _ttNm(p[1]), b = _ttNm(p[2]), w = _REAL_SEG[k] || 120;
+      if(!g[a]) g[a] = {}; if(!g[b]) g[b] = {};
+      if(g[a][b] == null || w < g[a][b]) g[a][b] = w;
+      if(g[b][a] == null || w < g[b][a]) g[b][a] = w;
+    }
+  }
+  var nodes = Object.keys(g), pos = null;
+  if(nodes.length > 2){
+    var dij = function(src){
+      var d = {}, done = {}, i, n;
+      for(i=0;i<nodes.length;i++) d[nodes[i]] = Infinity;
+      d[src] = 0;
+      for(i=0;i<nodes.length;i++){
+        var u = null, bd = Infinity;
+        for(n in d){ if(!done[n] && d[n] < bd){ bd = d[n]; u = n; } }
+        if(u == null) break;
+        done[u] = 1;
+        for(var v in g[u]){ var nd = d[u] + g[u][v]; if(nd < d[v]) d[v] = nd; }
+      }
+      return d;
+    };
+    var d0 = dij(nodes[0]), far = nodes[0], bv = -1;
+    for(var ni=0;ni<nodes.length;ni++){
+      var nn = nodes[ni];
+      if(d0[nn] < Infinity && d0[nn] > bv){ bv = d0[nn]; far = nn; }
+    }
+    pos = dij(far);
+  }
+  if(!pos && typeof STNDB !== 'undefined'){
+    pos = {};
+    STNDB.filter(function(s){ return s.line === lineName; })
+         .forEach(function(s, i){ pos[_ttNm(s.name)] = i * 120; });
+  }
+  window._TT_POS_CACHE[lineName] = pos || {};
+  return window._TT_POS_CACHE[lineName];
+}
+
+// ── 노선별 '위치 증가 방향'에 해당하는 시각표 키(상/하) 전역 투표 ──
+function _ttForwardKey(lineName, isHol){
+  var ck = lineName + '|' + (isHol ? 'H' : 'D');
+  if(!window._TT_FWD_CACHE) window._TT_FWD_CACHE = {};
+  if(window._TT_FWD_CACHE[ck] !== undefined) return window._TT_FWD_CACHE[ck];
+  var pos = _ttPosOf(lineName);
+  var arr = Object.keys(pos).filter(function(n){ return isFinite(pos[n]); })
+                            .sort(function(a,b){ return pos[a] - pos[b]; });
+  var pick = null, pickSc = 0;
+  ['상','하'].forEach(function(dk){
+    var prev = null, sc = 0;
+    for(var i=0;i<arr.length;i++){
+      var f = _ttFirst(lineName, arr[i], dk, isHol);
+      if(f == null) continue;
+      if(prev != null) sc += (f > prev ? 1 : (f < prev ? -1 : 0));
+      prev = f;
+    }
+    if(Math.abs(sc) > Math.abs(pickSc)){ pickSc = sc; pick = dk; }
+  });
+  var fwd = null;
+  if(pick && pickSc !== 0) fwd = (pickSc > 0) ? pick : (pick === '상' ? '하' : '상');
+  window._TT_FWD_CACHE[ck] = fwd;
+  return fwd;
+}
+
+// ── 방향키 판정(핵심): 같은 열차가 A→B 순으로 나타나는 시각표 키를 상호상관으로 탐지
+//    A의 각 시각 +k 가 B에 존재하는 개수를 k=1..120 로 스캔 → 뚜렷한 피크가 있는 키가 A→B 방향
+function _ttXcorrKey(lineName, a, b, isHol){
+  var ck = lineName + '|' + a + '|' + b + '|' + (isHol ? 'H' : 'D');
+  if(!window._TT_XC_CACHE) window._TT_XC_CACHE = {};
+  if(window._TT_XC_CACHE[ck] !== undefined) return window._TT_XC_CACHE[ck];
+  var pick = null, pickSc = 0;
+  ['상','하'].forEach(function(dk){
+    var A = _ttOfficialTimes(lineName, a, dk, isHol);
+    var B = _ttOfficialTimes(lineName, b, dk, isHol);
+    if(!A || !B || A.length < 5 || B.length < 5) return;
+    var set = {}, i, j, k;
+    for(i=0;i<B.length;i++) set[B[i]] = 1;
+    var counts = [];
+    for(k=1;k<=120;k++){
+      var c = 0;
+      for(j=0;j<A.length;j++){ if(set[A[j] + k]) c++; }
+      counts.push(c);
+    }
+    var mx = 0; for(i=0;i<counts.length;i++) if(counts[i] > mx) mx = counts[i];
+    var srt = counts.slice().sort(function(x,y){ return x - y; });
+    var med = srt[Math.floor(srt.length/2)];
+    var sc = mx - med;
+    if(sc > pickSc){ pickSc = sc; pick = dk; }
+  });
+  var out = (pick && pickSc >= 5) ? pick : null;
+  window._TT_XC_CACHE[ck] = out;
+  return out;
+}
+
+// ── 방향 판정: ① 노선위치 + 전역 방향키 ② 구간 첫차 증감 폴백 ③ 역순서 폴백 ──
+function _ttSegDir(lineName, stops, isHol){
+  var names = [];
+  for(var i=0;i<stops.length;i++){
+    var n = _ttNm(stops[i].stationName || stops[i].name || '');
+    if(n) names.push(n);
+  }
+  if(names.length < 2) return null;
+  // ① 상호상관(가장 신뢰도 높음)
+  var _xk = _ttXcorrKey(lineName, names[0], names[names.length-1], isHol);
+  if(!_xk && names.length > 2) _xk = _ttXcorrKey(lineName, names[0], names[1], isHol);
+  if(_xk) return (_xk === '상') ? '상행' : '하행';
+  // ② 노선 위치 + 전역 방향키
+  var _pos = _ttPosOf(lineName), _fwd = _ttForwardKey(lineName, isHol);
+  if(_fwd){
+    var pa = _pos[names[0]], pb = _pos[names[names.length-1]];
+    if(pa != null && pb != null && isFinite(pa) && isFinite(pb) && pa !== pb){
+      var _key = (pb > pa) ? _fwd : (_fwd === '상' ? '하' : '상');
+      return (_key === '상') ? '상행' : '하행';
+    }
+  }
+  var best = null, bestSc = -999;
+  ['상','하'].forEach(function(dk){
+    var sc = 0, cnt = 0, prev = null;
+    for(var i=0;i<names.length;i++){
+      var f = _ttFirst(lineName, names[i], dk, isHol);
+      if(f == null) continue;
+      if(prev != null){ cnt++; sc += (f > prev ? 1 : (f < prev ? -1 : 0)); }
+      prev = f;
+    }
+    if(cnt > 0 && sc > bestSc){ bestSc = sc; best = dk; }
+  });
+  if(best && bestSc > 0) return (best === '상') ? '상행' : '하행';
+  // 폴백: 노선 순서 기반(기존 앱 규칙 = 순번 증가 시 '하행')
+  var ord = _ttOrderOf(lineName);
+  if(ord && ord.length > 1){
+    var ia = ord.indexOf(names[0]), ib = ord.indexOf(names[names.length-1]);
+    if(ia >= 0 && ib >= 0 && ia !== ib) return (ib > ia) ? '하행' : '상행';
+  }
+  return null;
+}
+
+// ── 미보유 노선용 기점 출발격자 ──
+function _ttGridFor(lineName){
+  if(!window._TT_GRID_CACHE) window._TT_GRID_CACHE = {};
+  if(window._TT_GRID_CACHE[lineName]) return window._TT_GRID_CACHE[lineName];
+  var grid = null;
+  if(typeof _BUILTIN_TT !== 'undefined' && _BUILTIN_TT[lineName] && _BUILTIN_TT[lineName].length){
+    grid = _BUILTIN_TT[lineName];
+  } else {
+    var key = _TT_SCHED_ALIAS[lineName] || lineName;
+    var sc  = (typeof LINE_SCHEDULE !== 'undefined') ? LINE_SCHEDULE[key] : null;
+    if(sc && typeof timeToMin === 'function'){
+      var f = timeToMin(sc.first), l = timeToMin(sc.last);
+      if(l < f) l += 1440;
+      var base = sc.interval || 8, g = [], t = f, guard = 0;
+      var wknd = (typeof getDayCode === 'function') && (getDayCode() === 'SAT' || getDayCode() === 'SUN');
+      while(t <= l && guard++ < 400){
+        g.push(t % 1440 === t ? t : t);
+        var h = Math.floor((t % 1440) / 60);
+        var iv = base;
+        if(h >= 7 && h < 9 || h >= 18 && h < 20) iv = Math.max(2, Math.round(base * 0.6));
+        else if(h >= 22 || h < 6)                iv = Math.round(base * 2.2);
+        else if(wknd)                            iv = Math.round(base * 1.4);
+        if(iv < 1) iv = 1;
+        t += iv;
+      }
+      if(g.length) grid = g;
+    }
+  }
+  window._TT_GRID_CACHE[lineName] = grid || [];
+  return window._TT_GRID_CACHE[lineName];
+}
+
+// ── 미보유 노선: 기점격자 + 실측 역간시간 누적 오프셋 → 승차역 다음열차 ──
+function _genNextDep(lineName, stops, baseMin){
+  var grid = _ttGridFor(lineName);
+  if(!grid || !grid.length) return null;
+  var offMin = 0;
+  try{
+    var ord = _ttOrderOf(lineName);
+    if(ord && ord.length > 1 && stops.length > 1){
+      var a = _ttNm(stops[0].stationName || ''), b = _ttNm(stops[1].stationName || '');
+      var ia = ord.indexOf(a), ib = ord.indexOf(b);
+      if(ia >= 0 && ib >= 0 && ia !== ib){
+        var step = (ib > ia) ? 1 : -1;
+        var origin = (step > 0) ? 0 : ord.length - 1;
+        var sec = 0;
+        for(var i = origin; i !== ia; i += step){
+          var v = (typeof _realSeg === 'function') ? _realSeg(lineName, ord[i], ord[i+step]) : null;
+          sec += (v != null ? v : 120);
+        }
+        offMin = Math.round(sec / 60);
+      }
+    }
+  }catch(e){}
+  for(var g=0; g<grid.length; g++){
+    var t = grid[g] + offMin;
+    if(t >= baseMin) return t % 1440 === t ? t : t;
+  }
+  return grid[0] + offMin + 1440;
+}
+
+// ── 지하철 세그먼트의 다음 열차 출발시각(분) ──
+function _ttNextDepForSeg(sg, baseMin){
+  if(!sg || sg.type !== 1 || !sg.stops || !sg.stops.length) return null;
+  var line = sg.name || '';
+  var stn  = _ttNm(sg.stops[0].stationName || '');
+  if(!line || !stn) return null;
+  var isHol = (typeof _isHolidayOrWeekend === 'function') ? _isHolidayOrWeekend() : false;
+  var dir = null;
+  // ① 공식 시각표(방향키 직접 조회) — 방향 무관 병합캐시에 오염되지 않도록 우선 처리
+  if(_ttHasOfficial(line, stn, isHol)){
+    dir = _ttSegDir(line, sg.stops, isHol) || '하행';
+    var tms = _ttOfficialTimes(line, stn, (dir === '상행') ? '상' : '하', isHol);
+    if(tms && tms.length){
+      for(var i=0;i<tms.length;i++){ if(tms[i] >= baseMin) return tms[i]; }
+      return tms[0] + 1440;
+    }
+  }
+  // ② 원격 timetable.json / TAGO 병합캐시 (기존 경로 그대로)
+  if(_ttHasCache(line, stn) && typeof getNextDepartureMins === 'function'){
+    dir = dir || _ttSegDir(line, sg.stops, isHol) || '하행';
+    var v = getNextDepartureMins(line, stn, dir, baseMin);
+    if(v != null) return v;
+  }
+  // ③ 생성 시각표(기점 배차 + 실측 역간시간)
+  return _genNextDep(line, sg.stops, baseMin);
+}
+window._ttNextDepForSeg = _ttNextDepForSeg;
+window._ttSegDir        = _ttSegDir;
+window._genNextDep      = _genNextDep;
+window._ttOrderOf       = _ttOrderOf;
+
+// ── 미보유 노선 TAGO 시각표 백그라운드 프리페치(다음 렌더부터 반영, 재렌더 없음) ──
+function _htlTagoWarm(segs){
+  try{
+    if(typeof tagoGetNextDep !== 'function' || !segs) return;
+    var isHol = (typeof _isHolidayOrWeekend === 'function') ? _isHolidayOrWeekend() : false;
+    segs.forEach(function(sg){
+      if(!sg || sg.type !== 1 || !sg.stops || !sg.stops.length) return;
+      var line = sg.name || '', stn = _ttNm(sg.stops[0].stationName || '');
+      if(!line || !stn) return;
+      if(_ttHasOfficial(line, stn, isHol) || _ttHasCache(line, stn)) return;
+      tagoGetNextDep(line, stn, (typeof kstMinutesAdj === 'function') ? kstMinutesAdj() : 0);
+    });
+  }catch(e){}
+}
+window._htlTagoWarm = _htlTagoWarm;
+
 // ── 정적 시각표 기반 탑승 출발시각 계산 ─────────────────────
 function _resolveTrainDepartMs(nowMs) {
   if(!S || !S.start) return {ms: nowMs||Date.now(), depTime:null, waitMin:0};
@@ -20202,6 +20608,7 @@ function _rebaseAllFromNow(nowMs) {
 var _TAGO_KEY = '';       // ★ 키는 클라이언트에 두지 않음 — Worker /tago 가 서버에서 주입
 var _tagoCache     = {};  // 실시간 도착정보 캐시 (1분)
 var _tagoTTCache   = {};  // 시간표 캐시 (1시간)
+var _tagoTTCache2  = {};  // ★ 방향별 시간표 캐시 {키:{ts,U:[],D:[]}} — 시각표 미보유 노선용(TAGO 실제 시각표)
 var _tagoEnabled   = true; // 실패 시 자동 비활성화
 
 // ── 노선명 → TAGO 호선 키워드 매핑 ──
@@ -20236,10 +20643,12 @@ async function tagoGetNextDep(lineName, stnName, baseMin) {
 
   try {
     // STEP1: 역 ID 조회 (올바른 메서드명: GetKwrdFndSubwaySttnList)
-    var sttnUrl = 'http://apis.data.go.kr/1613000/SubwayInfo/GetKwrdFndSubwaySttnList' +
+    var sttnRaw = 'https://apis.data.go.kr/1613000/SubwayInfo/GetKwrdFndSubwaySttnList' +
       '?serviceKey=' + encodeURIComponent(_TAGO_KEY) +
       '&subwayStationName=' + encodeURIComponent(stnName) +
       '&numOfRows=20&pageNo=1&_type=json';
+    // ★ 워커 /tago 프록시 경유 (serviceKey 서버 주입)
+    var sttnUrl = _SERVER_URL + '/tago?url=' + encodeURIComponent(sttnRaw);
 
     var r1 = await _fetchWithTimeout(sttnUrl, 6000);
     var t1 = await r1.text();
@@ -20270,12 +20679,13 @@ async function tagoGetNextDep(lineName, stnName, baseMin) {
     var times = [];
     var udCodes = ['D','U']; // 하행, 상행 모두 조회
     for(var ui=0; ui<udCodes.length; ui++) {
-      var ttUrl = 'http://apis.data.go.kr/1613000/SubwayInfo/GetSubwaySttnAcctoSchdulList' +
+      var ttRaw = 'https://apis.data.go.kr/1613000/SubwayInfo/GetSubwaySttnAcctoSchdulList' +
         '?serviceKey=' + encodeURIComponent(_TAGO_KEY) +
         '&subwayStationId=' + encodeURIComponent(sttnId) +
         '&dailyTypeCode=' + dailyCode +
         '&upDownTypeCode=' + udCodes[ui] +
         '&numOfRows=300&pageNo=1&_type=json';
+      var ttUrl = _SERVER_URL + '/tago?url=' + encodeURIComponent(ttRaw);
       var r2 = await _fetchWithTimeout(ttUrl, 8000);
       var t2 = await r2.text();
       if(!t2 || t2.trim()[0] !== '{') continue;
@@ -20284,15 +20694,24 @@ async function tagoGetNextDep(lineName, stnName, baseMin) {
       var items = j2.response.body && j2.response.body.items && j2.response.body.items.item;
       if(!items) continue;
       if(!Array.isArray(items)) items = [items];
+      var _dirTimes = [];
       items.forEach(function(it) {
         // depTime: HHMISS 형식 (예: 051930 = 05:19:30)
         var dep = it.depTime || it.arrTime || '';
         if(dep && dep.length >= 4) {
           var h = parseInt(dep.substring(0,2));
           var m = parseInt(dep.substring(2,4));
-          if(!isNaN(h) && !isNaN(m)) times.push(h*60 + m);
+          if(!isNaN(h) && !isNaN(m)) { times.push(h*60 + m); _dirTimes.push(h*60 + m); }
         }
       });
+      // ★ 방향별 저장 (U=상행 / D=하행) — 기존 병합 캐시(_tagoTTCache)는 그대로 유지
+      if(_dirTimes.length){
+        var _k2 = lineName + '|' + String(stnName||'').replace(/역$/,'');
+        if(!_tagoTTCache2[_k2]) _tagoTTCache2[_k2] = {ts: nowMs, U: [], D: []};
+        _tagoTTCache2[_k2].ts = nowMs;
+        _tagoTTCache2[_k2][udCodes[ui]] = _dirTimes.sort(function(x,y){return x-y;})
+          .filter(function(v,i,arr){ return arr.indexOf(v)===i; });
+      }
     }
 
     if(!times.length) throw new Error('시간표 비어있음');
