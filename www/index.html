@@ -1948,8 +1948,8 @@ function _fetchPublicFood(stnNm, lat, lng){
   if(c && Date.now()-c.ts < 10*60*1000){ _foodPublicData=c.data; _renderFoodList(); return; }
   var url='https://apis.data.go.kr/B553077/api/open/sdsc2/storeListInRadius'
     +'?serviceKey='+encodeURIComponent(_BUS_TAGO_KEY)
-    +'&radius=2000&cx='+lng+'&cy='+lat
-    +'&indsLclsCd=Q&type=json&numOfRows=120&pageNo=1';
+    +'&radius='+((typeof _FOOD_RADIUS_M!=='undefined')?_FOOD_RADIUS_M:1000)+'&cx='+lng+'&cy='+lat
+    +'&indsLclsCd=Q&type=json&numOfRows=200&pageNo=1';
   if(typeof _busProxyGet!=='function') return;
   _busProxyGet(url, function(err, data){
     if(err) return;
@@ -1985,11 +1985,51 @@ function _stnFoodLookup(name){
   if(STN_FOOD[name+'역']) return STN_FOOD[name+'역'];
   return null;
 }
+// ★ 중심좌표 기준 반경 내 음식점 통합 (역별 20개 제한을 넘어 인근 역 목록까지 합침)
+var _FOOD_RADIUS_M = 1000;      // 맛집 검색 반경(m)
+var _FOOD_MAX_ITEMS = 150;      // 목록 최대 개수
+function _foodNearbyPool(cLat, cLng, radiusM, ownKey){
+  try{
+    if(typeof STN_FOOD==='undefined' || cLat==null || cLng==null) return null;
+    if(typeof haversineM!=='function') return null;
+    var R = radiusM || _FOOD_RADIUS_M;
+    var out=[], seen={};
+    for(var k in STN_FOOD){
+      var arr=STN_FOOD[k];
+      if(!arr || !arr.length) continue;
+      // 대표 좌표로 1차 거르기 (먼 역은 통째로 스킵 → 속도)
+      var f=arr[0];
+      if(f && f.la!=null && haversineM(cLat,cLng,f.la,f.lo) > R+3000) continue;
+      for(var i=0;i<arr.length;i++){
+        var it=arr[i];
+        if(!it || it.la==null || it.lo==null) continue;
+        var d=haversineM(cLat,cLng,it.la,it.lo);
+        if(d>R) continue;
+        var key=(it.n||'')+'|'+(it.a||'')+'|'+it.la.toFixed(5)+','+it.lo.toFixed(5);
+        if(seen[key]) continue;
+        seen[key]=1;
+        // 해당 역 자체 목록은 원본 거리값 유지(좌표가 건물 단위라 재계산 시 0m가 됨)
+        var dd=(ownKey && k===ownKey && it.d!=null) ? it.d : Math.round(d);
+        out.push({ n:it.n, c:it.c, a:it.a, la:it.la, lo:it.lo, d:dd });
+      }
+    }
+    out.sort(function(a,b){ return a.d-b.d; });
+    return out;
+  }catch(e){ return null; }
+}
+window._foodNearbyPool=_foodNearbyPool;
+
 function _foodFromStn(destStn){
   var list=document.getElementById('foodList');
   var arr=_stnFoodLookup(destStn);
   _foodStnCoord=_foodResolveCoord(destStn)||null; if(_foodStnCoord) _foodStnCoord.name=String(destStn);
   _foodPublicData=[];
+  // ★ 반경 1km까지 확대: 인근 역 목록까지 합쳐 실제 거리로 재계산
+  if(_foodStnCoord){
+    var ownKey=(STN_FOOD[destStn]?destStn:(STN_FOOD[String(destStn).replace(/역$/,'')]?String(destStn).replace(/역$/,''):null));
+    var pool=_foodNearbyPool(_foodStnCoord.lat, _foodStnCoord.lng, _FOOD_RADIUS_M, ownKey);
+    if(pool && pool.length) arr = pool.slice(0, _FOOD_MAX_ITEMS);
+  }
   if(!arr || !arr.length){
     _foodAllData=[];
     if(list) list.innerHTML='<div class="food-empty">\uD83C\uDF7D\uFE0F<br>'+_ltEsc(String(destStn))+' \uc5ed \uc778\uadfc \ub4f1\ub85d \uc74c\uc2dd\uc810 \uc815\ubcf4\uac00 \uc5c6\uc5b4\uc694</div>';
@@ -2001,21 +2041,98 @@ function _foodFromStn(destStn){
   };});
   _foodCache[destStn]={ ts:Date.now(), data:_foodAllData };
   _renderFoodList();
+  // ★ 반경 1km 공공데이터(소상공인 상가정보) 추가 조회 → 목록 하단에 더 많은 음식점
+  if(_foodStnCoord && typeof _fetchPublicFood==='function')
+    _fetchPublicFood(String(destStn), _foodStnCoord.lat, _foodStnCoord.lng);
 }
 window._foodFromStn=_foodFromStn;
+
+// ══════════════════════════════════════════════════════════════
+// ★ 외부 지도앱 길찾기 (네이버 / 카카오) — 앱 실행 후 자동 길찾기
+//   출발지=현재 위치(없으면 도착지만 전달), 도보 기준
+// ══════════════════════════════════════════════════════════════
+function _navMyPos(cb){
+  var f=null;
+  try{
+    if(typeof S!=='undefined' && S.lastGPSFix && S.lastGPSFix.lat) f={lat:S.lastGPSFix.lat, lng:S.lastGPSFix.lng};
+    if(!f && window._lastGPSLat) f={lat:window._lastGPSLat, lng:window._lastGPSLng};
+    if(!f && typeof _busGpsLat!=='undefined' && _busGpsLat) f={lat:_busGpsLat, lng:_busGpsLng};
+  }catch(e){}
+  if(f){ cb(f); return; }
+  if(!navigator.geolocation){ cb(null); return; }
+  var done=false;
+  var tid=setTimeout(function(){ if(!done){ done=true; cb(null); } }, 3000);
+  navigator.geolocation.getCurrentPosition(
+    function(p){ if(done) return; done=true; clearTimeout(tid); cb({lat:p.coords.latitude, lng:p.coords.longitude}); },
+    function(){ if(done) return; done=true; clearTimeout(tid); cb(null); },
+    { enableHighAccuracy:false, timeout:2800, maximumAge:60000 }
+  );
+}
+function _navOpen(appUrl, webUrl){
+  try{
+    var t0=Date.now();
+    window.location.href=appUrl;                 // 앱 실행 (설치되어 있으면 바로 길찾기)
+    setTimeout(function(){
+      if(document.hidden) return;                // 앱으로 전환됨 → 웹 폴백 불필요
+      if(Date.now()-t0 < 1200) return;
+      try{ window.open(webUrl,'_blank'); }catch(e){ window.location.href=webUrl; }
+    }, 1500);
+  }catch(e){ try{ window.open(webUrl,'_blank'); }catch(e2){} }
+}
+// kind: 'naver' | 'kakao', nameEnc: encodeURIComponent 된 이름
+function _navTo(kind, lat, lng, nameEnc){
+  var dLat=parseFloat(lat), dLng=parseFloat(lng);
+  var name=''; try{ name=decodeURIComponent(String(nameEnc||'')); }catch(e){ name=String(nameEnc||''); }
+  if(isNaN(dLat)||isNaN(dLng)){ if(typeof toast==='function') toast('위치 정보가 없어요'); return; }
+  if(typeof toast==='function') toast((kind==='naver'?'네이버':'카카오')+'지도로 길찾기를 여는 중...');
+  _navMyPos(function(me){
+    var appUrl, webUrl;
+    if(kind==='naver'){
+      appUrl='nmap://route/walk?'
+        + (me ? ('slat='+me.lat+'&slng='+me.lng+'&sname='+encodeURIComponent('내 위치')+'&') : '')
+        + 'dlat='+dLat+'&dlng='+dLng+'&dname='+encodeURIComponent(name)
+        + '&appname=com.dullyyj.subway';
+      webUrl='https://map.naver.com/p/directions/'
+        + (me ? (me.lng+','+me.lat+','+encodeURIComponent('내 위치')+',,-1/') : ',,,,/')
+        + dLng+','+dLat+','+encodeURIComponent(name)+',,-1/walk';
+    } else {
+      appUrl='kakaomap://route?'
+        + (me ? ('sp='+me.lat+','+me.lng+'&') : '')
+        + 'ep='+dLat+','+dLng+'&by=FOOT';
+      webUrl='https://map.kakao.com/link/to/'+encodeURIComponent(name)+','+dLat+','+dLng;
+    }
+    _navOpen(appUrl, webUrl);
+  });
+}
+window._navTo=_navTo;
+
+// 지도 패널 하단 길찾기 버튼 HTML
+function _navBtnsHtml(lat, lng, name){
+  // 작은따옴표는 onclick 속성을 깨뜨리므로 반드시 인코딩
+  var enc=encodeURIComponent(String(name||'')).replace(/'/g,'%27');
+  return '<div class="food-map-navs">'
+    + '<button class="fmap-nav fmap-nav-n" onclick="_navTo(\'naver\','+lat+','+lng+',\''+enc+'\')">네이버 길찾기</button>'
+    + '<button class="fmap-nav fmap-nav-k" onclick="_navTo(\'kakao\','+lat+','+lng+',\''+enc+'\')">카카오 길찾기</button>'
+    + '</div>';
+}
+window._navBtnsHtml=_navBtnsHtml;
 
 // ── 인앱 지도(OSM/Leaflet) 길찾기: 식당 선택 시 카드 아래 지도 펼침(외부앱 실행 없음) ──
 function _foodMapCssInject(){
   if(document.getElementById('foodMapCss')) return;
   var st=document.createElement('style'); st.id='foodMapCss';
   st.textContent='.food-map-panel{margin:8px 0 14px;border:1px solid var(--border,rgba(0,0,0,.12));border-radius:14px;overflow:hidden;background:var(--card,#fff);box-shadow:0 4px 18px rgba(0,0,0,.14);'
-    +'display:block;flex:0 0 auto;flex-shrink:0;min-height:330px;}'
+    +'display:block;flex:0 0 auto;flex-shrink:0;min-height:380px;}'
     +'.food-map-head{display:flex;align-items:center;gap:8px;padding:9px 12px;font-size:13px;border-bottom:1px solid var(--border,rgba(0,0,0,.08));}'
     +'.food-map-head b{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text);}'
     +'.food-map-dist{font-size:12px;color:var(--sub);white-space:nowrap;}'
     +'.food-map-x{cursor:pointer;font-size:15px;color:var(--sub);padding:0 2px;}'
     +'.food-map-canvas{width:100%;height:260px;min-height:260px;flex:0 0 auto;flex-shrink:0;display:block;background:#e8eef2;}'
-    +'.food-map-foot{padding:8px 12px;font-size:12px;color:var(--sub);}';
+    +'.food-map-foot{padding:8px 12px 10px;font-size:12px;color:var(--sub);}'
+    +'.food-map-navs{display:flex;gap:8px;margin-top:8px;}'
+    +'.fmap-nav{flex:1;padding:10px 6px;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;}'
+    +'.fmap-nav-n{background:#03C75A;color:#fff;}'
+    +'.fmap-nav-k{background:#FEE500;color:#3C1E1E;}';
   document.head.appendChild(st);
 }
 var _leafletLoading=false;
@@ -2040,7 +2157,7 @@ function _foodMapHarden(panel){
     panel.style.display='block';
     panel.style.flex='0 0 auto';
     panel.style.flexShrink='0';
-    panel.style.minHeight='330px';
+    panel.style.minHeight='380px';
     var cv=panel.querySelector('.food-map-canvas');
     if(cv){
       cv.style.display='block'; cv.style.width='100%';
@@ -2086,7 +2203,9 @@ function _foodShowMap(card, p){
     +'<span class="food-map-dist">📍 '+_foodDist(p.distance)+'</span>'
     +'<span class="food-map-x" onclick="_foodCloseMap()">✕</span></div>'
     +'<div id="'+cid+'" class="food-map-canvas"></div>'
-    +'<div class="food-map-foot">🚶 '+(stnNm?(_ltEsc(stnNm)+'역 → '):'')+_ltEsc(p.place_name)+' 도보 경로</div>';
+    +'<div class="food-map-foot">🚶 '+(stnNm?(_ltEsc(stnNm)+'역 → '):'')+_ltEsc(p.place_name)+' 도보 경로'
+    + _navBtnsHtml(dLat, dLng, p.place_name)
+    +'</div>';
   if(card.parentNode) card.parentNode.insertBefore(panel, card.nextSibling);
   else card.appendChild(panel);
   _foodMapHarden(panel);
@@ -2469,7 +2588,7 @@ function _renderFoodList() {
 
   function _appendCards(arr, isPublic){
     var n = 0;
-    for(var i=0; i<arr.length && n<60; i++){
+    for(var i=0; i<arr.length && n<150; i++){
       var el = _foodMakeCard(arr[i], n, isPublic);
       if(el){ list.appendChild(el); n++; }
     }
@@ -3459,6 +3578,20 @@ function _loadServerPosts(cat, reset) {
         var seed = ((id || 1) * 2654435761) % 233;
         return Math.floor((seed % 55) + 5 + Math.min(ageMin * 1.6, 420));
       }
+      // ★ 서버 글에도 동일 조건 적용: 정치·분쟁 소재 제외 + 역명만 다른 중복글 1개만 표시
+      var _seenSlug = {};
+      posts = posts.filter(function(p){
+        if(!p || !p.title) return false;
+        if(typeof _postBanned==='function' && (_postBanned(p.title) || _postBanned(p.body))) return false;
+        if(typeof _postSlug==='function'){
+          var sg = _postSlug(p.title);
+          if(sg){
+            if(_seenSlug[sg]) return false;     // 내용 같고 역 이름만 다른 글 중복 제거
+            _seenSlug[sg] = 1;
+          }
+        }
+        return true;
+      });
       // 서버 포스트를 _AI_POSTS 형식으로 변환
       var converted = posts.map(function(p){
         return {
@@ -3837,22 +3970,35 @@ function closeBusRoute(){
   if(modal) modal.style.display = 'none';
 }
 
-// 정류장 목록 + 버스 위치 마커 렌더
+// ── 정류장 목록 + 버스 위치 (노선도 스타일 렌더) ──────────────
+function _brDirCls(cd){
+  var v = String(cd == null ? '' : cd);
+  if(v === '0') return 'up';        // 상행(기점→종점)
+  if(v === '1') return 'down';      // 하행(회차 후)
+  return 'na';
+}
+function _brStopMap(el, idx){
+  try{
+    var st = (window._brStops || [])[idx];
+    if(!st) return;
+    if(typeof _busShowMap === 'function') _busShowMap(el, st);
+  }catch(e){}
+}
+window._brStopMap = _brStopMap;
+
 function _renderBusRoute(stations, buses){
   var body = document.getElementById('busRouteBody');
-  // 버스가 위치한 nodeord 집합
+  if(!body) return;
+  window._brStops = stations;
+
+  // 버스가 위치한 nodeord
   var busAtOrd = {};
   buses.forEach(function(b){
     var ord = parseInt(b.nodeord)||0;
-    if(!busAtOrd[ord]) busAtOrd[ord] = [];
-    busAtOrd[ord].push(b);
+    (busAtOrd[ord] = busAtOrd[ord] || []).push(b);
   });
 
-  var runningTxt = buses.length > 0
-    ? ('🚌 현재 ' + buses.length + '대 운행 중')
-    : '🚌 현재 운행 중인 버스 없음 (막차 이후이거나 배차 간격)';
-
-  // ★ 내 위치에서 가장 가까운 정류장 찾기
+  // ★ 내 위치에서 가장 가까운 정류장
   var myLat = (typeof _busGpsLat!=='undefined' && _busGpsLat) || (typeof S!=='undefined' && S.lastGPSFix && S.lastGPSFix.lat) || null;
   var myLng = (typeof _busGpsLng!=='undefined' && _busGpsLng) || (typeof S!=='undefined' && S.lastGPSFix && S.lastGPSFix.lng) || null;
   var myOrd = null, myBd = 1e18;
@@ -3864,58 +4010,98 @@ function _renderBusRoute(stations, buses){
       if(d < myBd){ myBd = d; myOrd = parseInt(s.nodeord)||0; }
     });
   }
-  // ★ 내 정류장으로 접근 중인 가장 가까운 버스 → 몇 정거장/몇 분 남았는지
-  var myEtaTxt = '';
+  // ★ 내 정류장으로 접근 중인 가장 가까운 버스
+  var myEtaTxt = '', myEtaMin = null;
   if(myOrd != null){
     var approaching = buses.filter(function(b){ return (parseInt(b.nodeord)||0) <= myOrd; })
       .sort(function(a,b){ return (parseInt(b.nodeord)||0) - (parseInt(a.nodeord)||0); })[0];
     if(approaching){
       var away = myOrd - (parseInt(approaching.nodeord)||0);
-      if(away <= 0) myEtaTxt = '🚌 곧 도착';
-      else myEtaTxt = '🚌 ' + away + '정거장 전 · 약 ' + Math.max(1, Math.round(away*1.5)) + '분';
+      if(away <= 0){ myEtaTxt = '곧 도착'; myEtaMin = 0; }
+      else { myEtaMin = Math.max(1, Math.round(away*1.5)); myEtaTxt = away + '정거장 전 · 약 ' + myEtaMin + '분'; }
     } else {
       myEtaTxt = '접근 중인 버스 없음';
     }
   }
 
-  var rows = stations.map(function(s){
-    var ord  = parseInt(s.nodeord)||0;
-    var here = busAtOrd[ord];
-    var isMine = (myOrd != null && ord === myOrd);
-    var hereCls = here ? ' bus-route-here' : '';
-    var mineCls = isMine ? ' bus-route-mine' : '';
-    var marker = isMine
-      ? '<span class="bus-route-mymarker">📍</span>'
-      : (here ? '<span class="bus-route-busdot">🚌</span>' : '<span class="bus-route-dot"></span>');
-    var info = '';
-    if(here){
-      var vno = here.map(function(b){ return b.vehicleno || ''; }).filter(Boolean).join(', ');
-      info += '<div class="bus-route-businfo">🚌 ' + (vno ? _ltEsc(vno) : '버스') + '</div>';
-    }
-    if(isMine){
-      info += '<div class="bus-route-myinfo">📍 내 위치' + (myEtaTxt ? ' · ' + myEtaTxt : '') + '</div>';
-    }
-    return '<div class="bus-route-stop' + hereCls + mineCls + '">' +
-      '<div class="bus-route-line">' +
-        '<div class="bus-route-marker">' + marker + '</div>' +
-      '</div>' +
-      '<div class="bus-route-info">' +
-        '<div class="bus-route-name">' + _ltEsc(s.nodenm || '') + '</div>' +
-        '<div class="bus-route-no">' + _ltEsc(s.nodeno || s.nodeid || '') + '</div>' +
-        info +
-      '</div>' +
-    '</div>';
-  }).join('');
+  // 방향(상·하행) 구간 나누기 + 기점/종점
+  var firstNm = (stations[0] && stations[0].nodenm) || '';
+  var lastNm  = (stations[stations.length-1] && stations[stations.length-1].nodenm) || '';
+  var groups = [], cur = null;
+  stations.forEach(function(s, idx){
+    var cls = _brDirCls(s.updowncd);
+    if(!cur || cur.cls !== cls){ cur = { cls: cls, items: [] }; groups.push(cur); }
+    cur.items.push({ s: s, idx: idx });
+  });
 
-  body.innerHTML =
-    '<div class="bus-route-status">' + runningTxt + '</div>' +
-    '<div class="bus-route-list">' + rows + '</div>';
+  var html = '';
+  // 상단 요약 (방향 · 운행 대수)
+  var runN = buses.length;
+  html += '<div class="brs-top">'
+        +   '<div class="brs-route-dir"><b>' + _ltEsc(firstNm) + '</b><span class="brs-arrow">→</span><b>' + _ltEsc(lastNm) + '</b></div>'
+        +   '<div class="brs-top-meta">'
+        +     '<span class="brs-chip ' + (runN ? 'on' : '') + '">🚌 운행 ' + runN + '대</span>'
+        +     '<span class="brs-chip">정류장 ' + stations.length + '개</span>'
+        +     (myEtaTxt ? '<span class="brs-chip me">📍 ' + _ltEsc(myEtaTxt) + '</span>' : '')
+        +   '</div>'
+        + '</div>';
+
+  html += '<div class="brs-list">';
+  groups.forEach(function(g, gi){
+    // 회차 지점 표시 (방향이 바뀌는 경계)
+    if(gi > 0){
+      html += '<div class="brs-turn"><span class="brs-turn-badge">회차 ↻</span></div>';
+    }
+    var endNm = (g.items[g.items.length-1].s.nodenm) || '';
+    var dirLabel = (g.cls==='up' ? '상행' : (g.cls==='down' ? '하행' : '운행'));
+    html += '<div class="brs-sec brs-sec-' + g.cls + '">'
+          +   '<span class="brs-sec-ar">↓</span>'
+          +   '<b>' + _ltEsc(endNm) + '</b> 방면'
+          +   '<span class="brs-sec-tag">' + dirLabel + '</span>'
+          + '</div>';
+
+    g.items.forEach(function(o, k){
+      var s = o.s;
+      var ord = parseInt(s.nodeord)||0;
+      var here = busAtOrd[ord];
+      var isMine = (myOrd != null && ord === myOrd);
+      var railCls = 'brs-rail brs-rail-' + g.cls
+        + (k===0 ? ' brs-rail-first' : '')
+        + (k===g.items.length-1 ? ' brs-rail-last' : '');
+
+      var mark = '<span class="brs-dot"></span>';
+      if(here)        mark = '<span class="brs-bus">🚌</span>';
+      else if(isMine) mark = '<span class="brs-me">📍</span>';
+
+      var note = '';
+      if(here){
+        var vno = here.map(function(b){ return b.vehicleno || ''; }).filter(Boolean).join(', ');
+        note += '<div class="brs-note bus">🚌 ' + (vno ? _ltEsc(vno) : '버스 도착') + '</div>';
+      }
+      if(isMine){
+        note += '<div class="brs-note me">📍 내 위치' + (myEtaTxt ? ' · ' + _ltEsc(myEtaTxt) : '') + '</div>';
+      }
+
+      html += '<div class="brs-row' + (here?' brs-here':'') + (isMine?' brs-mine':'') + '" onclick="_brStopMap(this,' + o.idx + ')">'
+           +    '<div class="' + railCls + '">' + mark + '</div>'
+           +    '<div class="brs-body">'
+           +      '<div class="brs-name">' + _ltEsc(s.nodenm || '') + '</div>'
+           +      '<div class="brs-meta"><span class="brs-id">' + _ltEsc(s.nodeno || s.nodeid || '') + '</span>'
+           +        '<span class="brs-map">지도 · 길찾기 →</span></div>'
+           +      note
+           +    '</div>'
+           + '</div>';
+    });
+  });
+  html += '</div>';
+
+  body.innerHTML = html;
 
   // ★ 내 위치로 스크롤 (없으면 첫 버스)
   setTimeout(function(){
-    var el = body.querySelector('.bus-route-mine') || body.querySelector('.bus-route-here');
+    var el = body.querySelector('.brs-mine') || body.querySelector('.brs-here');
     if(el) el.scrollIntoView({ block:'center', behavior:'smooth' });
-  }, 100);
+  }, 120);
 }
 
 window.openBusRoute    = openBusRoute;
@@ -6545,6 +6731,8 @@ function _checkTransitAlerts(curNodeIdx){
   } catch(e){}
 }
 function _fireTransitAlert(tg, remain){
+  // ★ 알림 정책: '하차 10분 전' 외 알림 비활성화
+  if(typeof _notifAllowed==='function' && !_notifAllowed('arrive')) return;
   var key = tg.nodeIdx + '_' + remain;
   if(window._transitAlertFired && window._transitAlertFired[key]) return;
   if(!window._transitAlertFired) window._transitAlertFired = {};
@@ -8355,7 +8543,9 @@ function _busShowMap(card, stop){
   panel.innerHTML='<div class="food-map-head"><b>'+_ltEsc(nm)+'</b>'
     +'<span class="food-map-x" onclick="_busCloseMap()">✕</span></div>'
     +'<div id="'+cid+'" class="food-map-canvas"></div>'
-    +'<div class="food-map-foot">📍 '+_ltEsc(nm)+' 정류장 위치</div>';
+    +'<div class="food-map-foot">📍 '+_ltEsc(nm)+' 정류장 위치'
+    + ((typeof _navBtnsHtml==='function') ? _navBtnsHtml(la, lo, nm) : '')
+    +'</div>';
   if(card.parentNode) card.parentNode.insertBefore(panel, card.nextSibling);
   else card.appendChild(panel);
   if(typeof _foodMapHarden==='function') _foodMapHarden(panel);
@@ -17884,8 +18074,17 @@ function requestNotifyPerm(){
 }
 // ── 시스템 알림 (LocalNotifications) + 웹 Notification 폴백 ──
 var _notifId = 1000;
+// ★ 알림 정책 — 아래 type만 발송, 그 외 시스템 알림은 전부 차단
+//   arrive_reco  = 하차 10분 전 추천 알림
+//   commute_brief= 출퇴근 브리핑 알림(설정에서 켠 경우만 발생) — 탭하면 팝업+경로탐색 버튼
+var _NOTIF_ALLOW = { arrive_reco:1, commute_brief:1 };
+function _notifAllowed(type){ return !!_NOTIF_ALLOW[String(type||'')]; }
+window._notifAllowed = _notifAllowed;
+
 function showNotification(title, body, opts){
   opts = opts || {};
+  // ★ 허용되지 않은 알림은 발송하지 않음
+  if(!_notifAllowed(opts.type)) return;
   var vibPat = opts.vibrate || [300,100,300];
 
   // 1) Capacitor LocalNotifications (시스템 상단 알림 + 진동)
@@ -17943,46 +18142,47 @@ var _ARR_NIGHT_MENU = ['치킨','파스타','피자','떡볶이','국밥','마�
 
 // 매일 다른 위트 문구 (날짜 시드로 그날 고정, 하루 안에서는 랜덤 변주)
 var _ARR_WIT_MORN = [
-  '오늘의 연료를 보급할 시간이에요',
-  '커피 한 잔이면 오전은 이미 절반 성공',
-  '출근 도장보다 먼저 찍어야 할 건 카페 도장이죠',
-  '카페인 잔량 경고등이 켜졌습니다',
-  '지금 주문하면 자리에 앉자마자 첫 모금',
-  '오늘도 무사히 도착 중, 상은 커피로 받으세요',
-  '아침의 승자는 미리 주문한 사람입니다',
-  '눈은 떴지만 정신은 아직이라면 이 방법뿐',
-  '지하철에서 버틴 자신에게 주는 보상 타임',
-  '한 잔 들고 들어가면 오늘 컨디션 90점 시작',
-  '월요일이든 아니든 커피는 죄가 없어요',
-  '줄 서기 전에 미리 찍어두면 5분 이득'
+  '오늘 하루는 커피 한 잔으로 화이팅',
+  '따뜻한 한 잔이 오늘의 시작을 도와줄 거예요',
+  '아직 잠이 덜 깼다면, 커피가 대신 깨워줄게요',
+  '오늘도 잘 해낼 당신에게 커피 한 잔의 응원',
+  '한 모금이면 마음이 조금 가벼워질 거예요',
+  '바쁜 아침일수록 나를 위한 한 잔이 필요해요',
+  '커피 향으로 오늘 하루를 열어봐요',
+  '오늘의 첫 다정함은 커피로 시작해요',
+  '어제의 피로는 여기 두고, 따뜻한 한 잔과 함께',
+  '괜찮아요, 커피 한 잔이면 다시 시작할 수 있어요',
+  '오늘 하루도 당신 편이에요, 한 잔 꼭 챙기세요',
+  '작은 한 잔이 오늘을 버티게 해줄 거예요'
 ];
+// {menu} = 추천 메뉴로 치환
 var _ARR_WIT_EVE = [
-  '오늘 하루치 노동, 야식으로 정산합니다',
-  '퇴근길의 마지막 미션은 저녁 메뉴 정하기',
-  '집까지 10분, 배달 앱 켜기 딱 좋은 타이밍',
-  '오늘 고생한 나에게 야식 하나쯤은 정당방위',
-  '칼로리는 내일의 내가 처리합니다',
-  '퇴근했으면 이제 맛있는 걸 먹을 자격이 생겼어요',
-  '집에 도착하자마자 먹으려면 지금 주문각',
-  '하루의 엔딩 크레딧엔 야식이 올라가야죠',
-  '오늘도 버텼으니 이 정도는 허용됩니다',
-  '저녁 메뉴 고민은 짧을수록 행복해집니다',
-  '고생한 위장에게도 퇴근 선물을',
-  '내일 걱정은 내일 하고 오늘은 맛있게'
+  '오늘 하루도 고생했어요, {menu}으로 스트레스 날려요',
+  '수고한 오늘, {menu} 한 입이면 충분히 위로가 돼요',
+  '고생한 당신에게 {menu} 정도는 선물해도 되잖아요',
+  '오늘의 무게는 여기까지, 이제 {menu} 시간이에요',
+  '{menu} 앞에서는 하루의 피로도 잠깐 쉬어가요',
+  '버텨낸 하루, {menu}으로 마무리해요',
+  '잘 견뎠어요 오늘도. 오늘 저녁은 {menu} 어때요',
+  '퇴근길 끝에 {menu}가 기다린다면 조금 덜 지치죠',
+  '오늘 애쓴 마음, {menu}으로 달래줘요',
+  '내일 걱정은 잠시 접어두고 {menu} 한 그릇',
+  '하루의 끝, {menu}만큼 좋은 마무리도 없어요',
+  '집까지 10분, 오늘의 보상은 {menu}로 정했어요'
 ];
 var _ARR_CHEER_MORN = [
   '오늘 하루도 화이팅이에요',
-  '오늘도 좋은 하루 되세요',
-  '오늘 하루 가볍게 시작해봐요',
-  '오늘도 잘 해내실 거예요',
-  '기분 좋은 하루 되시길 바라요'
+  '당신의 하루를 응원할게요',
+  '오늘도 무리하지 말고 천천히 가요',
+  '좋은 일 하나쯤 있는 하루가 되길',
+  '오늘의 당신도 충분히 잘하고 있어요'
 ];
 var _ARR_CLOSE_EVE = [
-  '오늘 하루도 고생 많으셨어요',
-  '오늘도 수고 많으셨습니다 푹 쉬세요',
-  '하루 마무리 편안하게 하세요',
-  '오늘 하루 잘 마무리하시길 바라요',
-  '고생한 하루, 이제 쉬어도 좋아요'
+  '오늘 하루도 정말 수고했어요',
+  '이제 푹 쉬어도 괜찮아요',
+  '오늘의 당신, 충분히 잘 버텼어요',
+  '집에 도착하면 편하게 쉬세요',
+  '내일의 걱정은 내일의 몫으로 남겨둬요'
 ];
 
 function _arrPickDaily(pool, extraSeed){
@@ -18047,33 +18247,37 @@ function _arrBuildAlert(destStn, arrHour, arrMs){
   var isMorn = (arrHour < 10);
   var kind   = isMorn ? 'cafe' : 'night';
   var place  = _arrPickPlace(destStn, kind);
-  var pick   = isMorn
-    ? _ARR_DRINKS[Math.floor(Math.random()*_ARR_DRINKS.length)]
-    : _ARR_NIGHT_MENU[Math.floor(Math.random()*_ARR_NIGHT_MENU.length)];
+
+  // 추천 메뉴: 저녁은 가게 업종에서, 없으면 기본 목록에서
+  var menu;
+  if(isMorn){
+    menu = _ARR_DRINKS[Math.floor(Math.random()*_ARR_DRINKS.length)];
+  } else {
+    var fromCat = place ? String(place.c||'').split('/')[0].replace(/\s+/g,' ').trim() : '';
+    menu = fromCat || _ARR_NIGHT_MENU[Math.floor(Math.random()*_ARR_NIGHT_MENU.length)];
+  }
+
+  var arr  = new Date(arrMs);
+  var hhmm = ('0'+arr.getHours()).slice(-2)+':'+('0'+arr.getMinutes()).slice(-2);
 
   var lines = [];
-  var arr = new Date(arrMs);
-  var hhmm = ('0'+arr.getHours()).slice(-2)+':'+('0'+arr.getMinutes()).slice(-2);
-  lines.push((destStn||'목적지') + ' 도착 ' + _ARR_PRE_MIN + '분 전 · 예정 ' + hhmm);
-  lines.push(_arrPickDaily(isMorn ? _ARR_WIT_MORN : _ARR_WIT_EVE, arr.getHours()));
+  lines.push('하차 10분 전이에요.');
+  lines.push((destStn ? destStn + ' ' : '') + '도착 예정 ' + hhmm);
+  lines.push('');
+  // 감성 한 줄 (매일 다른 문구)
+  var wit = _arrPickDaily(isMorn ? _ARR_WIT_MORN : _ARR_WIT_EVE, arr.getHours());
+  lines.push(wit.replace(/\{menu\}/g, menu));
 
   if(place){
     var dist = (place.d != null) ? (place.d + 'm') : ((isMorn?_ARR_CAFE_M:_ARR_NIGHT_M)+'m 이내');
-    lines.push('');
     lines.push((isMorn ? '☕ ' : '🍗 ') + place.n + ' · ' + dist);
-    if(place.c) lines.push('   ' + place.c + (place.a ? ' · ' + place.a : ''));
-    if(isMorn){
-      lines.push('   오늘은 ' + pick + ' 한 잔 어떠세요?');
-    } else {
-      // 가게 업종에서 메뉴를 뽑아 어색한 조합 방지 (예: 해물찜집에 돈가스 추천 X)
-      var menu = String(place.c||'').split('/')[0].replace(/\s+/g,' ').trim() || pick;
-      lines.push('   오늘은 ' + menu + ' 어떠세요?');
-    }
-  } else {
-    lines.push('');
+    // 저녁은 감성 문구에 이미 메뉴가 들어가므로 업종·주소만 (문구 중복 방지)
     lines.push(isMorn
-      ? '☕ 근처 카페에서 ' + pick + ' 한 잔 어떠세요?'
-      : '🍗 근처에서 ' + pick + ' 어떠세요?');
+      ? '   ' + (place.c ? place.c + ' · ' : '') + menu + ' 한 잔 어때요'
+      : '   ' + (place.c || '') + (place.a ? ' · ' + place.a : ''));
+  } else {
+    lines.push(isMorn ? '☕ 근처 카페에서 ' + menu + ' 한 잔 어때요'
+                      : '🍗 근처에서 ' + menu + ' 어때요');
   }
   lines.push('');
   lines.push(isMorn
@@ -18081,8 +18285,7 @@ function _arrBuildAlert(destStn, arrHour, arrMs){
     : _ARR_CLOSE_EVE[Math.floor(Math.random()*_ARR_CLOSE_EVE.length)]);
 
   return {
-    title: (isMorn ? '☕ 도착 10분 전 · 모닝 커피' : '🍗 도착 10분 전 · 야식 추천')
-           + (destStn ? ' · ' + destStn : ''),
+    title: '🚉 하차 10분 전' + (destStn ? ' · ' + destStn : '') + (isMorn ? ' ☕' : ' 🍗'),
     body: lines.join('\n'),
     kind: kind
   };
@@ -18445,6 +18648,8 @@ function _cmScheduleOS(){
     var LN = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.LocalNotifications;
     if(!LN) return;
     LN.cancel({ notifications:[{id:9101},{id:9102}] }).catch(function(){});
+    // ★ 알림 정책 확인 (commute_brief 허용 시에만 예약)
+    if(typeof _notifAllowed==='function' && !_notifAllowed('commute_brief')) return;
     if(!_cmAlarm.on) return;
     var mh = parseInt(_cmAlarm.morn.split(':')[0]), mm = parseInt(_cmAlarm.morn.split(':')[1]);
     var eh = parseInt(_cmAlarm.eve.split(':')[0]),  em = parseInt(_cmAlarm.eve.split(':')[1]);
@@ -20013,6 +20218,208 @@ var _AREA_LIST = ['은평','동북','노원','강동','하남','김포','파주'
 // ── 게시글 생성 함수 ──────────────────────────────────────
 // (_AI_POSTS, _POST_ID는 위에서 이미 선언됨 — 재선언 시 초기 게시글이 초기화되는 버그 방지)
 
+
+// ══════════════════════════════════════════════════════════════════════
+// ★ 게시글 주제 다양화 엔진 (실시간소통과 동일 조건)
+//   ① 정치·분쟁 소재 차단 (_ltIsBanned 공용)
+//   ② 그날의 핫이슈 뉴스 + 날씨 + 계절/요일 반영해 작성
+//   ③ 한 번 쓴 주제·템플릿은 5개월(150일) 동안 재사용 금지
+//   ④ 역 이름만 바꾼 동일 내용 중복 차단 (템플릿 원문 기준으로 기록)
+// ══════════════════════════════════════════════════════════════════════
+var _POST_TOPIC_TTL = 150*24*3600*1000;   // 5개월
+
+function _postTopicLog(){
+  if(window._postLogMem) return window._postLogMem;
+  var m={};
+  try { m = JSON.parse(localStorage.getItem('postTopicLog')||'{}') || {}; } catch(e){ m={}; }
+  var now=Date.now(), changed=false;
+  for(var k in m){ if(!m[k] || now-m[k] > _POST_TOPIC_TTL){ delete m[k]; changed=true; } }
+  window._postLogMem=m;
+  if(changed) _postTopicSave();
+  return m;
+}
+function _postTopicSave(){
+  try { localStorage.setItem('postTopicLog', JSON.stringify(window._postLogMem||{})); } catch(e){}
+}
+function _postSlug(t){
+  // 역·노선·숫자를 제거해 '역 이름만 바꾼 같은 글'을 같은 키로 취급
+  return String(t||'')
+    .replace(/\{[a-z0-9]+\}/gi,'')
+    .replace(/[0-9]+/g,'')
+    .replace(/[^가-힣a-zA-Z]/g,'')
+    .slice(0,20).toLowerCase();
+}
+function _postUsed(key){ return !!(key && _postTopicLog()[key]); }
+function _postMark(key){
+  if(!key) return;
+  var m=_postTopicLog();
+  m[key]=Date.now();
+  var ks=Object.keys(m);
+  if(ks.length>3000){
+    ks.sort(function(a,b){ return m[a]-m[b]; });
+    ks.slice(0,900).forEach(function(k){ delete m[k]; });
+  }
+  _postTopicSave();
+}
+function _postBanned(t){
+  return (typeof _ltIsBanned==='function') ? _ltIsBanned(t) : false;
+}
+// 이미 목록에 같은 제목이 있으면 중복
+function _postDupInList(title){
+  try{
+    var s=_postSlug(title);
+    if(!s) return false;
+    return (_AI_POSTS||[]).some(function(p){ return p && _postSlug(p.title)===s; });
+  }catch(e){ return false; }
+}
+
+// ── 오늘의 상황(뉴스·날씨·계절) 기반 게시글 ──
+var _POST_BODY_LEAD = [
+  '오늘 문득 그런 생각이 들더라고요',
+  '출근길에 계속 이 생각만 했음',
+  '다들 어떠신지 궁금해서 글 올려봅니다',
+  '별거 아닌데 공유하고 싶었어요',
+  '지하철에서 멍때리다가 적어봅니다'
+];
+var _POST_BODY_MID = [
+  '주변 사람들 보니까 다들 비슷한 것 같기도 하고',
+  '혼자만 이러는 건 아니겠죠',
+  '어제까지는 괜찮았는데 오늘따라 유독 그러네요',
+  '작년 이맘때도 비슷했던 기억이 나요',
+  '퇴근하고 나면 또 까먹을 것 같긴 한데'
+];
+var _POST_BODY_END = [
+  '다들 어떻게 하시는지 댓글로 알려주세요',
+  '좋은 방법 있으면 공유 부탁드려요',
+  '오늘 하루도 다들 무사히 보내시길',
+  '그냥 이런 날도 있는 거겠죠',
+  '읽어주셔서 감사합니다'
+];
+function _postBody(lines){
+  var arr = (lines||[]).filter(Boolean);
+  arr.push(_rnd(_POST_BODY_LEAD));
+  arr.push(_rnd(_POST_BODY_MID));
+  arr.push(_rnd(_POST_BODY_END));
+  return arr.join('\n\n');
+}
+
+// 오늘의 컨텍스트 게시글 후보 만들기 → {key,title,body,cat} | null
+function _ctxPostCandidate(){
+  try{
+    if(typeof _ltFetchHotNews==='function') _ltFetchHotNews();
+    var cands=[];
+    var wx  = (typeof _ltWx==='function')  ? _ltWx()  : null;
+    var dy  = (typeof _ltDay==='function') ? _ltDay() : null;
+    var ymd = dy ? dy.ymd : new Date().toDateString();
+
+    // ① 그날의 핫이슈 뉴스 (정치 제외)
+    var hot = (typeof _LT_HOT_NEWS!=='undefined') ? (_LT_HOT_NEWS||[]) : [];
+    hot.slice(0,12).forEach(function(n){
+      if(!n || !n.title || _postBanned(n.title)) return;
+      var kw = (typeof _ltNewsKeyword==='function') ? _ltNewsKeyword(n.title) : n.title;
+      if(!kw || _postBanned(kw)) return;
+      cands.push({
+        key: 'post_hot_' + _postSlug(kw),
+        cat: '일상',
+        title: '"' + kw + '" 이거 다들 보셨어요?',
+        body: _postBody([
+          '오늘 뉴스에 "' + kw + '" 관련 얘기가 계속 올라오더라고요',
+          '지하철에서도 이 얘기하는 분들 몇 분 봤어요'
+        ])
+      });
+    });
+
+    // ② 날씨
+    if(wx){
+      var t = wx.temp, rain = (wx.rain!=null ? wx.rain : -1);
+      if(t != null){
+        var tb = Math.floor(t/5)*5;
+        cands.push({
+          key: 'post_wx_t' + tb + '_' + ymd,
+          cat: '일상',
+          title: (t>=30 ? '오늘 ' + t + '도라는데 다들 어떻게 버티세요'
+                : t>=25 ? '오늘 ' + t + '도, 딱 반팔 하나면 되겠더라고요'
+                : t>=15 ? '오늘 ' + t + '도라 걷기 딱 좋은 날씨네요'
+                : t>=5  ? '오늘 ' + t + '도, 겉옷 없이 나갔다가 후회함'
+                :         '오늘 ' + t + '도라던데 다들 든든하게 입으셨나요'),
+          body: _postBody([
+            '아침에 확인하니 오늘 기온이 ' + t + '도더라고요' + (wx.txt ? ' (' + wx.txt + ')' : ''),
+            (t>=28 ? '지하철 에어컨 나오는 칸 찾아서 이동했습니다'
+                   : t<=5 ? '지하철 안이 그나마 따뜻해서 살 것 같았어요'
+                          : '창밖 보면서 가는데 기분이 나쁘지 않더라고요')
+          ])
+        });
+      }
+      if(rain >= 50){
+        cands.push({
+          key: 'post_wx_rain_' + ymd, cat: '일상',
+          title: '오늘 비 온다는데 우산 챙기셨어요?',
+          body: _postBody(['강수확률이 ' + rain + '%라 아침부터 우산 들고 나왔어요',
+                           '지하철 계단이 미끄러우니 다들 조심하세요'])
+        });
+      } else if(rain >= 20){
+        cands.push({
+          key: 'post_wx_drizzle_' + ymd, cat: '일상',
+          title: '우산 들고 갈까 말까 30분째 고민중',
+          body: _postBody(['강수확률 ' + rain + '%라는 애매한 숫자 때문에 매번 고민돼요',
+                           '들고 나가면 안 오고, 두고 나가면 꼭 오더라고요'])
+        });
+      }
+    }
+
+    // ③ 계절
+    if(dy){
+      var seasonTxt = {
+        '봄':['이맘때 봄 공기는 확실히 다르네요','퇴근길에 해가 아직 남아있는 게 좋아요'],
+        '여름':['여름엔 지하철 에어컨이 진짜 구원이에요','밖에 나가면 5분 만에 땀범벅됩니다'],
+        '가을':['가을 저녁 공기가 좋아서 한 정거장 걸었어요','이 계절엔 괜히 마음이 차분해지네요'],
+        '겨울':['겨울엔 나가기 전에 마음의 준비가 필요해요','손 시려워서 폰도 못 꺼내겠더라고요']
+      }[dy.season] || [];
+      cands.push({
+        key: 'post_season_' + dy.season + '_' + dy.mo, cat: '일상',
+        title: dy.season + '이라 그런지 요즘 출퇴근길 느낌이 다르네요',
+        body: _postBody(seasonTxt)
+      });
+      cands.push({
+        key: 'post_dow_' + (dy.weekend?'wk':'wd') + '_' + dy.mo, cat: '일상',
+        title: dy.weekend ? '주말인데도 지하철에 사람 많더라고요' : '이번 주도 절반 왔네요',
+        body: _postBody(dy.weekend
+          ? ['주말이라 여유롭겠지 했는데 생각보다 붐볐어요','다들 어디 나들이 가시는 걸까요']
+          : ['한 주가 언제 이렇게 지나갔는지 모르겠어요','남은 날도 무리 없이 지나가면 좋겠네요'])
+      });
+    }
+
+    // ④ 일상 주제 뱅크 (실시간소통과 공용) × 변주
+    if(typeof _LT_THEME_BANK!=='undefined'){
+      _LT_THEME_BANK.forEach(function(tb){
+        (tb.s||[]).forEach(function(sent, si){
+          cands.push({
+            key: 'post_bank_' + tb.k + '_' + si, cat: '일상',
+            title: sent,
+            body: _postBody(['요즘 계속 이 생각이 들어서 글 남겨봅니다'])
+          });
+        });
+      });
+    }
+
+    if(!cands.length) return null;
+    // 5개월 내 사용하지 않은 주제 우선 (뉴스·날씨 등 '오늘' 주제에 가중)
+    var fresh = cands.filter(function(c){
+      return !_postUsed(c.key) && !_postBanned(c.title) && !_postBanned(c.body) && !_postDupInList(c.title);
+    });
+    var pick;
+    if(fresh.length){
+      var live = fresh.filter(function(c){ return c.key.indexOf('post_bank_') !== 0; });
+      pick = (live.length && Math.random() < 0.6) ? _rnd(live) : _rnd(fresh);
+    } else {
+      return null;   // 전부 소진 → 기존 템플릿 경로로
+    }
+    if(!pick) return null;
+    _postMark(pick.key);
+    return pick;
+  }catch(e){ return null; }
+}
+
 function _generatePost() {
   // ★ 실시간 뉴스가 있으면 우선 사용 (실제 현재 시점 기사 기반)
   var hasRealtimeNews = (typeof _REALTIME_NEWS !== 'undefined' && _REALTIME_NEWS.length > 0);
@@ -20024,6 +20431,28 @@ function _generatePost() {
   if(isNews && typeof _makeNewsPostFromRealtime === 'function') {
     var rt = _makeNewsPostFromRealtime();
     if(rt) return rt;  // 실시간 뉴스 성공
+  }
+
+  // ★ 오늘의 상황(핫이슈 뉴스·날씨·계절/요일·생활주제) 기반 글 — 5개월 내 미사용 주제만
+  var _ctx = (typeof _ctxPostCandidate==='function') ? _ctxPostCandidate() : null;
+  if(_ctx){
+    var _cn = _rnd(_NICK_POOL);
+    var _cp = {
+      id:    _POST_ID++,
+      cat:   _ctx.cat || '일상',
+      tag:   _ctx.cat || '일상',
+      title: _ctx.title,
+      body:  _ctx.body,
+      nick:  _cn,
+      line:  '',
+      time:  Date.now() - _rndInt(0, 1800000),
+      views: _rndInt(12, 380),
+      likes: _rndInt(0, 40), like: _rndInt(0, 40),
+      lol:   _rndInt(0, 12), sad: _rndInt(0, 8),
+      cmts:  []
+    };
+    _cp.cmts = _initCmts(_cp.time, _cp);
+    return _cp;
   }
 
   // 실시간 뉴스 없거나 일상 차례 → 일상글 (사는 이야기)
@@ -20038,14 +20467,30 @@ function _generatePost() {
       tpl = _rnd(_DAILY_TOPICS);  // 출퇴근 글이면 95% 확률로 다시 뽑기
     }
   }
-  // ★ 최근 사용한 템플릿과 겹치지 않게 (같은 글 반복 방지)
-  if(typeof window._recentPostTpls === 'undefined') window._recentPostTpls = [];
-  var _pt = 0;
-  while(window._recentPostTpls.indexOf(tpl.title) >= 0 && _pt++ < 10){
-    tpl = _rnd(_DAILY_TOPICS);
+  // ★ 5개월(150일) 내 사용한 템플릿은 재사용 금지 (역 이름만 바꾼 중복글 차단)
+  //    템플릿 원문({stn}·{line} 치환 전) 기준으로 기록하므로 역명만 다른 글은 같은 글로 취급
+  if(typeof _postUsed === 'function'){
+    var _pt = 0, _tplKey = 'post_tpl_' + _postSlug(tpl.title);
+    while(_postUsed(_tplKey) && _pt++ < 30){
+      tpl = _rnd(_DAILY_TOPICS);
+      _tplKey = 'post_tpl_' + _postSlug(tpl.title);
+    }
+    if(_postUsed(_tplKey)){
+      // 전부 소진 → 가장 오래전에 쓴 템플릿 사용
+      var _m = _postTopicLog(), _best = null, _bt = Infinity;
+      _DAILY_TOPICS.forEach(function(t){
+        var k='post_tpl_' + _postSlug(t.title);
+        var v=_m[k] || 0;
+        if(v < _bt){ _bt=v; _best=t; }
+      });
+      if(_best){ tpl = _best; _tplKey = 'post_tpl_' + _postSlug(tpl.title); }
+    }
+    _postMark(_tplKey);
   }
+  // 최근 사용 템플릿 회피(세션 내 즉시 반복 방지)
+  if(typeof window._recentPostTpls === 'undefined') window._recentPostTpls = [];
   window._recentPostTpls.push(tpl.title);
-  if(window._recentPostTpls.length > 6) window._recentPostTpls.shift();
+  if(window._recentPostTpls.length > 8) window._recentPostTpls.shift();
 
   var line  = _rnd(_LINE_LIST);
   var stns  = _STATION_SAMPLES[line] || ['서울역'];
@@ -20565,6 +21010,8 @@ function _bgArrivalNotify(idx){
   var LN = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.LocalNotifications;
 
   function fire(key, id, title, body, vib){
+    // ★ 알림 정책: '하차 10분 전' 외 알림 비활성화
+    if(typeof _notifAllowed==='function' && !_notifAllowed('arrival')) return;
     if(fired[key]) return;
     fired[key] = true;
     try {
@@ -20638,6 +21085,8 @@ function _checkRouteProximityAlert(lat, lng) {
         var LN = window.Capacitor &&
                  window.Capacitor.Plugins &&
                  window.Capacitor.Plugins.LocalNotifications;
+        // ★ 알림 정책: '하차 10분 전' 외 알림 비활성화
+        if(typeof _notifAllowed==='function' && !_notifAllowed('proximity')) LN = null;
         if(LN) {
           LN.schedule({ notifications:[{
             id:        9000 + i,
@@ -20715,6 +21164,8 @@ function _journeyRemain(){
 }
 
 function _showForegroundNotif(currentStn, destStn, remainStops){
+  // ★ 알림 정책: 상주(포그라운드) 알림 비활성화
+  if(typeof _notifAllowed==='function' && !_notifAllowed('fg_service')) return;
   try {
     var LN = window.Capacitor &&
              window.Capacitor.Plugins &&
@@ -22744,8 +23195,23 @@ function _parseNewsRSS(xml) {
 
 // 실시간 뉴스 1건 → 커뮤니티 게시글 객체로 변환
 function _makeNewsPostFromRealtime() {
-  if(!_REALTIME_NEWS.length) return null;
-  var news = _rnd(_REALTIME_NEWS);
+  // ★ 지하철 뉴스 + 그날의 핫이슈 뉴스 통합, 정치·분쟁 기사 제외
+  var pool = [];
+  try{
+    if(typeof _REALTIME_NEWS !== 'undefined') pool = pool.concat(_REALTIME_NEWS||[]);
+    if(typeof _LT_HOT_NEWS !== 'undefined')   pool = pool.concat(_LT_HOT_NEWS||[]);
+  }catch(e){}
+  pool = pool.filter(function(n){
+    if(!n || !n.title) return false;
+    if(typeof _postBanned==='function' && _postBanned(n.title)) return false;
+    // 5개월 내 같은 기사 주제로 이미 글을 썼으면 제외
+    if(typeof _postUsed==='function' && _postUsed('post_news_' + _postSlug(n.title))) return false;
+    if(typeof _postDupInList==='function' && _postDupInList(n.title)) return false;
+    return true;
+  });
+  if(!pool.length) return null;
+  var news = _rnd(pool);
+  if(typeof _postMark==='function') _postMark('post_news_' + _postSlug(news.title));
   var now = Date.now();
   // 기사 발행시각 파싱 (실패 시 현재시각 근처)
   var pubMs = now - _rndInt(300000, 7200000);
@@ -22753,7 +23219,7 @@ function _makeNewsPostFromRealtime() {
     var pt = Date.parse(news.pubDate);
     if(!isNaN(pt)) pubMs = pt;
   }
-  var bodyText = '[' + news.source + '] 보도\n\n' +
+  var bodyText = '[' + (news.source || '뉴스') + '] 보도\n\n' +
                  '자세한 내용은 아래 링크에서 확인하세요.' +
                  (news.link ? '\n\n🔗 ' + news.link : '');
   var post = {
@@ -32010,37 +32476,84 @@ document.addEventListener('DOMContentLoaded', function() {
   align-items:flex-end;justify-content:center;}
 .bus-route-sheet{background:var(--bg);width:100%;max-width:560px;height:85vh;border-radius:20px 20px 0 0;
   display:flex;flex-direction:column;overflow:hidden;box-shadow:0 -4px 24px rgba(0,0,0,.3);}
-.bus-route-head{flex-shrink:0;display:flex;align-items:center;gap:10px;padding:16px;
-  border-bottom:1px solid var(--border);}
+.bus-route-head{flex-shrink:0;display:flex;align-items:center;gap:10px;padding:14px 16px;
+  border-bottom:1px solid var(--border);background:var(--card);}
+.bus-route-sheet{border-radius:22px 22px 0 0;}
+.bus-route-head::before{content:'';position:absolute;top:8px;left:50%;transform:translateX(-50%);
+  width:38px;height:4px;border-radius:2px;background:var(--border);}
+.bus-route-head{position:relative;padding-top:20px;}
 .bus-route-head .bus-route-x{margin-left:auto;background:none;border:none;color:var(--sub);
   font-size:22px;cursor:pointer;line-height:1;padding:4px 8px;}
 .bus-route-refresh{background:var(--card2);border:1px solid var(--border);border-radius:50%;
   width:36px;height:36px;color:var(--text);font-size:16px;cursor:pointer;transition:transform .5s;}
-.bus-route-status{flex-shrink:0;padding:10px 16px;font-size:12.5px;font-weight:700;
-  color:var(--text);background:var(--card);border-bottom:1px solid var(--border);}
-.bus-route-body{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;min-height:0;}
-.bus-route-list{padding:8px 0;}
-.bus-route-stop{display:flex;gap:12px;padding:0 16px;min-height:54px;position:relative;}
-.bus-route-line{position:relative;width:22px;flex-shrink:0;display:flex;justify-content:center;}
-.bus-route-line::before{content:'';position:absolute;top:0;bottom:0;width:4px;
-  background:var(--border);border-radius:2px;}
-.bus-route-stop:first-child .bus-route-line::before{top:50%;}
-.bus-route-stop:last-child .bus-route-line::before{bottom:50%;}
-.bus-route-marker{position:relative;z-index:1;display:flex;align-items:center;height:100%;}
-.bus-route-dot{width:11px;height:11px;border-radius:50%;background:var(--sub);
-  border:2px solid var(--bg);}
-.bus-route-busdot{font-size:20px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.4));}
-.bus-route-info{flex:1;padding:8px 0;border-bottom:1px solid var(--border);}
-.bus-route-stop:last-child .bus-route-info{border-bottom:none;}
-.bus-route-name{font-size:14.5px;font-weight:600;color:var(--text);}
-.bus-route-no{font-size:11.5px;color:var(--sub);margin-top:2px;}
-.bus-route-here{background:rgba(47,124,246,.10);}
-.bus-route-here .bus-route-name{font-weight:800;color:#2f7cf6;}
-.bus-route-businfo{font-size:12px;font-weight:700;color:#2f7cf6;margin-top:3px;}
-.bus-route-mine{background:rgba(255,59,48,.12);border-left:3px solid #ff3b30;}
-.bus-route-mine .bus-route-name{font-weight:800;color:#ff3b30;}
-.bus-route-mymarker{font-size:20px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35));}
-.bus-route-myinfo{font-size:12px;font-weight:800;color:#ff3b30;margin-top:3px;}
+.bus-route-body{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;min-height:0;background:var(--bg);}
+
+/* ── 노선 상세(정류장 타임라인) ── */
+.brs-top{background:var(--card);padding:12px 16px 10px;
+  border-bottom:1px solid var(--border);}
+.brs-route-dir{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text);
+  font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.brs-route-dir b{font-weight:800;overflow:hidden;text-overflow:ellipsis;}
+.brs-arrow{color:var(--sub);font-weight:700;flex-shrink:0;}
+.brs-top-meta{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
+.brs-chip{font-size:11.5px;font-weight:700;padding:4px 9px;border-radius:20px;
+  background:var(--card2);color:var(--sub);border:1px solid var(--border);}
+.brs-chip.on{background:rgba(47,124,246,.12);color:#2f7cf6;border-color:rgba(47,124,246,.25);}
+.brs-chip.me{background:rgba(255,59,48,.12);color:#ff3b30;border-color:rgba(255,59,48,.25);}
+
+.brs-list{padding:0 0 24px;}
+.brs-sec{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:6px;
+  padding:9px 16px;font-size:12.5px;color:var(--sub);background:var(--bg);
+  border-bottom:1px solid var(--border);}
+.brs-sec b{color:var(--text);font-weight:800;}
+.brs-sec-ar{font-weight:900;font-size:13px;}
+.brs-sec-tag{margin-left:auto;font-size:11px;font-weight:800;padding:2px 8px;border-radius:20px;}
+.brs-sec-up   .brs-sec-ar{color:#00b341;}
+.brs-sec-up   .brs-sec-tag{background:rgba(0,179,65,.14);color:#00b341;}
+.brs-sec-down .brs-sec-ar{color:#ff9f0a;}
+.brs-sec-down .brs-sec-tag{background:rgba(255,159,10,.16);color:#ff9f0a;}
+.brs-sec-na   .brs-sec-ar{color:#2f7cf6;}
+.brs-sec-na   .brs-sec-tag{background:rgba(47,124,246,.14);color:#2f7cf6;}
+
+.brs-turn{display:flex;justify-content:center;padding:10px 0 6px;}
+.brs-turn-badge{font-size:11.5px;font-weight:800;color:#ff9f0a;background:rgba(255,159,10,.14);
+  border:1px solid rgba(255,159,10,.3);border-radius:20px;padding:4px 12px;}
+
+.brs-row{display:flex;gap:12px;padding:0 16px;min-height:56px;cursor:pointer;
+  transition:background .15s;}
+.brs-row:active{background:var(--card2);}
+.brs-rail{position:relative;width:20px;flex-shrink:0;display:flex;justify-content:center;align-items:center;}
+.brs-rail::before{content:'';position:absolute;left:50%;transform:translateX(-50%);
+  top:0;bottom:0;width:5px;border-radius:3px;background:var(--border);}
+.brs-rail-up::before{background:#00b341;}
+.brs-rail-down::before{background:#ff9f0a;}
+.brs-rail-na::before{background:#2f7cf6;}
+.brs-rail-first::before{top:50%;border-radius:3px 3px 0 0;}
+.brs-rail-last::before{bottom:50%;border-radius:0 0 3px 3px;}
+.brs-dot{position:relative;z-index:1;width:9px;height:9px;border-radius:50%;
+  background:var(--bg);border:2.5px solid rgba(255,255,255,.9);
+  box-shadow:0 0 0 2px rgba(0,0,0,.06);}
+.brs-rail-up   .brs-dot{background:#fff;box-shadow:0 0 0 2px #00b341;border-color:#fff;}
+.brs-rail-down .brs-dot{background:#fff;box-shadow:0 0 0 2px #ff9f0a;border-color:#fff;}
+.brs-rail-na   .brs-dot{background:#fff;box-shadow:0 0 0 2px #2f7cf6;border-color:#fff;}
+.brs-bus{position:relative;z-index:2;font-size:15px;line-height:1;background:#2f7cf6;
+  border-radius:9px;padding:4px 3px;box-shadow:0 2px 6px rgba(47,124,246,.45);}
+.brs-me{position:relative;z-index:2;font-size:17px;line-height:1;
+  filter:drop-shadow(0 2px 3px rgba(255,59,48,.45));}
+
+.brs-body{flex:1;min-width:0;padding:10px 0;border-bottom:1px solid var(--border);}
+.brs-name{font-size:15px;font-weight:700;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.brs-meta{display:flex;align-items:center;gap:8px;margin-top:3px;}
+.brs-id{font-size:11.5px;color:var(--sub);letter-spacing:.3px;}
+.brs-map{margin-left:auto;font-size:11px;font-weight:700;color:#2f7cf6;opacity:.85;}
+.brs-note{font-size:12px;font-weight:800;margin-top:5px;}
+.brs-note.bus{color:#2f7cf6;}
+.brs-note.me{color:#ff3b30;}
+.brs-here{background:rgba(47,124,246,.08);}
+.brs-here .brs-name{color:#2f7cf6;font-weight:800;}
+.brs-mine{background:rgba(255,59,48,.09);}
+.brs-mine .brs-name{color:#ff3b30;font-weight:800;}
 .bus-empty{text-align:center;padding:60px 20px;color:var(--sub);font-size:14px;line-height:1.8;}
 .bus-loading{text-align:center;padding:40px;color:var(--sub);}
 .bus-spinner{width:28px;height:28px;border:3px solid var(--border);
