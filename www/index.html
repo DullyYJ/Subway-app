@@ -4132,7 +4132,7 @@ function _renderBusRoute(stations, buses){
     var endNm = (g.items[g.items.length-1].s.nodenm) || '';
     var dirLabel = (g.cls==='up' ? '상행' : (g.cls==='down' ? '하행' : '운행'));
     html += '<div class="brs-sec brs-sec-' + g.cls + '">'
-          +   '<span class="brs-sec-ar">↓</span>'
+          +   '<span class="brs-sec-ar">▼</span>'
           +   '<b>' + _ltEsc(endNm) + '</b> 방면'
           +   '<span class="brs-sec-tag">' + dirLabel + '</span>'
           + '</div>';
@@ -4145,6 +4145,9 @@ function _renderBusRoute(stations, buses){
       var railCls = 'brs-rail brs-rail-' + g.cls
         + (k===0 ? ' brs-rail-first' : '')
         + (k===g.items.length-1 ? ' brs-rail-last' : '');
+      // ★ 진행 방향 화살표 (구간 중간마다 표시)
+      var arrow = (k < g.items.length-1 && (k % 2 === 0))
+        ? '<span class="brs-arw">▼</span>' : '';
 
       var mark = '<span class="brs-dot"></span>';
       if(here)        mark = '<span class="brs-bus">🚌</span>';
@@ -4161,7 +4164,7 @@ function _renderBusRoute(stations, buses){
       }
 
       html += '<div class="brs-row' + (here?' brs-here':'') + (isMine?' brs-mine':'') + '" onclick="_brStopMap(this,' + o.idx + ')">'
-           +    '<div class="' + railCls + '">' + mark + '</div>'
+           +    '<div class="' + railCls + '">' + arrow + mark + '</div>'
            +    '<div class="brs-body">'
            +      '<div class="brs-name">' + _ltEsc(s.nodenm || '') + '</div>'
            +      '<div class="brs-meta"><span class="brs-id">' + _ltEsc(s.nodeno || s.nodeid || '') + '</span>'
@@ -5327,7 +5330,9 @@ function _renderTransitResultCard(data, start, dest, cacheSource) {
 window._renderTransitResultCard = _renderTransitResultCard;
 
 // ── 실제 다음 차(버스 도착/지하철 시각표) 시각으로 타임라인 보정 ──
-function _applyRealBoardTime(){
+function _applyRealBoardTime(opts){
+  opts = opts || {};
+  var _allowEarlier = !!opts.allowEarlier;
   try{
     if(window._metroRouteMode === true) return;   // ★ 노선도 경로: 순수 소요시간만(대기 보정 안 함)
     if(_baseTimeMs != null) return;   // 예상(미래 기준시각)일 땐 실시간 도착 보정 안 함
@@ -5339,11 +5344,21 @@ function _applyRealBoardTime(){
     var nowMin = (typeof kstMinutesAdj==='function') ? kstMinutesAdj() : (new Date().getHours()*60+new Date().getMinutes());
     var arriveStopMin = nd._schedMin;   // 현재 계산상 탑승(정류장 도착) 시각
 
-    var applyDelay = function(nextDepMin){
+    // ★ allowEarlier=true 이면 '더 빠른 차'로 앞당기는 보정도 허용
+    //   (사용자가 예상보다 일찍 승차역에 도착해 앞 열차를 타는 경우)
+    var applyDelay = function(nextDepMin, allowEarlier){
       if(nextDepMin==null) return;
-      var wait = nextDepMin - arriveStopMin; if(wait < -720) wait += 1440;
-      if(wait <= 0.5) return;            // 이미 탈 수 있으면 보정 안 함
-      if(wait > 30) return;              // ★ 30분 초과 대기(첫차 대기/운행종료 등)는 소요시간에 반영 안 함 (232분 튐 방지)
+      var wait = nextDepMin - arriveStopMin;
+      if(wait < -720) wait += 1440;
+      if(wait > 720)  wait -= 1440;
+      if(allowEarlier){
+        if(Math.abs(wait) < 1) return;   // 1분 미만 차이는 무시
+        if(wait > 30) return;            // 30분 초과 대기는 반영 안 함
+        if(wait < -180) return;          // 비정상 값 방어
+      } else {
+        if(wait <= 0.5) return;          // 이미 탈 수 있으면 보정 안 함
+        if(wait > 30) return;            // ★ 30분 초과 대기(첫차 대기/운행종료 등)는 소요시간에 반영 안 함 (232분 튐 방지)
+      }
       _transitNodeData.forEach(function(n2, i2){
         if(i2 < idx || n2._schedMin==null) return;
         n2._schedMin += wait;
@@ -5379,7 +5394,7 @@ function _applyRealBoardTime(){
             }
           });
           if(sec==null) return;
-          applyDelay(nowMin + sec/60);
+          applyDelay(nowMin + sec/60, _allowEarlier);
         });
       });
     } else if(nd.isSub){
@@ -5387,20 +5402,99 @@ function _applyRealBoardTime(){
       // 다음 지하철 역으로 상/하행 판별 (BFS 경로와 동일 방식)
       var nextNd = null;
       for(var j=idx+1;j<_transitNodeData.length;j++){ var m=_transitNodeData[j]; if(!m.isWalk && m.isSub){ nextNd=m; break; } }
-      var dir = '하행';
-      if(typeof STNDB!=='undefined' && nextNd){
-        var _norm = (typeof _nm==='function') ? _nm : function(x){return x;};
-        var ls = STNDB.filter(function(st){ return st.line===line; });
-        var ci = ls.findIndex(function(st){ return _norm(st.name)===_norm(nd.name); });
-        var ni3 = ls.findIndex(function(st){ return _norm(st.name)===_norm(nextNd.name); });
-        if(ci>=0 && ni3>=0) dir = (ci<ni3) ? '하행' : '상행';
+      // ★ 방향 판정: 승차역·다음역의 공식 첫차 시각차로 판정(Bug2의 _ttSegDir와 동일 원리)
+      //   STNDB 역 순서는 노선별로 뒤죽박죽이라 순서 기반은 폴백으로만 사용
+      var dir = null;
+      var _hol0 = (typeof _isHolidayOrWeekend==='function') ? _isHolidayOrWeekend() : false;
+      if(nextNd && typeof _ttFirstOfficial==='function'){
+        var _cand = [];
+        ['상','하'].forEach(function(dk){
+          var fa = _ttFirstOfficial(line, nd.name, dk, _hol0);
+          var fb = _ttFirstOfficial(line, nextNd.name, dk, _hol0);
+          if(fa==null || fb==null) return;
+          if(fb - fa > 0) _cand.push({ dk:dk, diff: fb - fa });
+        });
+        if(_cand.length){
+          _cand.sort(function(x,y){ return x.diff - y.diff; });
+          dir = (_cand[0].dk === '상') ? '상행' : '하행';
+        }
       }
-      var mins = (typeof getNextDepartureMins==='function') ? getNextDepartureMins(line, nd.name, dir, nowMin) : null;
-      if(mins!=null) applyDelay(mins);
+      if(dir == null){
+        dir = '하행';
+        if(typeof STNDB!=='undefined' && nextNd){
+          var _norm = (typeof _nm==='function') ? _nm : function(x){return x;};
+          var ls = STNDB.filter(function(st){ return st.line===line; });
+          var ci = ls.findIndex(function(st){ return _norm(st.name)===_norm(nd.name); });
+          var ni3 = ls.findIndex(function(st){ return _norm(st.name)===_norm(nextNd.name); });
+          if(ci>=0 && ni3>=0) dir = (ci<ni3) ? '하행' : '상행';
+        }
+      }
+      // ★ 공식 시각표(방향 반영) 우선 — Bug2에서 만든 _ttOfficialTimes 사용
+      var mins = null;
+      try{
+        if(typeof _ttOfficialTimes==='function'){
+          var _hol = (typeof _isHolidayOrWeekend==='function') ? _isHolidayOrWeekend() : false;
+          var _tms = _ttOfficialTimes(line, nd.name, (dir==='상행'?'상':'하'), _hol);
+          if(_tms && _tms.length){
+            for(var _ti=0; _ti<_tms.length; _ti++){ if(_tms[_ti] >= nowMin){ mins = _tms[_ti]; break; } }
+            if(mins==null) mins = _tms[0] + 1440;
+          }
+        }
+      }catch(e){}
+      if(mins==null && typeof getNextDepartureMins==='function')
+        mins = getNextDepartureMins(line, nd.name, dir, nowMin);
+      if(mins!=null) applyDelay(mins, _allowEarlier);
     }
   }catch(e){}
 }
 window._applyRealBoardTime = _applyRealBoardTime;
+
+// ══════════════════════════════════════════════════════════════════
+// ★ 승차역에서 대기 중 시각표 재동기화
+//   예상보다 일찍 도착해 앞 열차를 타게 되는 경우, 타임라인이 옛 열차를
+//   계속 가리키던 문제 수정. 승차역 근처에 있고 아직 출발 전일 때만 동작.
+// ══════════════════════════════════════════════════════════════════
+function _htlBoardIdx(){
+  if(!_transitNodeData || !_transitNodeData.length) return -1;
+  for(var i=0;i<_transitNodeData.length;i++){
+    var n=_transitNodeData[i];
+    if(!n.isOrigin && !n.isWalk && (n.isBus||n.isSub)) return i;
+  }
+  return -1;
+}
+// 아직 승차 전인가 (승차역 다음 역을 지난 기록이 없음)
+function _htlNotDeparted(){
+  var idx=_htlBoardIdx(); if(idx<0) return false;
+  if(window._gpsMaxIdx != null && window._gpsMaxIdx > idx) return false;
+  var pm = window._nodePassMs || {};
+  for(var k in pm){ if(+k > idx) return false; }
+  return true;
+}
+window._htlNotDeparted = _htlNotDeparted;
+
+// 승차역 출발 예정 시각(분) — 마커 고정 판정용
+function _htlBoardDepMin(){
+  var idx=_htlBoardIdx(); if(idx<0) return null;
+  var nd=_transitNodeData[idx];
+  return (nd && nd._schedMin!=null) ? nd._schedMin : null;
+}
+window._htlBoardDepMin = _htlBoardDepMin;
+
+function _htlResyncBoard(force){
+  try{
+    if(typeof _baseTimeMs!=='undefined' && _baseTimeMs != null) return;      // 예상 시각 모드 제외
+    if(window._metroRouteMode === true) return;
+    if(typeof _isManualStart==='function' && _isManualStart()) return;
+    if(!_htlNotDeparted()) return;                                           // 이미 출발함
+    // 승차역 근처(250m)에 있을 때만 '앞당김'까지 허용
+    var near = (window._htlBoardNear === true);
+    var now = Date.now();
+    if(!force && window._htlResyncAt && now - window._htlResyncAt < 15000) return;
+    window._htlResyncAt = now;
+    _applyRealBoardTime({ allowEarlier: near });
+  }catch(e){}
+}
+window._htlResyncBoard = _htlResyncBoard;
 
 // 목적지 맛집 프리페치 (백그라운드 → _foodCache 채움)
 function prefetchFoodForDest(){
@@ -7702,6 +7796,21 @@ function _updateTransitGps() {
   var inRange = bestDist < 300;
   var elapsedMin = _transitStartTime ? (Date.now() - _transitStartTime) / 60000 : 0;
 
+  // ★ 승차역 근처에서 대기 중인가 → 시각표 재동기화(앞 열차 반영) 조건
+  try{
+    var _bi = (typeof _htlBoardIdx==='function') ? _htlBoardIdx() : -1;
+    if(_bi >= 0){
+      var _bn = _transitNodeData[_bi];
+      var _bd = 1e9;
+      if(_validGps && _bn && _bn.lat != null && typeof haversineM==='function')
+        _bd = haversineM(lat, lng, _bn.lat, _bn.lng);
+      window._htlBoardNear = (_bd < 250) || (best && bestIdx === _bi && bestDist < 250);
+    } else {
+      window._htlBoardNear = false;
+    }
+    if(typeof _htlResyncBoard==='function') _htlResyncBoard();
+  }catch(e){}
+
   // isOrigin(출발지 가상 노드): 출발 대기 중 → 첫 역에 마커 표시
   if(best.isOrigin) {
     if(locBar) { locBar.style.display = 'none'; }
@@ -7774,6 +7883,23 @@ function _updateTransitGps() {
       if(seg){ fromNd = _transitNodeData[seg.fromIdx]; toNd = _transitNodeData[seg.toIdx]; ratio = seg.ratio; usedGps = true; }
     }
     if(!usedGps) ratio = Math.min(Math.max(0, ratio), 0.85);
+    // ★ 아직 열차 출발 시각 전 + 승차역 대기 중이면 마커를 승차역에 고정
+    //   (출발도 안 했는데 시간 비율만으로 다음 역 쪽으로 흘러가던 문제 수정)
+    try{
+      if(typeof _htlNotDeparted==='function' && _htlNotDeparted()){
+        var _bIdx = _htlBoardIdx();
+        var _dep  = (typeof _htlBoardDepMin==='function') ? _htlBoardDepMin() : null;
+        if(_bIdx >= 0 && _dep != null){
+          var _nm2 = _nowMin;
+          var _diff = _dep - _nm2; if(_diff < -720) _diff += 1440; if(_diff > 720) _diff -= 1440;
+          if(_diff > 0){                       // 아직 출발 전
+            fromNd = _transitNodeData[_bIdx];
+            toNd   = null;
+            ratio  = 0;
+          }
+        }
+      }
+    }catch(e){}
     // ★ 백스텝 방지: GPS 끊김 동안 1/3씩 전진해 둔 진행률(_gpsWaitRatio) 아래로는 회귀 금지
     var _wi = window._gpsWaitIdx;
     if(_wi != null){
@@ -7815,6 +7941,18 @@ function _updateTransitGps() {
       var timeHere = tp ? ((tp.ratio >= 0.9) ? tp.toIdx : tp.fromIdx) : -1;
       hereIdx = Math.max(timeHere, (window._gpsMaxIdx==null?-1:window._gpsMaxIdx));
     }
+    // ★ 출발 시각 전이면 현재 위치 표시도 승차역에 고정 (앞서 나가지 않도록)
+    try{
+      if(typeof _htlNotDeparted==='function' && _htlNotDeparted()){
+        var _bi2 = _htlBoardIdx();
+        var _dp2 = (typeof _htlBoardDepMin==='function') ? _htlBoardDepMin() : null;
+        if(_bi2 >= 0 && _dp2 != null){
+          var _n2 = new Date(), _nmin2 = _n2.getHours()*60 + _n2.getMinutes() + _n2.getSeconds()/60;
+          var _df2 = _dp2 - _nmin2; if(_df2 < -720) _df2 += 1440; if(_df2 > 720) _df2 -= 1440;
+          if(_df2 > 0 && hereIdx > _bi2) hereIdx = _bi2;
+        }
+      }
+    }catch(e){}
     if(hereIdx < 0) return;
     _transitNodeData.forEach(function(nd, idx){
       if(!nd.el || nd.isOrigin) return;
@@ -8360,7 +8498,7 @@ function _busLmRank(nm){
 function _busLmCached(nodeId){
   if(window._busLandmarkCache[nodeId] !== undefined) return window._busLandmarkCache[nodeId];
   try {
-    var m = JSON.parse(localStorage.getItem('busLmCache2') || '{}');
+    var m = JSON.parse(localStorage.getItem('busLmCache3') || '{}');
     var e = m[nodeId];
     if(e && Date.now() - e.t < 7 * 24 * 3600 * 1000){
       window._busLandmarkCache[nodeId] = e.l;
@@ -8372,9 +8510,9 @@ function _busLmCached(nodeId){
 function _busLmSave(nodeId, label){
   window._busLandmarkCache[nodeId] = label;
   try {
-    var m = JSON.parse(localStorage.getItem('busLmCache2') || '{}');
+    var m = JSON.parse(localStorage.getItem('busLmCache3') || '{}');
     m[nodeId] = { l: label, t: Date.now() };
-    localStorage.setItem('busLmCache2', JSON.stringify(m));
+    localStorage.setItem('busLmCache3', JSON.stringify(m));
   } catch(err){}
 }
 // 노선 경유지 영구 캐시 (7일): 재조회 없이 즉시 계산
@@ -8405,9 +8543,9 @@ function _busFindLandmark(stop, arrivals, cb){
   var norm = function(s){ return String(s || '').replace(/\s+/g, '').split('(')[0]; };
   var myNm = norm(stop.name || stop.nodenm || stop.nodeName || '');
   var routes = [];
-  arrivals.slice(0, 6).forEach(function(a){
+  arrivals.slice(0, 8).forEach(function(a){
     var rid = a.routeid || a.routeId;
-    if(rid && routes.indexOf(rid) < 0 && routes.length < 2) routes.push(rid);   // 속도: 2개 노선만
+    if(rid && routes.indexOf(rid) < 0 && routes.length < 3) routes.push(rid);   // 3개 노선까지 교차검증
   });
   if(!routes.length){ cb(''); return; }
   var results = [], pending = routes.length;
@@ -8415,7 +8553,7 @@ function _busFindLandmark(stop, arrivals, cb){
     _busRouteStnsCached(cityCode, rid, function(err, stations){
       pending--;
       if(!err && stations && stations.length){
-        // 내 정류장 위치: ID 우선, 실패 시 이름 매칭 (ID 체계 불일치 대비)
+        // ── 내 정류장 인덱스: nodeid 정확 매칭 우선 (상·하행 같은 이름 구분) ──
         var myIdx = -1, i;
         for(i = 0; i < stations.length; i++){
           if(nodeId && String(stations[i].nodeid || '') === nodeId){ myIdx = i; break; }
@@ -8427,10 +8565,20 @@ function _busFindLandmark(stop, arrivals, cb){
         }
         // ★ 내 위치를 못 찾으면 이 노선은 스킵 (지나온 방향 오표시 방지)
         if(myIdx >= 0){
+          // ★ 회차 지점까지만 탐색 — 방향(updowncd)이 바뀌면 반대 방면이므로 중단
+          //   (이 처리가 없어서 '아라역 방향'인데 회차 뒤의 '완정역'이 잡혔음)
+          var myDir = String(stations[myIdx].updowncd == null ? '' : stations[myIdx].updowncd);
+          var endIdx = stations.length;
+          if(myDir !== ''){
+            for(var e = myIdx + 1; e < stations.length; e++){
+              if(String(stations[e].updowncd == null ? '' : stations[e].updowncd) !== myDir){ endIdx = e; break; }
+            }
+          }
           var found = {};   // rank → {nm, rank, ahead}
-          for(var j = myIdx + 1; j < stations.length; j++){
+          for(var j = myIdx + 1; j < endIdx; j++){
             var nm = String(stations[j].nodenm || '').split('(')[0].trim();
             if(!nm) continue;
+            if(norm(nm) === myNm) continue;              // 같은 이름 반복 구간 스킵
             var r = _busLmRank(nm);
             if(r < 99 && !found[r]) found[r] = { nm: (r === 1 ? (_busLmStation(nm) || nm) : nm), rank: r, ahead: j - myIdx };
             if(found[1]) break;   // 진행 방향 첫 역 발견 → 즉시 종료
@@ -8440,9 +8588,20 @@ function _busFindLandmark(stop, arrivals, cb){
         }
       }
       if(pending === 0){
-        // 여러 노선 중: 우선순위 높은 것 → 같은 순위면 더 가까운(정거장 수 적은) 것
-        results.sort(function(a, b){ return (a.rank - b.rank) || (a.ahead - b.ahead); });
-        var label = results.length ? results[0].nm : '';
+        // ★ 노선마다 다른 답이 나오면 다수결 (한 노선만 보고 엉뚱한 방면을 쓰지 않도록)
+        var vote = {};
+        results.forEach(function(r){
+          var k = r.nm;
+          if(!vote[k]) vote[k] = { nm:r.nm, rank:r.rank, ahead:r.ahead, n:0 };
+          vote[k].n++;
+          if(r.ahead < vote[k].ahead) vote[k].ahead = r.ahead;
+          if(r.rank  < vote[k].rank)  vote[k].rank  = r.rank;
+        });
+        var cand = Object.keys(vote).map(function(k){ return vote[k]; });
+        cand.sort(function(a, b){
+          return (b.n - a.n) || (a.rank - b.rank) || (a.ahead - b.ahead);
+        });
+        var label = cand.length ? cand[0].nm : '';
         _busLmSave(nodeId, label);
         cb(label);
       }
@@ -8658,10 +8817,11 @@ function _busShowMap(card, stop){
 }
 window._busShowMap=_busShowMap;
 
-function _loadMapBusArrival(stop, cardIdx) {
+function _loadMapBusArrival(stop, cardIdx, _try) {
   var cityCode = stop.cityCode || stop.citycode || '25';
   var nodeId   = stop.nodeId   || stop.nodeid   || '';
   if(!nodeId) return;
+  _try = _try || 0;
 
   var proxyUrl = _SERVER_URL + '/tago?url=' +
     encodeURIComponent(
@@ -8695,13 +8855,25 @@ function _loadMapBusArrival(stop, cardIdx) {
       if(_ph) _ph.remove();
 
       if(!items.length) {
+        // ★ 공공 API가 간헐적으로 빈 배열을 주는 경우가 있어 최대 2회 재시도
+        //   (기존에는 즉시 '운행 정보 없음'으로 지워버려 멀쩡한 정류장이 비어 보였음)
+        if(_try < 2){
+          setTimeout(function(){ _loadMapBusArrival(stop, cardIdx, _try + 1); }, 900 + _try * 900);
+          return;
+        }
+        // 재시도 후에도 비었지만 이전 도착행이 남아 있으면 그대로 유지(깜박임 방지)
+        if(card.querySelector('.kbus-row')) return;
         card._busSig = null;
-        card.querySelectorAll('.kbus-row').forEach(function(r){ r.remove(); });
         if(!card.querySelector('.kbus-empty-row')){
           var empty = document.createElement('div');
           empty.className = 'map-bus-row kbus-empty-row';
-          empty.style.cssText = 'color:var(--sub);font-size:12px;';
-          empty.textContent = '운행 정보 없음';
+          empty.style.cssText = 'color:var(--sub);font-size:12px;display:flex;align-items:center;gap:8px;';
+          empty.innerHTML = '<span style="flex:1;">운행 정보 없음</span>'
+            + '<span class="kbus-retry" style="color:#2f7cf6;font-weight:700;cursor:pointer;">다시 시도 ›</span>';
+          empty.querySelector('.kbus-retry').addEventListener('click', function(){
+            empty.remove();
+            _loadMapBusArrival(stop, cardIdx, 0);
+          });
           card.appendChild(empty);
         }
         return;
@@ -8793,13 +8965,23 @@ function _loadMapBusArrival(stop, cardIdx) {
     })
     .catch(function() {
       var card = document.getElementById('mapBusCard_' + cardIdx);
+      if(!card) return;
+      if(_try < 2){   // ★ 일시적 네트워크·프록시 오류도 재시도
+        setTimeout(function(){ _loadMapBusArrival(stop, cardIdx, _try + 1); }, 900 + _try * 900);
+        return;
+      }
       if(card && !card.querySelector('.kbus-row')) {   // 이미 도착행이 있으면 유지(일시적 실패 시 깜박임 방지)
         var _ph = card.querySelector('.map-bus-row:not(.kbus-row)'); if(_ph) _ph.remove();
         if(!card.querySelector('.kbus-err-row')){
           var err = document.createElement('div');
           err.className = 'map-bus-row kbus-err-row';
-          err.style.cssText = 'color:var(--sub);font-size:12px;';
-          err.textContent = '정보 불러오기 실패';
+          err.style.cssText = 'color:var(--sub);font-size:12px;display:flex;align-items:center;gap:8px;';
+          err.innerHTML = '<span style="flex:1;">정보 불러오기 실패</span>'
+            + '<span class="kbus-retry" style="color:#2f7cf6;font-weight:700;cursor:pointer;">다시 시도 ›</span>';
+          err.querySelector('.kbus-retry').addEventListener('click', function(){
+            err.remove();
+            _loadMapBusArrival(stop, cardIdx, 0);
+          });
           card.appendChild(err);
         }
       }
@@ -32618,6 +32800,11 @@ document.addEventListener('DOMContentLoaded', function() {
 .brs-rail-up   .brs-dot{background:#fff;box-shadow:0 0 0 2px #00b341;border-color:#fff;}
 .brs-rail-down .brs-dot{background:#fff;box-shadow:0 0 0 2px #ff9f0a;border-color:#fff;}
 .brs-rail-na   .brs-dot{background:#fff;box-shadow:0 0 0 2px #2f7cf6;border-color:#fff;}
+.brs-arw{position:absolute;left:50%;transform:translateX(-50%);bottom:2px;z-index:1;
+  font-size:9px;line-height:1;opacity:.85;pointer-events:none;}
+.brs-rail-up   .brs-arw{color:#fff;}
+.brs-rail-down .brs-arw{color:#fff;}
+.brs-rail-na   .brs-arw{color:#fff;}
 .brs-bus{position:relative;z-index:2;font-size:15px;line-height:1;background:#2f7cf6;
   border-radius:9px;padding:4px 3px;box-shadow:0 2px 6px rgba(47,124,246,.45);}
 .brs-me{position:relative;z-index:2;font-size:17px;line-height:1;
