@@ -2008,12 +2008,13 @@ window._foodFromStn=_foodFromStn;
 function _foodMapCssInject(){
   if(document.getElementById('foodMapCss')) return;
   var st=document.createElement('style'); st.id='foodMapCss';
-  st.textContent='.food-map-panel{margin:8px 0 14px;border:1px solid var(--border,rgba(0,0,0,.12));border-radius:14px;overflow:hidden;background:var(--card,#fff);box-shadow:0 4px 18px rgba(0,0,0,.14);}'
+  st.textContent='.food-map-panel{margin:8px 0 14px;border:1px solid var(--border,rgba(0,0,0,.12));border-radius:14px;overflow:hidden;background:var(--card,#fff);box-shadow:0 4px 18px rgba(0,0,0,.14);'
+    +'display:block;flex:0 0 auto;flex-shrink:0;min-height:330px;}'
     +'.food-map-head{display:flex;align-items:center;gap:8px;padding:9px 12px;font-size:13px;border-bottom:1px solid var(--border,rgba(0,0,0,.08));}'
     +'.food-map-head b{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text);}'
     +'.food-map-dist{font-size:12px;color:var(--sub);white-space:nowrap;}'
     +'.food-map-x{cursor:pointer;font-size:15px;color:var(--sub);padding:0 2px;}'
-    +'.food-map-canvas{width:100%;height:260px;background:#e8eef2;}'
+    +'.food-map-canvas{width:100%;height:260px;min-height:260px;flex:0 0 auto;flex-shrink:0;display:block;background:#e8eef2;}'
     +'.food-map-foot{padding:8px 12px;font-size:12px;color:var(--sub);}';
   document.head.appendChild(st);
 }
@@ -2033,6 +2034,33 @@ function _ensureLeaflet(cb){
   sc.onerror=function(){ _leafletLoading=false; if(typeof toast==='function') toast('지도를 불러오지 못했어요(네트워크)'); };
   document.head.appendChild(sc);
 }
+// 패널이 flex 컨테이너(.food-list=display:flex)에서 찌그러지는 것을 인라인으로도 이중 방어
+function _foodMapHarden(panel){
+  try{
+    panel.style.display='block';
+    panel.style.flex='0 0 auto';
+    panel.style.flexShrink='0';
+    panel.style.minHeight='330px';
+    var cv=panel.querySelector('.food-map-canvas');
+    if(cv){
+      cv.style.display='block'; cv.style.width='100%';
+      cv.style.height='260px'; cv.style.minHeight='260px';
+      cv.style.flex='0 0 auto'; cv.style.flexShrink='0';
+      cv.style.background='#e8eef2';
+    }
+  }catch(e){}
+}
+window._foodMapHarden=_foodMapHarden;
+// 지도 생성 실패 시 안내 표시(빈칸 방지)
+function _foodMapFallback(panel, msg){
+  try{
+    var cv=panel.querySelector('.food-map-canvas');
+    if(!cv || cv.querySelector('.leaflet-pane')) return;
+    cv.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;'
+      +'font-size:12px;color:#6b7280;text-align:center;padding:10px;line-height:1.5;">'+(msg||'지도를 표시할 수 없어요')+'</div>';
+  }catch(e){}
+}
+window._foodMapFallback=_foodMapFallback;
 var _foodMapPanel=null, _foodMapObj=null, _foodMapForCard=null;
 function _foodCloseMap(){
   if(_foodMapObj){ try{ _foodMapObj.remove(); }catch(e){} _foodMapObj=null; }
@@ -2059,9 +2087,18 @@ function _foodShowMap(card, p){
     +'<span class="food-map-x" onclick="_foodCloseMap()">✕</span></div>'
     +'<div id="'+cid+'" class="food-map-canvas"></div>'
     +'<div class="food-map-foot">🚶 '+(stnNm?(_ltEsc(stnNm)+'역 → '):'')+_ltEsc(p.place_name)+' 도보 경로</div>';
-  card.parentNode.insertBefore(panel, card.nextSibling);
+  if(card.parentNode) card.parentNode.insertBefore(panel, card.nextSibling);
+  else card.appendChild(panel);
+  _foodMapHarden(panel);
   _foodMapPanel=panel; _foodMapForCard=card;
   setTimeout(function(){ try{ panel.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} },100);
+  // 목록이 flex 컬럼이라 패널이 눌리는 경우가 있어 재확인 후 강제 복구
+  [120,400,900,1500].forEach(function(ms){ setTimeout(function(){
+    if(_foodMapPanel!==panel) return;
+    _foodMapHarden(panel);
+    if(_foodMapObj){ try{ _foodMapObj.invalidateSize(); }catch(e){} }
+    else if(ms>=900) _foodMapFallback(panel,'지도를 불러오지 못했어요<br>네트워크를 확인해 주세요');
+  },ms); });
   // 레이아웃 확정 뒤 초기화(컨테이너 높이 0 경합 방지 → 일부만 뜨던 문제 해결)
   requestAnimationFrame(function(){ setTimeout(function(){
     if(_foodMapPanel!==panel) return;
@@ -2095,7 +2132,7 @@ function _foodShowMap(card, p){
               }
             }).catch(function(){});
         }
-      }catch(e){}
+      }catch(e){ _foodMapFallback(panel,'지도를 표시할 수 없어요'); }
     });
   },0); });
 }
@@ -2413,6 +2450,7 @@ function _naverMapWebUrl(place) {
 function _renderFoodList() {
   var list = document.getElementById('foodList');
   if(!list) return;
+  if(typeof _foodCloseMap==='function') _foodCloseMap();   // 목록 재생성 시 열린 지도 참조 초기화
 
   var curated = (_foodAllData || []).filter(_foodValid).filter(_foodCatMatch);
   var pub     = (_foodPublicData || []).filter(_foodValid).filter(_foodCatMatch);
@@ -8181,9 +8219,18 @@ function _busShowMap(card, stop){
     +'<span class="food-map-x" onclick="_busCloseMap()">✕</span></div>'
     +'<div id="'+cid+'" class="food-map-canvas"></div>'
     +'<div class="food-map-foot">📍 '+_ltEsc(nm)+' 정류장 위치</div>';
-  card.parentNode.insertBefore(panel, card.nextSibling);
+  if(card.parentNode) card.parentNode.insertBefore(panel, card.nextSibling);
+  else card.appendChild(panel);
+  if(typeof _foodMapHarden==='function') _foodMapHarden(panel);
   _busMapPanel=panel; _busMapForCard=card;
   setTimeout(function(){ try{panel.scrollIntoView({behavior:'smooth',block:'center'});}catch(e){} },100);
+  [120,400,900,1500].forEach(function(ms){ setTimeout(function(){
+    if(_busMapPanel!==panel) return;
+    if(typeof _foodMapHarden==='function') _foodMapHarden(panel);
+    if(_busMapObj){ try{ _busMapObj.invalidateSize(); }catch(e){} }
+    else if(ms>=900 && typeof _foodMapFallback==='function')
+      _foodMapFallback(panel,'지도를 불러오지 못했어요<br>네트워크를 확인해 주세요');
+  },ms); });
   requestAnimationFrame(function(){ setTimeout(function(){
     if(_busMapPanel!==panel) return;
     _ensureLeaflet(function(){
