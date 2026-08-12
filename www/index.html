@@ -3875,13 +3875,40 @@ function _fetchT(url, opts, ms){
 }
 window._fetchT = _fetchT;
 
-function _busProxyGet(apiUrl, cb){
-  // 키는 서버(Worker /tago)가 주입하므로 직접 호출 폴백은 없음
+// ★ TAGO 프록시 공통 호출 — 큐(동시 2건)·9초 타임아웃·2회 재시도
+//   노선 정류장/버스위치 조회가 도착정보 요청과 동시에 몰려 실패하던 문제 방지
+function _busProxyGet(apiUrl, cb, _try){
+  _try = _try || 0;
   var proxyUrl = _SERVER_URL + '/tago?url=' + encodeURIComponent(apiUrl);
-  fetch(proxyUrl)
-    .then(function(r){ return r.json(); })
-    .then(function(d){ cb(null, d); })
-    .catch(function(e){ cb(e, null); });
+  var run = function(){
+    return new Promise(function(fin){
+      var done = false;
+      var tid = setTimeout(function(){
+        if(done) return; done = true;
+        retryOrFail(new Error('timeout')); fin();
+      }, 9000);
+      fetch(proxyUrl)
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if(done) return; done = true; clearTimeout(tid);
+          cb(null, d); fin();
+        })
+        .catch(function(e){
+          if(done) return; done = true; clearTimeout(tid);
+          retryOrFail(e); fin();
+        });
+    });
+  };
+  var retryOrFail = function(e){
+    if(_try < 2){
+      var bo = (1000 << _try) + Math.floor(Math.random() * 500);
+      setTimeout(function(){ _busProxyGet(apiUrl, cb, _try + 1); }, bo);
+    } else {
+      cb(e, null);
+    }
+  };
+  if(typeof _busArrEnqueue === 'function') _busArrEnqueue(run);
+  else run();
 }
 
 function _busItems(data){
@@ -7488,10 +7515,11 @@ var _RT_LINE2ID = {
   '1호선':'1001','2호선':'1002','3호선':'1003','4호선':'1004','5호선':'1005',
   '6호선':'1006','7호선':'1007','8호선':'1008','9호선':'1009',
   '경의중앙선':'1063','수인분당선':'1075','공항철도':'1065','경춘선':'1067',
-  '신분당선':'1077','우이신설선':'1092'
+  '신분당선':'1077'
+  // 우이신설선(1092)은 realtimePosition 응답이 확인되지 않아 도착정보(_RT_ARR_LINE2ID) 경로로 처리
 };
 // realtimePosition 선명 파라미터(호출 선명이 lineName과 다른 노선 보정)
-var _RT_POSPARAM = { '경의중앙선':'경의중앙','수인분당선':'수인분당','공항철도':'공항철도','경춘선':'경춘','신분당선':'신분당','우이신설선':'우이신설' };
+var _RT_POSPARAM = { '경의중앙선':'경의중앙','수인분당선':'수인분당','공항철도':'공항철도','경춘선':'경춘','신분당선':'신분당' };
 function _rtLineId(ln){ return _RT_LINE2ID[ln] || null; }
 function _rtCovered(ln){ return !!_rtLineId(ln); }
 function _rtPosParam(ln){ return _RT_POSPARAM[ln] || ln; }
@@ -7610,6 +7638,112 @@ async function _rtPoll(){
   } catch(e){ /* 조용히 폴백 */ }
 }
 window._rtPoll=_rtPoll;
+
+// ══════════════════════════════════════════════════════════════════
+// ★ 도착정보 기반 실시간 보정 (realtimeStationArrival)
+//   realtimePosition이 커버하지 않는 노선이라도 '역별 도착정보'는 제공됨.
+//   실기기 진단 확인: 서해선 1093 / 경강선 1081 / 신림선 1094
+//   다음 역 도착까지 남은 초(barvlDt)를 받아 타임라인 시각을 맞춘다.
+//   (인천1·2호선·김포골드라인은 도착정보도 미제공 → 기존 GPS+연착추정 유지)
+// ══════════════════════════════════════════════════════════════════
+var _RT_ARR_LINE2ID = {
+  '서해선':'1093', '경강선':'1081', '신림선':'1094',
+  '우이신설선':'1092', '경의중앙선':'1063', '공항철도':'1065',
+  '수인분당선':'1075', '신분당선':'1077', '경춘선':'1067'
+};
+// 진단으로 추가 발견된 노선 병합
+(function _rtArrLoadSaved(){
+  try{
+    var e = JSON.parse(localStorage.getItem('rtArrMap') || 'null');
+    if(e && e.id){ for(var k in e.id){ if(!_RT_ARR_LINE2ID[k]) _RT_ARR_LINE2ID[k] = e.id[k]; } }
+  }catch(e){}
+})();
+function _rtArrCovered(ln){ return !!_RT_ARR_LINE2ID[ln]; }
+window._RT_ARR_LINE2ID = _RT_ARR_LINE2ID;
+
+var _RT_ARR_MIN_SEC = 20;      // 이 이상 어긋나야 보정
+var _RT_ARR_MAX_SEC = 15*60;   // 한 번에 반영할 최대치
+
+// 노선 순서에서 진행 방향이 맞는 열차인지 판정
+function _rtArrForward(line, nextName, alightName, bstatnNm){
+  try{
+    var ord = (typeof _ttOrderOf==='function') ? _ttOrderOf(line) : null;
+    if(!ord || !ord.length) return null;
+    var nz = (typeof _ttNorm==='function') ? _ttNorm : function(x){ return String(x||'').replace(/역$/,'').trim(); };
+    var iN = ord.indexOf(nz(nextName));
+    var iA = ord.indexOf(nz(alightName));
+    var iB = ord.indexOf(nz(String(bstatnNm||'').replace(/행$/,'')));
+    if(iN < 0 || iB < 0) return null;
+    if(iA < 0) return null;
+    var fwd = (iA > iN);
+    return fwd ? (iB > iN) : (iB < iN);   // 종착역이 우리 진행 방향에 있는가
+  }catch(e){ return null; }
+}
+
+// 다음 미통과 지하철 역의 도착정보로 시각 보정
+async function _rtArrPoll(){
+  try{
+    if(typeof _baseTimeMs!=='undefined' && _baseTimeMs != null) return;
+    if(window._metroRouteMode === true) return;
+    var card = document.getElementById('transitResultCard');
+    if(!card || card.style.display === 'none') return;
+
+    var leg = (typeof _rtCurrentSubLeg==='function') ? _rtCurrentSubLeg() : null;
+    if(!leg) return;
+    // 열차위치(realtimePosition)가 실제로 편성을 잠근 상태일 때만 그쪽에 양보.
+    // 커버 목록에만 있고 실제 응답이 없는 노선(우이신설선 등)은 도착정보로 보정한다.
+    if(typeof _rtCovered==='function' && _rtCovered(leg.lineName)
+       && window._rtTrain && window._rtTrain.lineName === leg.lineName) return;
+    if(!_rtArrCovered(leg.lineName)) return;
+
+    var sid = _RT_ARR_LINE2ID[leg.lineName];
+    var prog = (window._gpsMaxIdx == null ? -1 : window._gpsMaxIdx);
+
+    // 다음(아직 도달하지 않은) 역 찾기
+    var nIdx = -1;
+    for(var i = Math.max(leg.boardIdx, prog + 1); i <= leg.alightIdx; i++){
+      var n = _transitNodeData[i];
+      if(n && n.isSub && !n.isWalk && n._schedMin != null){ nIdx = i; break; }
+    }
+    if(nIdx < 0) return;
+    var nNd = _transitNodeData[nIdx];
+    var alightNd = _transitNodeData[leg.alightIdx];
+
+    if(window._rtArrAt && Date.now() - window._rtArrAt < 25000) return;   // 25초 스로틀
+    window._rtArrAt = Date.now();
+
+    var raw = await seoulFetch('realtimeStationArrival/0/10/' + encodeURIComponent(nNd.name), 6000);
+    var items = (raw && raw.realtimeArrivalList) ? raw.realtimeArrivalList : null;
+    if(!items || !items.length) return;
+
+    var best = null;
+    items.forEach(function(t){
+      if(!t || String(t.subwayId || '') !== sid) return;
+      var sec = parseInt(t.barvlDt, 10);
+      if(!isFinite(sec) || sec <= 0) return;                 // 유효한 남은 시간만
+      var fwd = _rtArrForward(leg.lineName, nNd.name, alightNd ? alightNd.name : '', t.bstatnNm);
+      if(fwd === false) return;                              // 반대 방향 열차 제외
+      if(!best || sec < best.sec) best = { sec: sec, t: t };
+    });
+    if(!best) return;
+
+    // 예정 도착 시각 vs 실제 남은 시간
+    var schedMs = (typeof _htlNodeMs==='function') ? _htlNodeMs(nNd) : null;
+    if(schedMs == null) return;
+    var realMs = Date.now() + best.sec * 1000;
+    var diffSec = (realMs - schedMs) / 1000;                 // 양수 = 연착
+
+    if(Math.abs(diffSec) < _RT_ARR_MIN_SEC) return;
+    if(Math.abs(diffSec) > _RT_ARR_MAX_SEC) return;
+
+    if(typeof _htlShiftFrom === 'function') _htlShiftFrom(nIdx, diffSec);
+    window._rtFreshUntil = Date.now() + 45000;               // 실시간 우선 구간
+    console.log('[RT도착] ' + leg.lineName + ' ' + nNd.name + ' 실제 ' + best.sec + '초 후 → '
+              + (diffSec > 0 ? '+' : '') + Math.round(diffSec) + '초 보정');
+  }catch(e){ /* 조용히 폴백 */ }
+}
+window._rtArrPoll = _rtArrPoll;
+
 
 // ★ 탑승 전 재동기화: 첫 열차를 놓쳤을 때 '현재 시각'이 아니라 '다음 열차 시각'으로 시각표를 맞춤
 function _resyncBoardToNextTrain(){
@@ -7858,8 +7992,14 @@ function _startTransitWatch(){
   }
   // ★ 실시간 열차위치 폴링(15초): 지하철 탑승 중 공공데이터로 위치 보정 (백그라운드에서도 동작)
   if(window._rtTrainInt == null){
-    window._rtTrainInt = setInterval(function(){ try { if(typeof _rtPoll==='function') _rtPoll(); } catch(e){} }, 15000);
-    setTimeout(function(){ try { if(typeof _rtPoll==='function') _rtPoll(); } catch(e){} }, 1200);
+    window._rtTrainInt = setInterval(function(){
+      try { if(typeof _rtPoll==='function') _rtPoll(); } catch(e){}
+      try { if(typeof _rtArrPoll==='function') _rtArrPoll(); } catch(e){}   // ★ 도착정보 기반 보정
+    }, 15000);
+    setTimeout(function(){
+      try { if(typeof _rtPoll==='function') _rtPoll(); } catch(e){}
+      try { if(typeof _rtArrPoll==='function') _rtArrPoll(); } catch(e){}
+    }, 1200);
   }
 }
 // ★ GPS 미확인 시 마커는 '그 자리 대기' — 시간표만으로는 절대 이동하지 않음.
@@ -9237,28 +9377,77 @@ function _busShowMap(card, stop){
 }
 window._busShowMap=_busShowMap;
 
+// ══════════════════════════════════════════════════════════════════
+// ★ 버스 도착정보 요청 큐
+//   정류장 카드 6개가 동시에 요청 + 재시도까지 겹치면 순간 20여 건이 몰려
+//   공공 API/프록시가 막히면서 '불러오기 실패'가 났다. 동시 2건으로 제한하고
+//   타임아웃·짧은 캐시를 둔다.
+// ══════════════════════════════════════════════════════════════════
+var _BUS_ARR_MAXCONC = 2;      // 동시 요청 수
+var _busArrRunning = 0;
+var _busArrQueue = [];
+var _busArrCache = {};         // nodeId → { ts, items }
+
+function _busArrNext(){
+  if(!_busArrQueue) return;
+  if((_busArrRunning || 0) >= (_BUS_ARR_MAXCONC || 2)) return;
+  var job = _busArrQueue.shift();
+  if(!job) return;
+  _busArrRunning++;
+  job().then(function(){ _busArrRunning--; setTimeout(_busArrNext, 120); },
+            function(){ _busArrRunning--; setTimeout(_busArrNext, 120); });
+}
+function _busArrEnqueue(fn){
+  if(!_busArrQueue) _busArrQueue = [];      // 정의 순서상 이른 호출 방어
+  _busArrQueue.push(fn); _busArrNext();
+}
+
+// 타임아웃 있는 도착정보 조회 (캐시 15초)
+function _busArrFetch(cityCode, nodeId){
+  var c = _busArrCache[nodeId];
+  if(c && Date.now() - c.ts < 15000) return Promise.resolve(c.items);
+  return new Promise(function(resolve, reject){
+    _busArrEnqueue(function(){
+      var url = _SERVER_URL + '/tago?url=' + encodeURIComponent(
+        'https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList' +
+        '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY) +
+        '&cityCode=' + cityCode + '&nodeId=' + nodeId + '&_type=json');
+      var done = false;
+      return new Promise(function(fin){
+        var tid = setTimeout(function(){
+          if(done) return; done = true;
+          reject(new Error('timeout')); fin();
+        }, 9000);
+        fetch(url)
+          .then(function(r){ return r.json(); })
+          .then(function(data){
+            if(done) return; done = true; clearTimeout(tid);
+            var items = [];
+            try{
+              items = data.response.body.items.item || [];
+              if(!Array.isArray(items)) items = [items];
+            }catch(e){}
+            if(items.length) _busArrCache[nodeId] = { ts: Date.now(), items: items };
+            resolve(items); fin();
+          })
+          .catch(function(e){
+            if(done) return; done = true; clearTimeout(tid);
+            reject(e); fin();
+          });
+      });
+    });
+  });
+}
+window._busArrFetch = _busArrFetch;
+
 function _loadMapBusArrival(stop, cardIdx, _try) {
   var cityCode = stop.cityCode || stop.citycode || '25';
   var nodeId   = stop.nodeId   || stop.nodeid   || '';
   if(!nodeId) return;
   _try = _try || 0;
 
-  var proxyUrl = _SERVER_URL + '/tago?url=' +
-    encodeURIComponent(
-      'https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList' +
-      '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY) +
-      '&cityCode=' + cityCode + '&nodeId=' + nodeId + '&_type=json'
-    );
-
-  fetch(proxyUrl)
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      var items = [];
-      try {
-        items = data.response.body.items.item || [];
-        if(!Array.isArray(items)) items = [items];
-      } catch(e) {}
-
+  _busArrFetch(cityCode, nodeId)
+    .then(function(items) {
       var card = document.getElementById('mapBusCard_' + cardIdx);
       if(!card) return;
 
@@ -9278,7 +9467,8 @@ function _loadMapBusArrival(stop, cardIdx, _try) {
         // ★ 공공 API가 간헐적으로 빈 배열을 주는 경우가 있어 최대 2회 재시도
         //   (기존에는 즉시 '운행 정보 없음'으로 지워버려 멀쩡한 정류장이 비어 보였음)
         if(_try < 2){
-          setTimeout(function(){ _loadMapBusArrival(stop, cardIdx, _try + 1); }, 900 + _try * 900);
+          var _bo = (1200 << _try) + Math.floor(Math.random() * 600);   // 백오프+지터
+          setTimeout(function(){ _loadMapBusArrival(stop, cardIdx, _try + 1); }, _bo);
           return;
         }
         // 재시도 후에도 비었지만 이전 도착행이 남아 있으면 그대로 유지(깜박임 방지)
@@ -9386,8 +9576,9 @@ function _loadMapBusArrival(stop, cardIdx, _try) {
     .catch(function() {
       var card = document.getElementById('mapBusCard_' + cardIdx);
       if(!card) return;
-      if(_try < 2){   // ★ 일시적 네트워크·프록시 오류도 재시도
-        setTimeout(function(){ _loadMapBusArrival(stop, cardIdx, _try + 1); }, 900 + _try * 900);
+      if(_try < 3){   // ★ 일시적 네트워크·프록시·타임아웃 오류는 재시도(백오프+지터)
+        var _bo2 = (1200 << _try) + Math.floor(Math.random() * 700);
+        setTimeout(function(){ _loadMapBusArrival(stop, cardIdx, _try + 1); }, _bo2);
         return;
       }
       if(card && !card.querySelector('.kbus-row')) {   // 이미 도착행이 있으면 유지(일시적 실패 시 깜박임 방지)
@@ -10342,7 +10533,7 @@ window.addEventListener('unhandledrejection', function(e) {
       <!-- ★ 실시간 열차위치 진단 -->
       <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-top:12px;">
         <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">🚆 실시간 열차위치 진단</div>
-        <p style="font-size:12px;color:var(--sub);margin-bottom:12px;">어떤 노선이 실시간 열차위치를 제공하는지 확인하고, 되는 노선은 자동으로 켜요.<br>1차=열차위치 · 2차=역 도착정보 (각 10~15초)</p>
+        <p style="font-size:12px;color:var(--sub);margin-bottom:12px;">실시간 적용 중: <b>1~9호선·GTX-A</b>(열차위치) · <b>서해선·경강선·신림선·우이신설선</b>(도착정보)<br>인천1·2호선·김포골드라인·의정부경전철·에버라인은 실시간 미제공 → 시각표+GPS+연착추정<br>1차=열차위치 · 2차=역 도착정보 (각 10~15초)</p>
         <div style="display:flex;gap:8px;margin-bottom:10px;">
           <button onclick="_rtProbeUI2()" style="flex:1;padding:11px;border-radius:10px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:var(--gold);color:#121214;font-family:inherit;">진단 실행</button>
           <button onclick="_rtProbeReset()" style="padding:11px 14px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--sub);font-family:inherit;">초기화</button>
@@ -18862,6 +19053,21 @@ var _ARR_WIT_EVE = [
   '하루의 끝, {menu}만큼 좋은 마무리도 없어요',
   '집까지 10분, 오늘의 보상은 {menu}로 정했어요'
 ];
+// 19:31~24:00 쇼핑 추천용 — {item} = 상품명
+var _ARR_WIT_SHOP = [
+  '오늘 하루도 고생 많으셨어요, 이런 걸로 나를 좀 챙겨줘요',
+  '수고한 오늘, 작은 물건 하나가 위로가 되기도 해요',
+  '하루 끝에 나를 위한 것 하나쯤은 괜찮잖아요',
+  '오늘 애쓴 만큼, 내일이 조금 편해지는 것들',
+  '집 가는 길에 눈요기라도 해볼까요',
+  '고생한 나에게 이 정도는 해줘도 되죠',
+  '내일의 나를 편하게 해줄 것들을 골라봤어요',
+  '오늘 하루 버틴 나에게 주는 작은 보상',
+  '퇴근길 스크롤은 이런 재미로 하는 거죠',
+  '잘 견딘 하루, 마무리는 가볍게 구경으로',
+  '지금 사두면 내일의 내가 고마워할 거예요',
+  '피곤한 날엔 이런 게 은근히 힘이 돼요'
+];
 var _ARR_CHEER_MORN = [
   '오늘 하루도 화이팅이에요',
   '당신의 하루를 응원할게요',
@@ -18876,6 +19082,31 @@ var _ARR_CLOSE_EVE = [
   '집에 도착하면 편하게 쉬세요',
   '내일의 걱정은 내일의 몫으로 남겨둬요'
 ];
+
+// 받침 유무에 따라 조사 보정 ('회으로' → '회로')
+function _arrJosa(word, withBatchim, withoutBatchim){
+  var ch = String(word||'').trim().slice(-1);
+  var code = ch.charCodeAt(0);
+  if(!(code >= 0xAC00 && code <= 0xD7A3)) return withBatchim;   // 한글 아니면 기본형
+  var jong = (code - 0xAC00) % 28;
+  return jong ? withBatchim : withoutBatchim;
+}
+// '로/으로'는 받침이 없거나 ㄹ 받침이면 '로' (삼겹살로 · 회로 · 치킨으로)
+function _arrJosaRo(word){
+  var ch = String(word||'').trim().slice(-1);
+  var code = ch.charCodeAt(0);
+  if(!(code >= 0xAC00 && code <= 0xD7A3)) return '으로';
+  var jong = (code - 0xAC00) % 28;
+  return (jong === 0 || jong === 8) ? '로' : '으로';
+}
+function _arrApplyJosa(txt, menu){
+  return String(txt||'')
+    .replace(/\{menu\}으로/g, menu + _arrJosaRo(menu))
+    .replace(/\{menu\}이\b/g, menu + _arrJosa(menu, '이', '가'))
+    .replace(/\{menu\}을\b/g, menu + _arrJosa(menu, '을', '를'))
+    .replace(/\{menu\}은\b/g, menu + _arrJosa(menu, '은', '는'))
+    .replace(/\{menu\}/g, menu);
+}
 
 function _arrPickDaily(pool, extraSeed){
   if(!pool || !pool.length) return '';
@@ -18934,21 +19165,184 @@ function _arrPickPlace(destStn, kind){
   }catch(e){ return null; }
 }
 
+
+// ══════════════════════════════════════════════════════════════════════
+// ★ 야식 배달 유도 (배달의민족 / 요기요 / 쿠팡이츠)
+//   하차 10분 전 알림(오후 5시 이후)에서 음식 종류와 함께 배달앱으로 연결.
+//   앱 미설치 시 웹으로 자동 폴백.
+// ══════════════════════════════════════════════════════════════════════
+var _DLV_APPS = {
+  baemin: {
+    name: '배달의민족', color: '#2AC1BC', fg: '#fff',
+    app: function(q){ return 'baemin://search?query=' + encodeURIComponent(q); },
+    web: function(q){ return 'https://www.baemin.com/search?query=' + encodeURIComponent(q); }
+  },
+  yogiyo: {
+    name: '요기요', color: '#FA0050', fg: '#fff',
+    app: function(q){ return 'yogiyo://search?keyword=' + encodeURIComponent(q); },
+    web: function(q){ return 'https://www.yogiyo.co.kr/mobile/#/search/?search=' + encodeURIComponent(q); }
+  },
+  coupangeats: {
+    name: '쿠팡이츠', color: '#0B57D0', fg: '#fff',
+    app: function(q){ return 'coupangeats://search?keyword=' + encodeURIComponent(q); },
+    web: function(q){ return 'https://www.coupangeats.com/search?keyword=' + encodeURIComponent(q); }
+  }
+};
+
+// 배달앱 열기 — 앱 스킴 시도 후 미설치면 웹 폴백
+function _dlvOpen(kind, query){
+  try{
+    var a = _DLV_APPS[kind];
+    if(!a){ return; }
+    var q = String(query || '야식');
+    if(typeof toast === 'function') toast(a.name + '에서 "' + q + '" 찾는 중...');
+    var t0 = Date.now();
+    try{ window.location.href = a.app(q); }catch(e){}
+    setTimeout(function(){
+      if(document.hidden) return;                 // 앱으로 전환됨
+      if(Date.now() - t0 < 1200) return;
+      var w = a.web(q);
+      try{ window.open(w, '_blank'); }catch(e){ window.location.href = w; }
+    }, 1500);
+  }catch(e){}
+}
+window._dlvOpen = _dlvOpen;
+
+// 팝업에서 쓸 배달 버튼 (모달 닫고 실행)
+function _arrOrder(kind){
+  try{
+    var q = window._arrOrderMenu || '야식';
+    var ov = document.getElementById('briefModalOv'); if(ov) ov.remove();
+    _dlvOpen(kind, q);
+  }catch(e){}
+}
+window._arrOrder = _arrOrder;
+
+// ── Gemini(워커 /ai-talk)로 감성 문구 생성 ──
+//   실패하면 기존 로컬 문구를 그대로 쓰므로 항상 안전.
+function _arrAiCopy(menu, destStn, cb){
+  var done = false;
+  var timer = setTimeout(function(){ if(!done){ done = true; cb(null); } }, 5000);
+  try{
+    if(typeof _SERVER_URL === 'undefined'){ clearTimeout(timer); cb(null); return; }
+    var now = new Date();
+    var wx = (typeof _ltWx === 'function') ? _ltWx() : null;
+    fetch(_SERVER_URL + '/ai-talk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'nightsnack',
+        count: 1,
+        hour: now.getHours(), minute: now.getMinutes(), day: now.getDay(),
+        weekend: (typeof _isHolidayOrWeekend === 'function') ? _isHolidayOrWeekend() : false,
+        weather: wx ? { temp: wx.temp, sky: wx.txt, rain: wx.rain } : null,
+        menu: menu, station: destStn || '',
+        noPolitics: true,
+        // 워커가 mode를 모르더라도 recent 문맥만으로 비슷한 톤이 나오도록 지시문을 함께 전달
+        rules: [
+          '퇴근길에 하차 10분 전인 사람에게 보내는 한 문장',
+          '오늘 하루 고생했다는 위로를 담되 과하지 않게, 담백하고 따뜻하게',
+          menu + '(으)로 하루의 피로를 풀고 마무리하자는 흐름으로 자연스럽게 이어질 것',
+          '광고처럼 들리지 않게, 강요하지 말 것',
+          '35자 이내 한 문장, 이모지 없이, 존댓말'
+        ],
+        recent: [{ nick: '시스템', text: '퇴근길 ' + (destStn || '') + ' 하차 10분 전 · 오늘 야식은 ' + menu }]
+      })
+    })
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(d){
+      if(done) return; done = true; clearTimeout(timer);
+      var msgs = d && (d.messages || d.msgs || d);
+      var txt = '';
+      if(Array.isArray(msgs) && msgs.length){
+        var m = msgs[0];
+        txt = (m && (m.text || m.msg)) || (typeof m === 'string' ? m : '');
+      } else if(d && typeof d.text === 'string'){ txt = d.text; }
+      txt = String(txt || '').replace(/\s+/g, ' ').trim().replace(/^["'“”]|["'“”]$/g, '');
+      if(!txt || txt.length > 60) { cb(null); return; }
+      if(typeof _ltIsBanned === 'function' && _ltIsBanned(txt)) { cb(null); return; }
+      cb(txt);
+    })
+    .catch(function(){ if(!done){ done = true; clearTimeout(timer); cb(null); } });
+  }catch(e){ if(!done){ done = true; clearTimeout(timer); cb(null); } }
+}
+window._arrAiCopy = _arrAiCopy;
+
+// 도착 10분 전 알림 본문 구성
+// ── 시간대 판정 ──────────────────────────────────────────────
+//   00:00~07:00  none    : 추천 없음 (기존 도착 알림만)
+//   07:01~10:00  morning : 커피·브런치 추천 + 맛집 위치 보기
+//   10:01~16:59  none    : 추천 없음
+//   17:00~19:30  night   : 야식 추천 + 배달앱
+//   19:31~23:59  shop    : 쿠팡 아이템 추천 + 쿠팡 구경
+function _arrSlot(arrMs){
+  var d = new Date(arrMs);
+  var m = d.getHours()*60 + d.getMinutes();
+  if(m >= 17*60   && m <= 19*60+30) return 'night';
+  if(m >= 19*60+31)                 return 'shop';
+  if(m >= 7*60+1  && m <= 10*60)    return 'morning';
+  return 'none';
+}
+window._arrSlot = _arrSlot;
+
+// 아침 브런치 메뉴
+var _ARR_BRUNCH = ['크로플','에그 샌드위치','베이글','프렌치토스트','아보카도 토스트',
+  '수프와 바게트','팬케이크','오믈렛','샐러드볼','불고기 샌드위치','크루아상','스콘','요거트볼'];
+
+// 최근 추천한 쿠팡 아이템(중복 방지)
+function _arrShopLog(){
+  try { return JSON.parse(localStorage.getItem('arrShopLog')||'[]') || []; } catch(e){ return []; }
+}
+function _arrShopMark(name){
+  try{
+    var l=_arrShopLog(); l.push(String(name||''));
+    while(l.length>20) l.shift();
+    localStorage.setItem('arrShopLog', JSON.stringify(l));
+  }catch(e){}
+}
+
+// ★ 쇼핑탭 추천 엔진(_shopPick)에서 지금 상황에 맞는 아이템 1개
+//   날씨·요일·시간대 점수는 쇼핑탭과 동일한 로직을 그대로 쓴다.
+function _arrPickShopItem(){
+  try{
+    if(typeof _shopPick !== 'function') return null;
+    var pick = _shopPick();
+    var rec = (pick && pick.rec) ? pick.rec : [];
+    if(!rec.length) return null;
+    var recent = _arrShopLog();
+    // 상위 30개 중 최근 추천하지 않은 것 우선
+    var pool = rec.slice(0, 30).filter(function(x){ return recent.indexOf(x.n) < 0; });
+    if(!pool.length) pool = rec.slice(0, 30);
+    var it = pool[Math.floor(Math.random()*pool.length)];
+    if(it) _arrShopMark(it.n);
+    return { item: it, ctx: (pick && pick.ctx) || null };
+  }catch(e){ return null; }
+}
+
+// 추천 이유 한 줄 (날씨·요일·시간대 연계)
+function _arrShopReason(it, ctx){
+  try{
+    var t = it && it._t ? it._t : '';
+    if(ctx){
+      if(t === '\uC6B0\uCC9C\uB300\uBE44' && ctx.rain >= 30) return '내일 비 소식이 있어서 미리 챙겨두면 좋아요';
+      if(ctx.temp != null && ctx.temp <= 5)  return '요즘 아침저녁으로 추워서 하나쯤 있으면 든든해요';
+      if(ctx.temp != null && ctx.temp >= 28) return '더위가 이어지는 날엔 이런 게 은근히 도움돼요';
+      if(ctx.weekend) return '주말에 여유 있을 때 써보기 좋아요';
+    }
+    var byTheme = {
+      '\uC57C\uC2DD':'출출한 밤에 하나쯤 두면 마음이 놓여요',
+      '\uC140\uD504\uCF00\uC5B4':'하루 끝에 나를 챙기는 데 쓰기 좋아요',
+      '\uC0DD\uD544\uD488':'떨어지기 전에 채워두면 편해요',
+      '\uCEE4\uD53C\uC74C\uB8CC':'내일 아침을 조금 수월하게 만들어줘요',
+      '\uC0AC\uBB34\uC6A9\uD488':'책상에 하나 두면 은근히 손이 자주 가요'
+    };
+    if(byTheme[t]) return byTheme[t];
+    return '오늘 같은 날 한 번쯤 눈여겨볼 만해요';
+  }catch(e){ return '오늘 같은 날 한 번쯤 눈여겨볼 만해요'; }
+}
+
 // 도착 10분 전 알림 본문 구성
 function _arrBuildAlert(destStn, arrHour, arrMs){
-  var isMorn = (arrHour < 10);
-  var kind   = isMorn ? 'cafe' : 'night';
-  var place  = _arrPickPlace(destStn, kind);
-
-  // 추천 메뉴: 저녁은 가게 업종에서, 없으면 기본 목록에서
-  var menu;
-  if(isMorn){
-    menu = _ARR_DRINKS[Math.floor(Math.random()*_ARR_DRINKS.length)];
-  } else {
-    var fromCat = place ? String(place.c||'').split('/')[0].replace(/\s+/g,' ').trim() : '';
-    menu = fromCat || _ARR_NIGHT_MENU[Math.floor(Math.random()*_ARR_NIGHT_MENU.length)];
-  }
-
+  var slot = _arrSlot(arrMs);
   var arr  = new Date(arrMs);
   var hhmm = ('0'+arr.getHours()).slice(-2)+':'+('0'+arr.getMinutes()).slice(-2);
 
@@ -18956,20 +19350,61 @@ function _arrBuildAlert(destStn, arrHour, arrMs){
   lines.push('하차 10분 전이에요.');
   lines.push((destStn ? destStn + ' ' : '') + '도착 예정 ' + hhmm);
   lines.push('');
-  // 감성 한 줄 (매일 다른 문구)
-  var wit = _arrPickDaily(isMorn ? _ARR_WIT_MORN : _ARR_WIT_EVE, arr.getHours());
-  lines.push(wit.replace(/\{menu\}/g, menu));
 
-  if(place){
-    var dist = (place.d != null) ? (place.d + 'm') : ((isMorn?_ARR_CAFE_M:_ARR_NIGHT_M)+'m 이내');
-    lines.push((isMorn ? '☕ ' : '🍗 ') + place.n + ' · ' + dist);
-    // 저녁은 감성 문구에 이미 메뉴가 들어가므로 업종·주소만 (문구 중복 방지)
-    lines.push(isMorn
-      ? '   ' + (place.c ? place.c + ' · ' : '') + menu + ' 한 잔 어때요'
-      : '   ' + (place.c || '') + (place.a ? ' · ' + place.a : ''));
+  // ── 19:31~24:00 · 쿠팡 아이템 추천 ──
+  if(slot === 'shop'){
+    var sp = _arrPickShopItem();
+    var wit = _arrPickDaily(_ARR_WIT_SHOP, arr.getHours() * 7 + arr.getMinutes());
+    lines.push(_arrApplyJosa(wit, sp && sp.item ? sp.item.n : '작은 선물'));
+    if(sp && sp.item){
+      lines.push('🛍 오늘의 추천 · ' + sp.item.n);
+      if(sp.item._cat) lines.push('   ' + sp.item._cat + ' · ' + _arrShopReason(sp.item, sp.ctx));
+      else             lines.push('   ' + _arrShopReason(sp.item, sp.ctx));
+    } else {
+      lines.push('🛍 오늘의 추천 아이템을 골라뒀어요');
+    }
+    lines.push('');
+    lines.push(_ARR_CLOSE_EVE[Math.floor(Math.random()*_ARR_CLOSE_EVE.length)]);
+    return {
+      title: '🚉 하차 10분 전' + (destStn ? ' · ' + destStn : '') + ' 🛍',
+      body: lines.join('\n'), kind: 'shop', slot: slot,
+      shop: sp ? sp.item : null
+    };
+  }
+
+  // ── 07:01~10:00 · 커피/브런치 · 17:00~19:30 · 야식 ──
+  var isMorn = (slot === 'morning');
+  var place  = _arrPickPlace(destStn, isMorn ? 'cafe' : 'night');
+  var menu;
+  if(isMorn){
+    // 커피 한 잔 + 브런치 한 가지를 같이 제안
+    menu = _ARR_DRINKS[Math.floor(Math.random()*_ARR_DRINKS.length)];
   } else {
-    lines.push(isMorn ? '☕ 근처 카페에서 ' + menu + ' 한 잔 어때요'
-                      : '🍗 근처에서 ' + menu + ' 어때요');
+    var cat = place ? String(place.c||'') : '';
+    var matched = _ARR_NIGHT_MENU.filter(function(m){ return cat.indexOf(m) >= 0; });
+    menu = matched.length ? matched[0]
+                          : _ARR_NIGHT_MENU[Math.floor(Math.random()*_ARR_NIGHT_MENU.length)];
+  }
+  var brunch = isMorn ? _ARR_BRUNCH[Math.floor(Math.random()*_ARR_BRUNCH.length)] : '';
+
+  var wit2 = _arrPickDaily(isMorn ? _ARR_WIT_MORN : _ARR_WIT_EVE, arr.getHours());
+  lines.push(_arrApplyJosa(wit2, menu));
+
+  if(isMorn){
+    lines.push('☕ 오늘의 아침 · ' + menu + ' + ' + brunch);
+    if(place){
+      var dist = (place.d != null) ? (place.d + 'm') : (_ARR_CAFE_M + 'm 이내');
+      lines.push('   ' + place.n + ' · ' + dist + (place.c ? ' · ' + place.c : ''));
+    } else {
+      lines.push('   내리자마자 근처 카페에 들러보세요');
+    }
+  } else {
+    lines.push('🍗 오늘의 야식 · ' + menu);
+    lines.push('   집 도착에 맞춰 지금 주문하면 딱 맞아요');
+    if(place){
+      var d2 = (place.d != null) ? (place.d + 'm') : (_ARR_NIGHT_M + 'm 이내');
+      lines.push('   근처에서 드실 거면 · ' + place.n + ' ' + d2);
+    }
   }
   lines.push('');
   lines.push(isMorn
@@ -18979,37 +19414,88 @@ function _arrBuildAlert(destStn, arrHour, arrMs){
   return {
     title: '🚉 하차 10분 전' + (destStn ? ' · ' + destStn : '') + (isMorn ? ' ☕' : ' 🍗'),
     body: lines.join('\n'),
-    kind: kind
+    kind: isMorn ? 'cafe' : 'night',
+    slot: slot,
+    menu: menu, brunch: brunch,
+    place: place || null
   };
 }
 
 // 실제 발사 (알림 + 앱 열려 있으면 팝업)
 function _arrFireAlert(destStn, arrMs){
   try{
-    var arrHour = new Date(arrMs).getHours();
-    // 오전 10시 이전 / 오후 5시 이후에만 추천 알림
-    if(!(arrHour < 10 || arrHour >= 17)) return;
-    var a = _arrBuildAlert(destStn, arrHour, arrMs);
-    var vib = [300,120,300];
-    try { if('vibrate' in navigator) navigator.vibrate(vib); } catch(e){}
-    if(typeof showNotification==='function')
-      showNotification(a.title, a.body, { vibrate:vib, type:'arrive_reco' });
-    if(!document.hidden && typeof _showBriefingModal==='function'){
-      _showBriefingModal(a.title, a.body, null, { label:'맛집 보기', call:'_arrGoFoodTab()' });
+    var slot = _arrSlot(arrMs);
+    if(slot === 'none') return;        // 00~07시, 10:01~16:59 → 추천 알림 없음
+    var a = _arrBuildAlert(destStn, null, arrMs);
+    window._arrOrderMenu = a.menu || '야식';
+    window._arrShopItem  = a.shop || null;
+    window._arrPlace     = a.place || null;
+
+    var action;
+    if(slot === 'night')        action = { kind:'delivery', menu:(a.menu||'야식') };
+    else if(slot === 'shop')    action = { kind:'shop', item:a.shop };
+    else                        action = { label:'맛집 위치 보기', call:'_arrGoFoodTab()' };
+
+    var icon = (slot === 'shop') ? '🛍' : (slot === 'morning' ? '☕' : '🍗');
+
+    var send = function(body){
+      var vib = [300,120,300];
+      try { if('vibrate' in navigator) navigator.vibrate(vib); } catch(e){}
+      if(typeof showNotification==='function')
+        showNotification(a.title, body, { vibrate:vib, type:'arrive_reco' });
+      if(!document.hidden && typeof _showBriefingModal==='function')
+        _showBriefingModal(a.title, body, null, action);
+    };
+
+    // ★ 저녁(야식·쇼핑)엔 Gemini로 하루를 위로하는 문구를 받아 감성 줄 교체
+    if((slot === 'night' || slot === 'shop') && typeof _arrAiCopy === 'function'){
+      var subject = (slot === 'shop') ? (a.shop ? a.shop.n : '작은 선물') : a.menu;
+      var fired = false;
+      _arrAiCopy(subject, destStn, function(ai){
+        if(fired) return; fired = true;
+        var body = a.body;
+        if(ai){
+          var ls = body.split('\n');
+          if(ls.length > 3) ls[3] = ai;
+          body = ls.join('\n');
+        }
+        send(body);
+      });
+    } else {
+      send(a.body);
     }
   }catch(e){}
 }
+
+// 쿠팡 상품 페이지 열기 (앱 설치 시 앱으로)
+function _arrShopOpen(){
+  try{
+    var it = window._arrShopItem;
+    var ov = document.getElementById('briefModalOv'); if(ov) ov.remove();
+    var url = (it && it.u) ? it.u : 'https://www.coupang.com/';
+    if(typeof toast === 'function') toast('🛍 쿠팡에서 열고 있어요');
+    try{ window.open(url, '_blank'); }catch(e){ window.location.href = url; }
+  }catch(e){}
+}
+window._arrShopOpen = _arrShopOpen;
+
+// 쇼핑탭으로 이동
+function _arrGoShopTab(){
+  try{
+    var ov=document.getElementById('briefModalOv'); if(ov) ov.remove();
+    var el=document.getElementById('ni-shop');
+    if(typeof switchTab==='function') switchTab('shop', el);
+    setTimeout(function(){ if(typeof renderShop==='function') renderShop(); }, 150);
+  }catch(e){}
+}
+window._arrGoShopTab = _arrGoShopTab;
 
 // 팝업의 '맛집 보기' → 맛집 탭 이동
 function _arrGoFoodTab(){
   try{
     var ov=document.getElementById('briefModalOv'); if(ov) ov.remove();
-    var el=null;
-    document.querySelectorAll('.ni').forEach(function(n){
-      var oc=n.getAttribute('onclick')||'';
-      if(/switchTab\(\s*['"]food['"]/.test(oc)) el=n;
-    });
-    if(typeof switchTab==='function' && el) switchTab('food', el);
+    var el=document.getElementById('ni-food');
+    if(typeof switchTab==='function') switchTab('food', el);
     setTimeout(function(){ if(typeof loadFoodTab==='function') loadFoodTab(false); }, 150);
   }catch(e){}
 }
@@ -19029,8 +19515,11 @@ function _arrCheckPreAlert(arrMs, remSecs){
   }catch(e){}
 }
 window._arrCheckPreAlert = _arrCheckPreAlert;
-window._arrTestFire = function(hour){
-  var d=new Date(); if(hour!=null) d.setHours(hour, 0, 0, 0);
+// 테스트: _arrTestFire(21) 또는 _arrTestFire(19, 45)
+window._arrTestFire = function(hour, minute){
+  var d=new Date();
+  if(hour!=null) d.setHours(hour, minute || 0, 0, 0);
+  window._arrAlertKey = null;
   _arrFireAlert(_arrDestName() || '아라', d.getTime());
 };
 
@@ -19040,6 +19529,11 @@ function _showBriefingModal(title, body, route, action){
   window._cmBriefRoute = (route && route.from && route.to) ? route : null;
   var _hasRoute = !!window._cmBriefRoute;
   var _act = (action && action.label && action.call) ? action : null;
+  // ★ 야식 배달 버튼 모드 (배달의민족 / 요기요 / 쿠팡이츠)
+  var _dlv = (action && action.kind === 'delivery') ? action : null;
+  if(_dlv) window._arrOrderMenu = _dlv.menu || '야식';
+  // ★ 쿠팡 아이템 추천 모드
+  var _shp = (action && action.kind === 'shop') ? action : null;
   function _render(){
     try {
       var old = document.getElementById('briefModalOv');
@@ -19060,6 +19554,31 @@ function _showBriefingModal(title, body, route, action){
               ? '<button onclick="' + esc(_act.call) + '" style="flex:1;padding:12px 6px;border-radius:11px;border:none;cursor:pointer;font-size:14px;font-weight:700;background:#2f7cf6;color:#fff;">' + esc(_act.label) + '</button>'
               : '')
         + '</div>'
+        + (_shp
+            ? '<div style="margin-top:12px;">'
+              + '<div style="font-size:12px;color:var(--sub);margin-bottom:8px;text-align:center;">'
+              +   (_shp.item && _shp.item.n ? esc(_shp.item.n) + ', 지금 한 번 볼까요?' : '오늘의 추천 아이템 보기')
+              + '</div>'
+              + '<div style="display:flex;gap:8px;">'
+              +   '<button onclick="_arrShopOpen()" style="flex:2;padding:11px 4px;border-radius:11px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:#E94E1B;color:#fff;">쿠팡 구경</button>'
+              +   '<button onclick="_arrGoShopTab()" style="flex:1;padding:11px 4px;border-radius:11px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--text);">더 보기</button>'
+              + '</div>'
+            + '</div>'
+            : '')
+        + (_dlv
+            ? '<div style="margin-top:12px;">'
+              + '<div style="font-size:12px;color:var(--sub);margin-bottom:8px;text-align:center;">'
+              +   esc(_dlv.menu || '야식') + ', 집 도착에 맞춰 시켜둘까요?</div>'
+              + '<div style="display:flex;gap:8px;">'
+              +   '<button onclick="_arrOrder(\'baemin\')" style="flex:1;padding:11px 4px;border-radius:11px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:#2AC1BC;color:#fff;">배달의민족</button>'
+              +   '<button onclick="_arrOrder(\'yogiyo\')" style="flex:1;padding:11px 4px;border-radius:11px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:#FA0050;color:#fff;">요기요</button>'
+              +   '<button onclick="_arrOrder(\'coupangeats\')" style="flex:1;padding:11px 4px;border-radius:11px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:#0B57D0;color:#fff;">쿠팡이츠</button>'
+              + '</div>'
+              + '<div style="margin-top:8px;text-align:center;">'
+              +   '<span onclick="_arrGoFoodTab()" style="font-size:12px;color:#2f7cf6;font-weight:700;cursor:pointer;">근처 맛집 보기 ›</span>'
+              + '</div>'
+            + '</div>'
+            : '')
         + '</div>';
       ov.addEventListener('click', function(e){ if(e.target === ov) ov.remove(); });
       document.body.appendChild(ov);
