@@ -6085,6 +6085,26 @@ function fmapDoRoute() {
     return;
   }
 
+  // ★ 새 탐색 시작 — 이전 경로 결과를 즉시 무효화한다.
+  //   (예전엔 이전 _allRouteResults가 남아 있어, 응답이 늦으면 노선도에서 새로 고른
+  //    출발/도착인데도 직전 경로의 타임라인·혼잡도·AI 브리핑이 그대로 표시됐다)
+  var _reqToken = (window._routeReqToken = (window._routeReqToken || 0) + 1);
+  _allRouteResults = null;
+  window._transitResultData = null;
+  window._lastHtlNodes = null;
+  window._lastHtlSections = null;
+  window._pendingRouteType = null;
+  window._routeLocked = false;
+  window._lockedRouteType = null;
+  window._lastCongNodeIdx = -1;
+  try{ if(typeof _htlWaitStop === 'function') _htlWaitStop('새 경로 탐색'); }catch(e){}
+  // 혼잡도·AI 브리핑도 이전 경로 내용이 남지 않도록 대기 상태로 되돌린다
+  try{ if(typeof _resetCongToWaiting === 'function') _resetCongToWaiting(); }catch(e){}
+  try{
+    var _aiBody = document.getElementById('homeAiBody');
+    if(_aiBody) _aiBody.innerHTML = '<div class="home-ai-msg"><p style="color:var(--sub);">경로를 확인하고 있습니다...</p></div>';
+  }catch(e){}
+
   // 로딩 즉시 표시
   var box     = document.getElementById('transitResultBox');
   var loading = document.getElementById('transitLoading');
@@ -6178,8 +6198,15 @@ function fmapDoRoute() {
 
     if(useBFS) {
       if(loading) loading.style.display = 'none';
-      if(typeof doRoute === 'function') setTimeout(function(){ doRoute(); }, 100);
-      setTimeout(function(){ _renderBfsToTransitBox(start, dest); }, 600);
+      if(typeof doRoute === 'function') setTimeout(function(){
+        if(_reqToken !== window._routeReqToken) return;
+        doRoute();
+      }, 100);
+      setTimeout(function(){
+        if(_reqToken !== window._routeReqToken) return;
+        _renderBfsToTransitBox(start, dest);
+        window._routeResultReady = _reqToken;      // 결과 준비 완료 표시
+      }, 600);
       return;
     }
 
@@ -6201,6 +6228,8 @@ function fmapDoRoute() {
       return fetch(url).then(function(r){ return r.json(); }).catch(function(){ return null; });
     }))
     .then(function(results) {
+      // ★ 그 사이 새 탐색이 시작됐으면 이 응답은 버린다 (오래된 경로 표시 방지)
+      if(_reqToken !== window._routeReqToken) return;
       if(loading) loading.style.display = 'none';
 
       // 모든 path 합치기
@@ -6229,6 +6258,7 @@ function fmapDoRoute() {
       window._favSearchStart = start;          // ★ 즐겨찾기 정류장 반경 판정 기준 출발지
       window._favToastKey = null;
       _allRouteResults = _parseODsayAllOptions(combinedData);
+      window._routeResultReady = _reqToken;        // 결과 준비 완료 표시
 
       // 경로 탭 표시
       var tabDiv = document.getElementById('routeOptionTabs');
@@ -22788,12 +22818,24 @@ function svgSetRoute(type) {
       window._metroRouteMode = true;   // ★ 노선도로 설정한 경로 → 홈에서 하이라이트
       var homeNi = document.getElementById('ni-home');
       if(typeof switchTab === 'function') switchTab('home', homeNi);
-      // 홈에서 ODsay 전체 경로 탐색 → 지하철 모드 자동 선택
+      // 홈에서 전체 경로 탐색 → 지하철 모드 자동 선택
       setTimeout(function(){ if(typeof fmapDoRoute==='function') fmapDoRoute(); }, 300);
+      // ★ 고정 타이머(1.3초)로 탭을 고르면, 응답이 늦을 때 '이전 경로'가 그대로 그려졌다.
+      //   결과가 실제로 준비된 뒤에 선택하도록 대기한다(최대 8초).
       setTimeout(function(){
-        if(typeof _highlightRouteTab==='function') _highlightRouteTab('sub');
-        if(typeof selectRouteOption==='function'){ try{ selectRouteOption('sub'); }catch(e){} }
-      }, 1300);
+        var myTok = window._routeReqToken;
+        var tries = 0;
+        (function waitReady(){
+          if(window._routeReqToken !== myTok) return;          // 그 사이 다른 탐색 시작
+          var ready = (window._routeResultReady === myTok);
+          if(!ready && tries++ < 40){ setTimeout(waitReady, 200); return; }
+          if(!ready) return;
+          if(typeof _highlightRouteTab==='function') _highlightRouteTab('sub');
+          if(typeof selectRouteOption==='function' && typeof _allRouteResults !== 'undefined' && _allRouteResults){
+            try{ selectRouteOption('sub'); }catch(e){}
+          }
+        })();
+      }, 400);
     } else if(typeof toast==='function') toast('⚠️ 출발역을 먼저 선택하세요');
   }
 }
