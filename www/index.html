@@ -3364,7 +3364,23 @@ function _metroNextTrainInfo(mins){
     var found = (dep < nowMin + 1440 - 0.5) && (dep < 1440);
     // _realNextDep는 막차 지나면 times[0]+1440 반환 → 오늘 열차 없음
     if(dep >= 1440) found = false;
-    return { found: found, depMin: found ? dep : null, arrMin: found ? (dep + (mins||0)) : null };
+    // ★ 운행 중인 열차가 없을 때는 '다음 첫차 시각'을 함께 알려준다
+    var firstMin = null;
+    if(!found){
+      // dep가 익일 첫차(+1440)로 넘어온 경우 그대로 사용, 아니면 시각표 첫차 조회
+      if(dep != null && dep >= 1440) firstMin = dep - 1440;
+      if(firstMin == null && typeof _realFirstDep === 'function'){
+        var f = _realFirstDep(line, stn, '하', isWk);
+        if(f != null) firstMin = ((f % 1440) + 1440) % 1440;
+      }
+    }
+    return {
+      found: found,
+      depMin: found ? dep : null,
+      arrMin: found ? (dep + (mins||0)) : null,
+      firstMin: firstMin,
+      line: line, stn: stn
+    };
   } catch(e){ return null; }
 }
 window._metroNextTrainInfo = _metroNextTrainInfo;
@@ -3446,7 +3462,29 @@ function _renderHomeConductorBrief(fromName, toName, hour, congPct, serverMsg){
           var ah=Math.floor((info.arrMin%1440)/60), amn=Math.round(info.arrMin%60);
           ps.push('현재 기준 다음 열차는 <b>' + pad(dh)+':'+pad(dmn) + '</b>, 도착은 <b>' + pad(ah)+':'+pad(amn) + '</b>경으로 예상됩니다.');
         } else if(info && !info.found){
-          ps.push('현재 시각 기준으로 <b>운행 중인 열차가 없습니다</b> (막차 이후). 경로와 소요시간만 참고하세요.');
+          var _fMsg = '현재 시각 기준으로 <b>운행 중인 열차가 없습니다</b> (막차 이후).';
+          if(info.firstMin != null){
+            var fh = Math.floor(info.firstMin/60), fm = Math.round(info.firstMin%60);
+            if(fm >= 60){ fm -= 60; fh = (fh+1)%24; }
+            var _fStr = pad(fh) + ':' + pad(fm);
+            // 첫차까지 남은 시간도 함께
+            var _nowM = (typeof kstMinutesAdj==='function') ? kstMinutesAdj()
+                      : (new Date().getHours()*60 + new Date().getMinutes());
+            var _wait = info.firstMin - _nowM; if(_wait < 0) _wait += 1440;
+            var _wTxt = (_wait >= 60)
+              ? (Math.floor(_wait/60) + '시간 ' + (_wait%60) + '분 후')
+              : (Math.round(_wait) + '분 후');
+            _fMsg += ' 첫차는 <b>' + _fStr + '</b>(' + _wTxt + ')에 있습니다.';
+            if(_mm>0){
+              var _arrF = info.firstMin + _mm;
+              var ah2 = Math.floor((_arrF%1440)/60), am2 = Math.round(_arrF%60);
+              if(am2 >= 60){ am2 -= 60; ah2 = (ah2+1)%24; }
+              _fMsg += ' 첫차로 가시면 <b>' + pad(ah2)+':'+pad(am2) + '</b>경 도착 예정입니다.';
+            }
+          } else {
+            _fMsg += ' 경로와 소요시간만 참고하세요.';
+          }
+          ps.push(_fMsg);
         }
       } else if(mins>0){
         // (실시간 추적 모드) 도착 예정 시각 — 남은시간 갱신에 따라 실시간 업데이트
@@ -6089,6 +6127,9 @@ function fmapDoRoute() {
   //   (예전엔 이전 _allRouteResults가 남아 있어, 응답이 늦으면 노선도에서 새로 고른
   //    출발/도착인데도 직전 경로의 타임라인·혼잡도·AI 브리핑이 그대로 표시됐다)
   var _reqToken = (window._routeReqToken = (window._routeReqToken || 0) + 1);
+  // 이 응답을 버려야 하는가 = '더 새로운 요청의 결과가 이미 화면에 그려졌는가'
+  //   (단순히 새 요청이 시작된 것만으로 버리면, 그 요청이 실패했을 때 카드가 빈 채로 남는다)
+  function _routeStale(){ return (window._routeResultReady || 0) > _reqToken; }
   _allRouteResults = null;
   window._transitResultData = null;
   window._lastHtlNodes = null;
@@ -6104,6 +6145,23 @@ function fmapDoRoute() {
     var _aiBody = document.getElementById('homeAiBody');
     if(_aiBody) _aiBody.innerHTML = '<div class="home-ai-msg"><p style="color:var(--sub);">경로를 확인하고 있습니다...</p></div>';
   }catch(e){}
+
+  // 탐색 후에도 결과가 안 뜨면 1회만 자동 재시도 (앱 시작 직후 첫 탐색 실패 대비)
+  setTimeout(function(){
+    try{
+      if((window._routeResultReady || 0) >= _reqToken) return;      // 이미 결과 나옴
+      if(window._routeReqToken !== _reqToken) return;               // 그 사이 새 탐색 시작
+      var c = document.getElementById('transitResultCard');
+      var e = document.getElementById('transitResultErr');
+      var shown = c && c.style.display !== 'none';
+      var errOn = e && e.style.display !== 'none';
+      if(shown || errOn) return;
+      if(window._routeRetried === _reqToken) return;                // 재시도는 1회만
+      window._routeRetried = _reqToken;
+      console.log('[경로] 결과 없음 → 자동 재시도');
+      if(typeof fmapDoRoute === 'function') fmapDoRoute();
+    }catch(err){}
+  }, 6000);
 
   // 로딩 즉시 표시
   var box     = document.getElementById('transitResultBox');
@@ -6199,11 +6257,11 @@ function fmapDoRoute() {
     if(useBFS) {
       if(loading) loading.style.display = 'none';
       if(typeof doRoute === 'function') setTimeout(function(){
-        if(_reqToken !== window._routeReqToken) return;
+        if(_routeStale()) return;
         doRoute();
       }, 100);
       setTimeout(function(){
-        if(_reqToken !== window._routeReqToken) return;
+        if(_routeStale()) return;
         _renderBfsToTransitBox(start, dest);
         window._routeResultReady = _reqToken;      // 결과 준비 완료 표시
       }, 600);
@@ -6228,8 +6286,8 @@ function fmapDoRoute() {
       return fetch(url).then(function(r){ return r.json(); }).catch(function(){ return null; });
     }))
     .then(function(results) {
-      // ★ 그 사이 새 탐색이 시작됐으면 이 응답은 버린다 (오래된 경로 표시 방지)
-      if(_reqToken !== window._routeReqToken) return;
+      // ★ 더 새로운 결과가 이미 그려졌으면 이 응답은 버린다 (오래된 경로 표시 방지)
+      if(_routeStale()) return;
       if(loading) loading.style.display = 'none';
 
       // 모든 path 합치기
@@ -22826,8 +22884,7 @@ function svgSetRoute(type) {
         var myTok = window._routeReqToken;
         var tries = 0;
         (function waitReady(){
-          if(window._routeReqToken !== myTok) return;          // 그 사이 다른 탐색 시작
-          var ready = (window._routeResultReady === myTok);
+          var ready = ((window._routeResultReady || 0) >= myTok);
           if(!ready && tries++ < 40){ setTimeout(waitReady, 200); return; }
           if(!ready) return;
           if(typeof _highlightRouteTab==='function') _highlightRouteTab('sub');
