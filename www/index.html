@@ -3715,7 +3715,7 @@ function _fetchNearStops(lat, lng, callback) {
         return {
           nodenm:   s.node_nm,
           nodeid:   s.node_id,
-          citycode: s.city_code || '0',
+          citycode: (s.city_code && String(s.city_code) !== '0') ? String(s.city_code) : '',
           gpslati:  s.lat,
           gpslong:  s.lng,
           dist:     haversineM(lat, lng, s.lat, s.lng)
@@ -3728,6 +3728,60 @@ function _fetchNearStops(lat, lng, callback) {
       callback(e, []);
     });
 }
+
+// ══════════════════════════════════════════════════════════════════
+// ★ TAGO cityCode 추정
+//   D1 정류장 테이블에 city_code가 비어 있는 행이 있는데, 예전에는 '0'을
+//   넣고 그대로 API에 보내 도착정보가 오류로 떨어졌다(인천 한진·송도스포츠센터 등).
+//   nodeId 접두어 → 좌표 순으로 실제 도시코드를 추정한다.
+// ══════════════════════════════════════════════════════════════════
+var _TAGO_NODE_PREFIX = {
+  'ICB':'23',   // 인천
+  'SEB':'11',   // 서울
+  'BSB':'21',   // 부산
+  'DGB':'22',   // 대구
+  'GWB':'24',   // 광주
+  'DJB':'25',   // 대전
+  'USB':'26',   // 울산
+  'SJB':'12'    // 세종
+};
+// [코드, 남, 북, 서, 동]
+var _TAGO_CITY_BOX = [
+  ['23', 37.29, 37.66, 126.34, 126.81],   // 인천
+  ['11', 37.41, 37.72, 126.76, 127.19],   // 서울
+  ['21', 34.99, 35.40, 128.75, 129.32],   // 부산
+  ['22', 35.61, 36.02, 128.35, 128.77],   // 대구
+  ['24', 35.03, 35.26, 126.64, 126.96],   // 광주
+  ['25', 36.18, 36.50, 127.25, 127.56],   // 대전
+  ['26', 35.44, 35.72, 129.06, 129.47],   // 울산
+  ['12', 36.42, 36.72, 127.15, 127.40]    // 세종
+];
+function _tagoCityCode(stop){
+  try{
+    if(!stop) return '';
+    var cc = String(stop.cityCode || stop.citycode || '').trim();
+    if(cc && cc !== '0' && cc !== 'null' && cc !== 'undefined') return cc;
+
+    // ① nodeId 접두어 (예: ICB165000381 → 인천)
+    var nid = String(stop.nodeId || stop.nodeid || '').toUpperCase();
+    var pre = nid.slice(0, 3);
+    if(_TAGO_NODE_PREFIX[pre]) return _TAGO_NODE_PREFIX[pre];
+
+    // ② 좌표 박스
+    var la = parseFloat(stop.gpslati || stop.lat || stop.la);
+    var ln = parseFloat(stop.gpslong || stop.lng || stop.lo);
+    if(!isNaN(la) && !isNaN(ln)){
+      for(var i=0;i<_TAGO_CITY_BOX.length;i++){
+        var b=_TAGO_CITY_BOX[i];
+        if(la>=b[1] && la<=b[2] && ln>=b[3] && ln<=b[4]) return b[0];
+      }
+      // ③ 수도권 경기권 폴백 — 인천 인접이면 인천으로
+      if(la>=37.0 && la<=38.0 && ln>=126.3 && ln<=127.6) return '23';
+    }
+    return '';
+  }catch(e){ return ''; }
+}
+window._tagoCityCode = _tagoCityCode;
 
 // ── TAGO API: 정류장 도착 정보 조회 ──────────────────────────
 function _fetchBusArrival(cityCode, nodeId, callback) {
@@ -4288,7 +4342,7 @@ function _doLoadBusStops(lat, lng) {
       var card = _renderBusStop(stop, []);
       if(stopList) stopList.appendChild(card);
 
-      var cityCode = stop.citycode || stop.cityCode || '25'; // 기본 부산
+      var cityCode = (typeof _tagoCityCode==='function' ? _tagoCityCode(stop) : '') || stop.citycode || stop.cityCode || '';   // ★ city_code 비면 nodeId·좌표로 추정
       var nodeId   = stop.nodeid  || stop.nodeId  || '';
       if(!nodeId) { loaded++; return; }
 
@@ -4444,7 +4498,7 @@ function _showNearbyLocations(lat, lng, box, type) {
           type:'bus',
           name: stop.nodenm || stop.nodeName || '',
           nodeId: stop.nodeid || stop.nodeId,
-          cityCode: stop.citycode || stop.cityCode || '25',
+          cityCode: (typeof _tagoCityCode==='function' ? _tagoCityCode(stop) : '') || stop.citycode || stop.cityCode || '',
           lat: parseFloat(stop.gpslati || stop.gpsLati || lat),
           lng: parseFloat(stop.gpslong || stop.gpsLong || lng)
         });
@@ -8891,7 +8945,7 @@ function _renderNearStops(stops){
     var arrStop = {
       name: stop.nodenm || stop.nodeName,
       nodeId: stop.nodeid || stop.nodeId,
-      cityCode: stop.citycode || stop.cityCode || '25',
+      cityCode: (typeof _tagoCityCode==='function' ? _tagoCityCode(stop) : '') || stop.citycode || stop.cityCode || '',
       nodeDir: stop.nodeDir || stop.dir
     };
     window._mapBusCards.push({ stop: arrStop, cardIdx: 'near_' + idx });
@@ -9099,7 +9153,7 @@ function _busFindLandmark(stop, arrivals, cb){
   var cached = _busLmCached(nodeId);
   if(cached !== undefined){ cb(cached); return; }
   if(!arrivals || !arrivals.length || typeof _fetchRouteStations !== 'function'){ cb(''); return; }
-  var cityCode = stop.cityCode || stop.citycode || '25';
+  var cityCode = (typeof _tagoCityCode==='function' ? _tagoCityCode(stop) : '') || stop.citycode || stop.cityCode || '';
   var norm = function(s){ return String(s || '').replace(/\s+/g, '').split('(')[0]; };
   var myNm = norm(stop.name || stop.nodenm || stop.nodeName || '');
   var routes = [];
@@ -9441,9 +9495,11 @@ function _busArrFetch(cityCode, nodeId){
 window._busArrFetch = _busArrFetch;
 
 function _loadMapBusArrival(stop, cardIdx, _try) {
-  var cityCode = stop.cityCode || stop.citycode || '25';
+  // ★ city_code가 비어 있으면 nodeId·좌표로 추정 (예전엔 '25'(대전)로 잘못 고정)
+  var cityCode = (typeof _tagoCityCode === 'function') ? _tagoCityCode(stop) : '';
+  if(!cityCode) cityCode = stop.cityCode || stop.citycode || '';
   var nodeId   = stop.nodeId   || stop.nodeid   || '';
-  if(!nodeId) return;
+  if(!nodeId || !cityCode) return;
   _try = _try || 0;
 
   _busArrFetch(cityCode, nodeId)
@@ -18162,7 +18218,7 @@ function _showGpsMultiModal2(combined, lat, lng) {
         if(el) el.textContent = '';
         return;
       }
-      _fetchBusArrival(s.cityCode || '25', s.nodeId, function(err, arrivals) {
+      _fetchBusArrival((typeof _tagoCityCode==='function' ? _tagoCityCode(s) : '') || s.cityCode || '', s.nodeId, function(err, arrivals) {
         if(!el) return;
         if(err || !arrivals || !arrivals.length) {
           el.textContent = '도착정보 없음';
@@ -18197,7 +18253,7 @@ function gpsSelectStation(idx){
     if(inp) inp.value = s.name;
     _fmapSetLocation('start', {
       type:'bus', name:s.name,
-      nodeId: s.nodeId, cityCode: s.cityCode || '25',
+      nodeId: s.nodeId, cityCode: (typeof _tagoCityCode==='function' ? _tagoCityCode(s) : '') || s.cityCode || '',
       lat: s.lat, lng: s.lng
     });
     toast('✅ ' + s.name + ' 출발지 설정 완료!');
@@ -21096,6 +21152,13 @@ window._newsClassify = _newsClassify;
 function _newsApplyCats(items){
   (items || []).forEach(function(it){
     if(!it) return;
+    // ★ 특수문자(&apos; &#39; 등) 디코드 — 서버 피드에도 이스케이프된 채로 오는 경우가 있음
+    if(!it._decoded && typeof _htmlDecode === 'function'){
+      it._decoded = 1;
+      if(it.title)  it.title  = _htmlDecode(it.title).replace(/\s+/g,' ').trim();
+      if(it.desc)   it.desc   = _htmlDecode(it.desc);
+      if(it.source) it.source = _htmlDecode(it.source).trim();
+    }
     if(it._catFixed) return;
     it._srcCat = it.cat;
     it.cat = _newsClassify(it);
@@ -21223,14 +21286,42 @@ var _NEWS_POLICY = {
   useIframe: false        // 프레이밍 금지
 };
 
+// ★ HTML 엔티티 디코드 — &apos; &#039; &#x27; 등 + 이중 인코딩(&amp;apos;)까지 처리
+var _HTML_ENT = {
+  nbsp:' ', amp:'&', lt:'<', gt:'>', quot:'"', apos:"'", ldquo:'\u201C', rdquo:'\u201D',
+  lsquo:'\u2018', rsquo:'\u2019', hellip:'\u2026', middot:'\u00B7', mdash:'\u2014',
+  ndash:'\u2013', laquo:'\u00AB', raquo:'\u00BB', bull:'\u2022', deg:'\u00B0',
+  times:'\u00D7', copy:'\u00A9', reg:'\u00AE', trade:'\u2122', euro:'\u20AC',
+  won:'\u20A9', percnt:'%', lsaquo:'\u2039', rsaquo:'\u203A', prime:'\u2032'
+};
+function _htmlDecode(str){
+  var t = String(str == null ? '' : str);
+  // 이중·삼중 인코딩 대비 최대 3회 반복
+  for(var pass = 0; pass < 3; pass++){
+    var before = t;
+    t = t.replace(/&#x([0-9a-fA-F]+);/g, function(_, h){
+          try{ return String.fromCodePoint(parseInt(h, 16)); }catch(e){ return _; }
+        })
+        .replace(/&#(\d+);/g, function(_, d){
+          try{ return String.fromCodePoint(parseInt(d, 10)); }catch(e){ return _; }
+        })
+        .replace(/&([a-zA-Z]+);/g, function(_, name){
+          var k = name.toLowerCase();
+          return (_HTML_ENT[k] != null) ? _HTML_ENT[k] : _;
+        });
+    if(t === before) break;
+  }
+  return t;
+}
+window._htmlDecode = _htmlDecode;
+
 // RSS 요약(description) 정리 — 태그 제거, 매체 접두어 제거, 길이 제한
 function _newsCleanDesc(raw){
   try{
     var t = String(raw || '');
-    t = t.replace(/<[^>]*>/g, ' ');                       // 태그 제거
-    t = t.replace(/&nbsp;/g,' ').replace(/&amp;/g,'&')
-         .replace(/&lt;/g,'<').replace(/&gt;/g,'>')
-         .replace(/&quot;/g,'"').replace(/&#39;/g,"'");
+    t = _htmlDecode(t);                                   // 엔티티 먼저 디코드
+    t = t.replace(/<[^>]*>/g, ' ');                       // 그 뒤 태그 제거
+    t = _htmlDecode(t);                                   // 태그 안에 숨어 있던 엔티티 재처리
     t = t.replace(/\s+/g,' ').trim();
     t = t.replace(/^[\(\[][^\)\]]{0,20}[\)\]]\s*/,'');    // 앞머리 (서울=연합뉴스) 등
     t = t.replace(/^[가-힣]{2,4}\s*(기자|특파원)\s*=\s*/,'');  // 기자명 서두 제거
@@ -24606,7 +24697,12 @@ function _parseNewsRSS(xml) {
       var cleanTitle = srcSplit.length > 1 ? srcSplit.slice(0, -1).join(' - ') : title;
       var cleanSrc = srcSplit.length > 1 ? srcSplit[srcSplit.length-1] : src;
       if(cleanTitle) {
-        out.push({ title: cleanTitle.trim(), source: cleanSrc.trim(), pubDate: pub, link: link });
+        var _dec = (typeof _htmlDecode === 'function') ? _htmlDecode : function(x){ return x; };
+        out.push({
+          title: _dec(cleanTitle).replace(/\s+/g,' ').trim(),
+          source: _dec(cleanSrc).trim(),
+          pubDate: pub, link: link
+        });
       }
     });
     return out.slice(0, 15);
@@ -24649,7 +24745,7 @@ function _makeNewsPostFromRealtime() {
     id:    _POST_ID++,
     cat:   '뉴스',
     tag:   '뉴스',
-    title: news.title,
+    title: (typeof _htmlDecode === 'function') ? _htmlDecode(news.title) : news.title,
     body:  bodyText,
     link:  news.link || '',
     nick:  _rnd(_NICK_POOL),
@@ -25948,7 +26044,7 @@ function fmapSearch(inp, type) {
             type: 'bus',
             name: stop.nodenm || stop.nodeName || '',
             nodeId: stop.nodeid || stop.nodeId,
-            cityCode: stop.citycode || stop.cityCode || '25',
+            cityCode: (typeof _tagoCityCode==='function' ? _tagoCityCode(stop) : '') || stop.citycode || stop.cityCode || '',
             lat: parseFloat(stop.gpslati || stop.gpsLati || 0),
             lng: parseFloat(stop.gpslong || stop.gpsLong || 0)
           });
@@ -31776,7 +31872,9 @@ function _ltAdd(msg){
 function _ltNewsKeyword(title){
   if(!title) return '';
   // 언론사/괄호/특수문자 제거 후 핵심 어구만
-  var t = title.replace(/\[[^\]]*\]/g,'').replace(/\([^)]*\)/g,'').trim();
+  var t = String(title);
+  if(typeof _htmlDecode === 'function') t = _htmlDecode(t);   // &apos; 등 엔티티 디코드
+  t = t.replace(/\[[^\]]*\]/g,'').replace(/\([^)]*\)/g,'').trim();
   // 너무 길면 앞부분만
   if(t.length > 24) t = t.slice(0, 24) + '…';
   return t;
