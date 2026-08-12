@@ -7371,45 +7371,71 @@ window._rtProbeReset = _rtProbeReset;
 //   열차위치(realtimePosition)가 안 되는 노선이라도 '역별 도착정보'는
 //   제공될 수 있다. 되면 다음 열차 도착까지 남은 초를 받아 연착 보정에 쓴다.
 // ══════════════════════════════════════════════════════════════════
+// ★ 반드시 '환승 없는 고유역'으로 조회해야 한다.
+//   환승역(계양=공항철도, 석남=7호선, 김포공항=5·9·공항·서해, 소사=1호선,
+//   판교=신분당, 샛강=9호선)으로 조회하면 그 노선 도착정보가 잡혀 오탐이 난다.
 var _RT_ARR_PROBE = [
-  ['인천1호선', ['아라','계양','부평','인천시청','원인재']],
-  ['인천2호선', ['검단오류','석남','주안','인천시청']],
-  ['김포골드라인', ['김포공항','장기','운양']],
-  ['서해선', ['소사','원시','일산']],
-  ['경강선', ['판교','이매','경기광주']],
-  ['신림선', ['샛강','보라매','관악산']]
+  ['인천1호선',   ['아라','임학','귤현','간석오거리','예술회관','문학경기장','동막']],
+  ['인천2호선',   ['석천사거리','모래내시장','만수','남동구청','인천대공원','운연']],
+  ['김포골드라인', ['운양','장기','구래','양촌','고촌','풍무','걸포북변']],
+  ['서해선',      ['시흥능곡','달미','선부','시우','원시','신현']],
+  ['경강선',      ['삼동','초월','곤지암','신둔도예촌','부발','세종대왕릉','여주']],
+  ['신림선',      ['보라매병원','당곡','서원','서울대벤처타운','관악산']],
+  ['의정부경전철', ['어룡','송산','탑석','효자','경기도청북부청사']],
+  ['에버라인선',   ['동백','초당','삼가','시청.용인대','명지대','전대.에버랜드']],
+  ['우이신설선',   ['솔밭공원','4.19민주묘지','가오리','화계','삼양','정릉']]
 ];
+
+// 이미 아는 subwayId → 노선명 (오탐 판별용)
+var _RT_KNOWN_ID = {
+  '1001':'1호선','1002':'2호선','1003':'3호선','1004':'4호선','1005':'5호선',
+  '1006':'6호선','1007':'7호선','1008':'8호선','1009':'9호선',
+  '1061':'중앙선','1063':'경의중앙선','1065':'공항철도','1067':'경춘선',
+  '1075':'수인분당선','1077':'신분당선','1081':'경강선','1092':'우이신설선',
+  '1093':'서해선','1094':'신림선','1032':'GTX-A'
+};
 
 async function _rtProbeArrival(){
   var out = [];
-  console.log('%c[RT진단2] 역 도착정보 탐색 시작', 'font-weight:bold;color:#2f7cf6');
+  console.log('%c[RT진단2] 역 도착정보 탐색 (고유역 기준)', 'font-weight:bold;color:#2f7cf6');
   for(var i=0;i<_RT_ARR_PROBE.length;i++){
     var line = _RT_ARR_PROBE[i][0], stns = _RT_ARR_PROBE[i][1];
-    var hit = null;
+    var hit = null, tried = [];
     for(var j=0;j<stns.length && !hit;j++){
       var raw = null;
+      tried.push(stns[j]);
       try{
         raw = await seoulFetch('realtimeStationArrival/0/10/' + encodeURIComponent(stns[j]), 6000);
       }catch(e){}
       var items = (raw && raw.realtimeArrivalList) ? raw.realtimeArrivalList : null;
       if(items && items.length){
-        // 이 노선 열차가 실제로 섞여 있는지 확인 (역명이 서울 역과 겹칠 수 있음)
-        var ids = {}, sample = [];
+        // ★ 이미 아는 노선의 subwayId만 나오면 = 환승/동명이역 오탐 → 제외
+        var ids = {}, unknown = [], sample = [];
         items.forEach(function(t){
-          if(t.subwayId) ids[String(t.subwayId)] = (ids[String(t.subwayId)]||0)+1;
-          if(sample.length < 3) sample.push((t.trainLineNm||t.bstatnNm||'') + ' ' + (t.barvlDt||t.arvlMsg2||''));
+          var sid = t.subwayId ? String(t.subwayId) : '';
+          if(!sid) return;
+          ids[sid] = (ids[sid]||0) + 1;
+          if(!_RT_KNOWN_ID[sid] && unknown.indexOf(sid) < 0) unknown.push(sid);
+          if(sample.length < 3) sample.push((t.trainLineNm || t.bstatnNm || '') + (t.barvlDt ? (' ' + t.barvlDt + '초') : ''));
         });
-        hit = { 노선: line, 역: stns[j], 건수: items.length,
-                subwayId: Object.keys(ids).map(function(k){return k+':'+ids[k];}).join(', '),
-                샘플: sample.join(' / ') };
+        var idStr = Object.keys(ids).map(function(k){
+          return k + (_RT_KNOWN_ID[k] ? ('(' + _RT_KNOWN_ID[k] + ')') : '(?)') + ':' + ids[k];
+        }).join(', ');
+        // 이 노선 자체 id로 보이는 것(미지의 id) 또는 기대 id가 있으면 진짜 성공
+        var real = unknown.length > 0 || !!_RT_KNOWN_ID[Object.keys(ids)[0]] && Object.keys(ids).some(function(k){
+          return _RT_KNOWN_ID[k] === line;
+        });
+        hit = { 노선: line, 역: stns[j], 건수: items.length, 유효: real ? 'O' : 'X(오탐)',
+                subwayId: idStr, 신규id: unknown.join(',') || '-', 샘플: sample.join(' / ') };
+        if(!real){ out.push(hit); hit = null; continue; }   // 오탐이면 다음 역으로 계속
       }
       await new Promise(function(r){ setTimeout(r, 300); });
     }
     if(hit){
       out.push(hit);
       console.log('%c  ✅ ' + line + ' @' + hit['역'] + ' → ' + hit['건수'] + '건', 'color:#00b341;font-weight:bold', hit.subwayId);
-    } else {
-      out.push({ 노선: line, 역: stns.join('/'), 건수: 0, subwayId: '-', 샘플: '없음' });
+    } else if(!out.some(function(r){ return r['노선'] === line; })){
+      out.push({ 노선: line, 역: tried.join('/'), 건수: 0, 유효:'-', subwayId: '-', 신규id:'-', 샘플: '없음' });
       console.log('  ❌ ' + line + ' → 도착정보 없음');
     }
   }
@@ -7427,22 +7453,30 @@ async function _rtProbeArrivalUI(){
   catch(e){ _rtLogEl('❌ 조회 실패: ' + (e.message||e)); return; }
   _rtLogEl('');
   rows.forEach(function(r){
-    _rtLogEl((r['건수'] > 0 ? '✅ ' : '·  ') + r['노선'] + ' @' + r['역'] + '  '
-      + (r['건수'] > 0 ? (r['건수'] + '건 · id ' + r.subwayId) : '도착정보 없음'));
+    var mark = (r['유효'] === 'O') ? '✅ ' : (r['건수'] > 0 ? '⚠️ ' : '·  ');
+    _rtLogEl(mark + r['노선'] + ' @' + r['역'] + '  '
+      + (r['건수'] > 0
+          ? (r['건수'] + '건 · ' + r.subwayId + (r['유효'] === 'O' ? '' : '  ← 환승노선 오탐'))
+          : '도착정보 없음'));
   });
-  var ok = rows.filter(function(r){ return r['건수'] > 0; });
+  var ok = rows.filter(function(r){ return r['유효'] === 'O'; });
   _rtLogEl('');
   if(ok.length){
     try{
       var m = {};
-      ok.forEach(function(r){ m[r['노선']] = String(r.subwayId).split(':')[0]; });
+      ok.forEach(function(r){
+        var id = (r['신규id'] && r['신규id'] !== '-') ? String(r['신규id']).split(',')[0]
+                                                     : String(r.subwayId).split('(')[0];
+        m[r['노선']] = id;
+      });
       localStorage.setItem('rtArrMap', JSON.stringify({ id:m, t:Date.now() }));
     }catch(e){}
-    _rtLogEl('🎉 ' + ok.length + '개 노선에서 도착정보가 확인됐어요.');
+    _rtLogEl('🎉 ' + ok.length + '개 노선에서 진짜 도착정보가 확인됐어요.');
+    _rtLogEl('   (⚠️ 표시는 환승역의 다른 노선이 잡힌 오탐이라 제외했어요)');
     _rtLogEl('   결과를 알려주시면 연착 보정에 연결해 드릴게요.');
     if(typeof toast==='function') toast('✅ 도착정보 ' + ok.length + '개 노선 확인');
   } else {
-    _rtLogEl('역 도착정보도 제공되지 않아요.');
+    _rtLogEl('이 노선들의 자체 도착정보는 제공되지 않아요.');
     _rtLogEl('→ 이 노선들은 시각표 + GPS + 연착 추정으로 계속 동작해요.');
     if(typeof toast==='function') toast('도착정보 없음 — 기존 방식 유지');
   }
