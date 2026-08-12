@@ -7366,6 +7366,89 @@ function _rtProbeReset(){
 }
 window._rtProbeReset = _rtProbeReset;
 
+// ══════════════════════════════════════════════════════════════════
+// ★ 2차 진단 — 역 도착정보(realtimeStationArrival)
+//   열차위치(realtimePosition)가 안 되는 노선이라도 '역별 도착정보'는
+//   제공될 수 있다. 되면 다음 열차 도착까지 남은 초를 받아 연착 보정에 쓴다.
+// ══════════════════════════════════════════════════════════════════
+var _RT_ARR_PROBE = [
+  ['인천1호선', ['아라','계양','부평','인천시청','원인재']],
+  ['인천2호선', ['검단오류','석남','주안','인천시청']],
+  ['김포골드라인', ['김포공항','장기','운양']],
+  ['서해선', ['소사','원시','일산']],
+  ['경강선', ['판교','이매','경기광주']],
+  ['신림선', ['샛강','보라매','관악산']]
+];
+
+async function _rtProbeArrival(){
+  var out = [];
+  console.log('%c[RT진단2] 역 도착정보 탐색 시작', 'font-weight:bold;color:#2f7cf6');
+  for(var i=0;i<_RT_ARR_PROBE.length;i++){
+    var line = _RT_ARR_PROBE[i][0], stns = _RT_ARR_PROBE[i][1];
+    var hit = null;
+    for(var j=0;j<stns.length && !hit;j++){
+      var raw = null;
+      try{
+        raw = await seoulFetch('realtimeStationArrival/0/10/' + encodeURIComponent(stns[j]), 6000);
+      }catch(e){}
+      var items = (raw && raw.realtimeArrivalList) ? raw.realtimeArrivalList : null;
+      if(items && items.length){
+        // 이 노선 열차가 실제로 섞여 있는지 확인 (역명이 서울 역과 겹칠 수 있음)
+        var ids = {}, sample = [];
+        items.forEach(function(t){
+          if(t.subwayId) ids[String(t.subwayId)] = (ids[String(t.subwayId)]||0)+1;
+          if(sample.length < 3) sample.push((t.trainLineNm||t.bstatnNm||'') + ' ' + (t.barvlDt||t.arvlMsg2||''));
+        });
+        hit = { 노선: line, 역: stns[j], 건수: items.length,
+                subwayId: Object.keys(ids).map(function(k){return k+':'+ids[k];}).join(', '),
+                샘플: sample.join(' / ') };
+      }
+      await new Promise(function(r){ setTimeout(r, 300); });
+    }
+    if(hit){
+      out.push(hit);
+      console.log('%c  ✅ ' + line + ' @' + hit['역'] + ' → ' + hit['건수'] + '건', 'color:#00b341;font-weight:bold', hit.subwayId);
+    } else {
+      out.push({ 노선: line, 역: stns.join('/'), 건수: 0, subwayId: '-', 샘플: '없음' });
+      console.log('  ❌ ' + line + ' → 도착정보 없음');
+    }
+  }
+  try{ console.table(out); }catch(e){}
+  window._rtArrProbeResult = out;
+  return out;
+}
+window._rtProbeArrival = _rtProbeArrival;
+
+async function _rtProbeArrivalUI(){
+  _rtLogEl('🚉 역 도착정보(realtimeStationArrival) 조회 중... (약 15초)', true);
+  if(typeof toast==='function') toast('2차 진단 중이에요...');
+  var rows;
+  try{ rows = await _rtProbeArrival(); }
+  catch(e){ _rtLogEl('❌ 조회 실패: ' + (e.message||e)); return; }
+  _rtLogEl('');
+  rows.forEach(function(r){
+    _rtLogEl((r['건수'] > 0 ? '✅ ' : '·  ') + r['노선'] + ' @' + r['역'] + '  '
+      + (r['건수'] > 0 ? (r['건수'] + '건 · id ' + r.subwayId) : '도착정보 없음'));
+  });
+  var ok = rows.filter(function(r){ return r['건수'] > 0; });
+  _rtLogEl('');
+  if(ok.length){
+    try{
+      var m = {};
+      ok.forEach(function(r){ m[r['노선']] = String(r.subwayId).split(':')[0]; });
+      localStorage.setItem('rtArrMap', JSON.stringify({ id:m, t:Date.now() }));
+    }catch(e){}
+    _rtLogEl('🎉 ' + ok.length + '개 노선에서 도착정보가 확인됐어요.');
+    _rtLogEl('   결과를 알려주시면 연착 보정에 연결해 드릴게요.');
+    if(typeof toast==='function') toast('✅ 도착정보 ' + ok.length + '개 노선 확인');
+  } else {
+    _rtLogEl('역 도착정보도 제공되지 않아요.');
+    _rtLogEl('→ 이 노선들은 시각표 + GPS + 연착 추정으로 계속 동작해요.');
+    if(typeof toast==='function') toast('도착정보 없음 — 기존 방식 유지');
+  }
+}
+window._rtProbeArrivalUI = _rtProbeArrivalUI;
+
 // lineName → subwayId(응답 필터용). 여기 없는 노선 = 미커버 → 보정 미동작(폴백)
 var _RT_LINE2ID = {
   '1호선':'1001','2호선':'1002','3호선':'1003','4호선':'1004','5호선':'1005',
@@ -10225,11 +10308,12 @@ window.addEventListener('unhandledrejection', function(e) {
       <!-- ★ 실시간 열차위치 진단 -->
       <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-top:12px;">
         <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">🚆 실시간 열차위치 진단</div>
-        <p style="font-size:12px;color:var(--sub);margin-bottom:12px;">인천1·2호선 등 어떤 노선이 실시간 열차위치를 제공하는지 확인하고, 되는 노선은 자동으로 켜요. (약 10초)</p>
+        <p style="font-size:12px;color:var(--sub);margin-bottom:12px;">어떤 노선이 실시간 열차위치를 제공하는지 확인하고, 되는 노선은 자동으로 켜요.<br>1차=열차위치 · 2차=역 도착정보 (각 10~15초)</p>
         <div style="display:flex;gap:8px;margin-bottom:10px;">
           <button onclick="_rtProbeUI2()" style="flex:1;padding:11px;border-radius:10px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:var(--gold);color:#121214;font-family:inherit;">진단 실행</button>
           <button onclick="_rtProbeReset()" style="padding:11px 14px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--sub);font-family:inherit;">초기화</button>
         </div>
+        <button onclick="_rtProbeArrivalUI()" style="width:100%;margin-bottom:10px;padding:11px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--text);font-family:inherit;">2차 진단 · 역 도착정보</button>
         <div id="rtProbeLog" style="background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px;font-size:11px;line-height:1.6;color:var(--text);font-family:monospace;min-height:44px;max-height:220px;overflow-y:auto;white-space:pre-wrap;">진단을 실행하면 결과가 여기에 표시돼요.</div>
       </div>
 
