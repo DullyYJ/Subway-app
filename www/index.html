@@ -9494,6 +9494,114 @@ function _busArrFetch(cityCode, nodeId){
 }
 window._busArrFetch = _busArrFetch;
 
+// ══════════════════════════════════════════════════════════════════
+// ★ TAGO 정류장 ID 재해석
+//   우리 D1(전국 정류장 CSV)의 node_id가 TAGO의 nodeId와 다른 정류장이 있다.
+//   그러면 도착정보가 항상 빈 배열로 돌아온다(인천 한진·송도스포츠센터 등).
+//   좌표로 TAGO 정류장 목록을 직접 조회해 실제 nodeId/cityCode를 찾아 쓴다.
+// ══════════════════════════════════════════════════════════════════
+var _tagoNodeFix = {};      // '원래nodeid' → {nodeid, citycode, nm} | null
+try{ _tagoNodeFix = JSON.parse(localStorage.getItem('tagoNodeFix') || '{}') || {}; }catch(e){ _tagoNodeFix = {}; }
+function _tagoNodeFixSave(){
+  try{ localStorage.setItem('tagoNodeFix', JSON.stringify(_tagoNodeFix)); }catch(e){}
+}
+function _nmKeyStop(x){
+  return String(x||'').replace(/\(.*?\)/g,'').replace(/[\s.·,]/g,'').replace(/(정류장|정류소)$/,'').trim();
+}
+function _tagoResolveStop(stop, cb){
+  try{
+    var key = String(stop.nodeId || stop.nodeid || '') + '|' + String(stop.nodenm || stop.name || '');
+    if(_tagoNodeFix[key] !== undefined){ cb(_tagoNodeFix[key]); return; }
+
+    var la = parseFloat(stop.gpslati || stop.lat || stop.la);
+    var ln = parseFloat(stop.gpslong || stop.lng || stop.lo);
+    if(isNaN(la) || isNaN(ln)){ cb(null); return; }
+
+    var cc = (typeof _tagoCityCode === 'function') ? _tagoCityCode(stop) : '';
+    var url = 'https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList'
+      + '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY)
+      + '&gpsLati=' + la + '&gpsLong=' + ln
+      + (cc ? ('&cityCode=' + cc) : '')
+      + '&numOfRows=30&pageNo=1&_type=json';
+
+    _busProxyGet(url, function(err, data){
+      if(err){ cb(null); return; }
+      var items = [];
+      try{
+        items = data.response.body.items.item || [];
+        if(!Array.isArray(items)) items = [items];
+      }catch(e){}
+      if(!items.length){ _tagoNodeFix[key] = null; _tagoNodeFixSave(); cb(null); return; }
+
+      var want = _nmKeyStop(stop.nodenm || stop.name || '');
+      var best = null, bestD = 1e18;
+      items.forEach(function(it){
+        var ila = parseFloat(it.gpslati), iln = parseFloat(it.gpslong);
+        if(isNaN(ila) || isNaN(iln)) return;
+        var d = (typeof haversineM === 'function') ? haversineM(la, ln, ila, iln) : 0;
+        var nmOk = want && _nmKeyStop(it.nodenm) === want;
+        var score = d - (nmOk ? 300 : 0);        // 이름이 같으면 크게 우대
+        if(score < bestD){ bestD = score; best = it; }
+      });
+      if(!best || (bestD > 250 && !(want && _nmKeyStop(best.nodenm) === want))){
+        _tagoNodeFix[key] = null; _tagoNodeFixSave(); cb(null); return;
+      }
+      var fix = { nodeid: String(best.nodeid||''), citycode: String(best.citycode||cc||''), nm: best.nodenm||'' };
+      if(!fix.nodeid){ _tagoNodeFix[key] = null; _tagoNodeFixSave(); cb(null); return; }
+      _tagoNodeFix[key] = fix; _tagoNodeFixSave();
+      console.log('[정류장ID 보정]', stop.nodenm, (stop.nodeid||'-'), '→', fix.nodeid, '(city ' + fix.citycode + ')');
+      cb(fix);
+    });
+  }catch(e){ cb(null); }
+}
+window._tagoResolveStop = _tagoResolveStop;
+
+// ── 정류장 도착정보 진단 (설정 > 버스 진단) ──
+async function _busDiag(){
+  var out = [];
+  var log = function(t){ out.push(t); console.log(t); _busDiagEl(t); };
+  _busDiagEl('🚌 버스 도착정보 진단 시작...', true);
+  var stops = (window._nearStopsCache && window._nearStopsCache.stops) ? window._nearStopsCache.stops.slice(0,4) : [];
+  if(!stops.length){ _busDiagEl('주변 정류장 정보가 없어요. 노선도 > 버스 탭을 먼저 열어주세요.'); return; }
+
+  for(var i=0;i<stops.length;i++){
+    var st = stops[i];
+    var cc = _tagoCityCode(st);
+    log('── ' + (st.nodenm||'?') + ' ──');
+    log('  DB nodeId=' + (st.nodeid||'없음') + ' / city=' + (st.citycode||'없음') + ' → 사용 city=' + (cc||'추정실패'));
+
+    // ① 현재 ID로 도착정보
+    var items = [];
+    try{ items = await _busArrFetch(cc, st.nodeid); }catch(e){ items = null; }
+    log('  도착정보(현재 ID): ' + (items === null ? '오류' : items.length + '건')
+        + (items && items.length ? ' · ' + items.slice(0,3).map(function(x){ return x.routeno; }).join(', ') : ''));
+
+    if(items && items.length) continue;
+
+    // ② 좌표로 TAGO 정류장 재조회
+    await new Promise(function(res){
+      _tagoResolveStop(st, function(fix){
+        if(!fix){ log('  TAGO 좌표조회: 매칭 정류장 없음'); res(); return; }
+        log('  TAGO 좌표조회 → nodeId=' + fix.nodeid + ' (' + fix.nm + ', city ' + fix.citycode + ')');
+        _busArrFetch(fix.citycode, fix.nodeid).then(function(it2){
+          log('  도착정보(보정 ID): ' + it2.length + '건'
+              + (it2.length ? ' · ' + it2.slice(0,3).map(function(x){ return x.routeno; }).join(', ') : ''));
+          res();
+        }, function(){ log('  도착정보(보정 ID): 오류'); res(); });
+      });
+    });
+  }
+  log('진단 완료 — 이 내용을 개발자에게 보여주세요.');
+}
+window._busDiag = _busDiag;
+function _busDiagEl(txt, clear){
+  var el = document.getElementById('busDiagLog');
+  if(!el) return;
+  if(clear) el.textContent = '';
+  el.textContent += (el.textContent ? '\n' : '') + txt;
+  el.scrollTop = el.scrollHeight;
+}
+
 function _loadMapBusArrival(stop, cardIdx, _try) {
   // ★ city_code가 비어 있으면 nodeId·좌표로 추정 (예전엔 '25'(대전)로 잘못 고정)
   var cityCode = (typeof _tagoCityCode === 'function') ? _tagoCityCode(stop) : '';
@@ -9525,6 +9633,19 @@ function _loadMapBusArrival(stop, cardIdx, _try) {
         if(_try < 2){
           var _bo = (1200 << _try) + Math.floor(Math.random() * 600);   // 백오프+지터
           setTimeout(function(){ _loadMapBusArrival(stop, cardIdx, _try + 1); }, _bo);
+          return;
+        }
+        // ★ 여전히 비었으면 TAGO에서 진짜 nodeId를 찾아 한 번 더 시도
+        //   (우리 DB의 정류장 ID가 TAGO와 다른 경우)
+        if(!stop._idFixed && typeof _tagoResolveStop === 'function'){
+          stop._idFixed = 1;
+          _tagoResolveStop(stop, function(fix){
+            if(fix && fix.nodeid && fix.nodeid !== (stop.nodeId || stop.nodeid)){
+              stop.nodeid = fix.nodeid; stop.nodeId = fix.nodeid;
+              if(fix.citycode){ stop.citycode = fix.citycode; stop.cityCode = fix.citycode; }
+              _loadMapBusArrival(stop, cardIdx, 0);
+            }
+          });
           return;
         }
         // 재시도 후에도 비었지만 이전 도착행이 남아 있으면 그대로 유지(깜박임 방지)
@@ -10584,6 +10705,14 @@ window.addEventListener('unhandledrejection', function(e) {
           <button onclick="_bgLogClear()" style="padding:11px 14px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--sub);font-family:inherit;">지우기</button>
         </div>
         <div id="bgDiagLog" style="background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px;font-size:11px;line-height:1.6;color:var(--text);font-family:monospace;max-height:280px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;">로그가 여기 표시됩니다. '진단 실행'을 눌러 상태를 확인하세요.</div>
+      </div>
+
+      <!-- ★ 버스 도착정보 진단 -->
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-top:12px;">
+        <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">🚌 버스 도착정보 진단</div>
+        <p style="font-size:12px;color:var(--sub);margin-bottom:12px;">도착정보가 안 뜨는 정류장의 원인을 확인해요. (노선도 &gt; 버스 탭을 먼저 연 뒤 실행)</p>
+        <button onclick="_busDiag()" style="width:100%;padding:11px;border-radius:10px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:var(--gold);color:#121214;font-family:inherit;margin-bottom:10px;">진단 실행</button>
+        <div id="busDiagLog" style="background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px;font-size:11px;line-height:1.6;color:var(--text);font-family:monospace;min-height:44px;max-height:260px;overflow-y:auto;white-space:pre-wrap;">진단을 실행하면 결과가 여기에 표시돼요.</div>
       </div>
 
       <!-- ★ 실시간 열차위치 진단 -->
