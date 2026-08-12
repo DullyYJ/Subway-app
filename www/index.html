@@ -21208,6 +21208,91 @@ function _renderNewsTab(list){
 }
 window._fetchNewsFeed = _fetchNewsFeed;
 
+
+// ══════════════════════════════════════════════════════════════════════
+// ★ 뉴스 원문 열기 — 앱을 벗어나지 않는 인앱 브라우저
+//   저작권·약관 준수 원칙 (아래 _NEWS_POLICY 참조)
+//   · 본문을 우리 화면에 복제하지 않는다 → 원문은 언론사 페이지 그대로 표시
+//   · iframe으로 우리 레이아웃에 끼워 넣지 않는다 (프레이밍 분쟁·기술적 차단)
+//   · 목록/상세에는 제목 + 짧은 요약 + 출처 + 원문 링크만 둔다
+// ══════════════════════════════════════════════════════════════════════
+var _NEWS_POLICY = {
+  quoteMaxChars: 200,     // 요약 노출 상한
+  showSource: true,       // 출처(언론사) 표기 의무 — 저작권법 제37조
+  storeFullText: false,   // 본문 전문은 저장·표시하지 않음
+  useIframe: false        // 프레이밍 금지
+};
+
+// RSS 요약(description) 정리 — 태그 제거, 매체 접두어 제거, 길이 제한
+function _newsCleanDesc(raw){
+  try{
+    var t = String(raw || '');
+    t = t.replace(/<[^>]*>/g, ' ');                       // 태그 제거
+    t = t.replace(/&nbsp;/g,' ').replace(/&amp;/g,'&')
+         .replace(/&lt;/g,'<').replace(/&gt;/g,'>')
+         .replace(/&quot;/g,'"').replace(/&#39;/g,"'");
+    t = t.replace(/\s+/g,' ').trim();
+    t = t.replace(/^[\(\[][^\)\]]{0,20}[\)\]]\s*/,'');    // 앞머리 (서울=연합뉴스) 등
+    t = t.replace(/^[가-힣]{2,4}\s*(기자|특파원)\s*=\s*/,'');  // 기자명 서두 제거
+    t = t.replace(/^[<\[]\s*(앵커|기자|리포트|출연)\s*[>\]]\s*/,'');
+    t = t.replace(/^[\(\[]\s*/,'').replace(/\s*[\)\]]$/,'');
+    if(t.length < 15) return '';                          // 의미 없는 조각은 버림
+    if(t.length > _NEWS_POLICY.quoteMaxChars)
+      t = t.slice(0, _NEWS_POLICY.quoteMaxChars).replace(/\s\S*$/,'') + '…';
+    return t;
+  }catch(e){ return ''; }
+}
+window._newsCleanDesc = _newsCleanDesc;
+
+// 기사 출처(언론사) 표기 문자열
+function _newsSourceLabel(it){
+  var s = (it && it.source) ? String(it.source).trim() : '';
+  if(!s || s === '뉴스'){
+    try{
+      var h = new URL(it.link).hostname.replace(/^www\./,'');
+      var map = {
+        'yna.co.kr':'연합뉴스','etnews.com':'전자신문','news1.kr':'뉴스1','newsis.com':'뉴시스',
+        'mk.co.kr':'매일경제','hankyung.com':'한국경제','edaily.co.kr':'이데일리','sedaily.com':'서울경제',
+        'chosun.com':'조선일보','donga.com':'동아일보','joongang.co.kr':'중앙일보','hani.co.kr':'한겨레',
+        'khan.co.kr':'경향신문','ytn.co.kr':'YTN','sbs.co.kr':'SBS','kbs.co.kr':'KBS','mbc.co.kr':'MBC',
+        'jtbc.co.kr':'JTBC','mt.co.kr':'머니투데이','fnnews.com':'파이낸셜뉴스','asiae.co.kr':'아시아경제'
+      };
+      for(var k in map){ if(h === k || h.endsWith('.'+k)) return map[k]; }
+      return h;
+    }catch(e){ return '언론사'; }
+  }
+  return s;
+}
+window._newsSourceLabel = _newsSourceLabel;
+
+// ★ 인앱 브라우저로 열기 (앱을 벗어나지 않음)
+//   1) Capacitor Browser 플러그인(권장) — 시스템 커스텀탭이 앱 위에 뜸
+//   2) Median inAppBrowser
+//   3) 마지막 폴백: 외부 브라우저
+function _newsOpenInApp(url, sourceLabel){
+  if(!url || typeof url !== 'string') return;
+  try{ new URL(url); }catch(e){ return; }
+  try{
+    var P = window.Capacitor && window.Capacitor.Plugins;
+    if(P && P.Browser && typeof P.Browser.open === 'function'){
+      if(typeof toast === 'function' && sourceLabel) toast('📰 ' + sourceLabel + ' 원문을 여는 중');
+      P.Browser.open({
+        url: url,
+        presentationStyle: 'popover',
+        toolbarColor: '#0a84ff'
+      }).catch(function(){ openNewsUrl(url); });
+      return;
+    }
+  }catch(e){}
+  try{
+    if(typeof median !== 'undefined' && median.open && median.open.inAppBrowser){
+      median.open.inAppBrowser(url); return;
+    }
+  }catch(e){}
+  openNewsUrl(url);   // 외부 브라우저 폴백
+}
+window._newsOpenInApp = _newsOpenInApp;
+
 // 뉴스 상세 팝업 (제목 + 카테고리·시간 + 언론사 요약 + 원문 링크)
 window._openNewsDetail = function(idx){
   var it = (window._NEWS_SHOWN || [])[+idx];
@@ -21217,23 +21302,37 @@ window._openNewsDetail = function(idx){
   var ov = document.createElement('div');
   ov.id = 'newsDetailOv';
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:flex-end;justify-content:center;';
-  var hasDesc = it.desc && it.desc.length > 0;
+  var srcNm  = (typeof _newsSourceLabel === 'function') ? _newsSourceLabel(it) : (it.source || '언론사');
+  var clean  = (typeof _newsCleanDesc === 'function') ? _newsCleanDesc(it.desc) : (it.desc || '');
+  var hasDesc = !!clean;
   ov.innerHTML =
     '<div style="background:var(--card);border-radius:20px 20px 0 0;width:100%;max-width:560px;max-height:85vh;overflow-y:auto;padding:22px 20px calc(20px + env(safe-area-inset-bottom));box-sizing:border-box;">'
     + '<div style="width:36px;height:4px;border-radius:2px;background:var(--border2);margin:0 auto 16px;"></div>'
     + '<div style="display:inline-block;font-size:11px;font-weight:800;color:var(--chip-on-txt);background:var(--chip-on-bg);padding:3px 9px;border-radius:6px;margin-bottom:10px;">' + esc(it.cat) + '</div>'
     + '<div style="font-size:18px;font-weight:800;color:var(--text);line-height:1.45;margin-bottom:8px;">' + esc(it.title) + '</div>'
-    + '<div style="font-size:12px;color:var(--sub);margin-bottom:16px;">' + (it.ts ? _newsAgo(it.ts) + ' · ' : '') + '연합뉴스/전자신문</div>'
+    + '<div style="font-size:12px;color:var(--sub);margin-bottom:16px;">' + (it.ts ? _newsAgo(it.ts) + ' · ' : '') + esc(srcNm) + '</div>'
     + (hasDesc
-        ? '<div style="font-size:14px;color:var(--text);line-height:1.75;margin-bottom:20px;white-space:pre-line;">' + esc(it.desc) + '</div>'
-        : '<div style="font-size:14px;color:var(--sub);line-height:1.7;margin-bottom:20px;">기사 요약을 제공하지 않는 매체예요. 아래 버튼으로 원문에서 전체 내용을 확인하세요.</div>')
+        ? '<div style="font-size:14px;color:var(--text);line-height:1.75;margin-bottom:8px;white-space:pre-line;">' + esc(clean) + '</div>'
+        : '<div style="font-size:14px;color:var(--sub);line-height:1.7;margin-bottom:8px;">이 매체는 요약을 제공하지 않아요. 아래 버튼으로 원문에서 전체 내용을 확인하세요.</div>')
+    // ★ 출처 표기 (저작권법 제37조) — 요약은 발췌이며 저작권은 해당 언론사에 있음
+    + '<div style="font-size:11px;color:var(--sub);line-height:1.6;margin-bottom:18px;padding:9px 11px;border-radius:9px;background:var(--card2);">'
+    +   '출처 · <b>' + esc(srcNm) + '</b><br>'
+    +   '제목과 요약은 발췌이며 저작권은 해당 언론사에 있습니다. 전체 내용은 원문에서 확인하세요.'
+    + '</div>'
     + '<button id="newsOpenBtn" style="width:100%;padding:14px;border-radius:12px;border:none;cursor:pointer;font-size:15px;font-weight:800;background:var(--gold);color:#121214;font-family:inherit;">원문 전체 보기 ›</button>'
     + '<button id="newsCloseBtn" style="width:100%;padding:12px;margin-top:8px;border-radius:12px;border:none;cursor:pointer;font-size:14px;font-weight:700;background:transparent;color:var(--sub);font-family:inherit;">닫기</button>'
     + '</div>';
   ov.addEventListener('click', function(e){ if(e.target === ov) ov.remove(); });
   document.body.appendChild(ov);
   var _openBtn = document.getElementById('newsOpenBtn');
-  if(_openBtn) _openBtn.addEventListener('click', function(){ openNewsUrl(it.link); });
+  if(_openBtn){
+    // ★ 앱을 벗어나지 않고 인앱 브라우저로 원문 열기 (언론사 페이지 그대로 표시)
+    _openBtn.textContent = srcNm + ' 원문 보기 ›';
+    _openBtn.addEventListener('click', function(){
+      if(typeof _newsOpenInApp === 'function') _newsOpenInApp(it.link, srcNm);
+      else openNewsUrl(it.link);
+    });
+  }
   var _closeBtn = document.getElementById('newsCloseBtn');
   if(_closeBtn) _closeBtn.addEventListener('click', function(){ ov.remove(); });
 };
