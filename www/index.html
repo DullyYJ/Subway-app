@@ -8909,7 +8909,17 @@ function _busCoordClose(a,b,c,d){ try { return haversineM(a,b,c,d) < 200; } catc
 function _prefetchNearStops(lat, lng){
   if(!lat || !lng || typeof _fetchNearStops!=='function') return;
   var c = window._nearStopsCache;
-  if(c && c.stops && c.stops.length && (Date.now()-c.ts < 60000) && _busCoordClose(c.lat,c.lng,lat,lng)) return;  // 신선하면 skip
+  if(c && c.stops && c.stops.length && (Date.now()-c.ts < 40000) && _busCoordClose(c.lat,c.lng,lat,lng)){
+    // 정류장 목록은 신선 → 도착정보만 조용히 데워둔다
+    c.stops.forEach(function(s2){
+      var cc2 = (typeof _tagoCityCode === 'function') ? _tagoCityCode(s2) : (s2.citycode || s2.cityCode || '');
+      var nid2 = s2.nodeid || s2.nodeId;
+      if(nid2 && cc2 && typeof _busArrFetch === 'function'){
+        try { _busArrFetch(cc2, nid2).catch(function(){}); } catch(e){}
+      }
+    });
+    return;
+  }
   if(window._nearPrefetching) return;
   window._nearPrefetching = true;
   _fetchNearStops(lat, lng, function(err, stops){
@@ -8917,10 +8927,14 @@ function _prefetchNearStops(lat, lng){
     if(err || !stops || !stops.length) return;
     var top = stops.slice(0,6);
     window._nearStopsCache = { ts: Date.now(), lat: lat, lng: lng, stops: top };
-    // 도착정보도 미리 데워두기 (_busCache 30초 TTL → 탭 열 때 즉시 표시)
+    // ★ 도착정보 미리 데우기 — 반드시 렌더러와 '같은' 캐시(_busArrCache)를 채워야 한다.
+    //   예전엔 _fetchBusArrival(_busCache)만 데워서 탭 열 때 다시 네트워크를 탔음.
     top.forEach(function(s){
-      var cc=s.citycode||s.cityCode||'25', nid=s.nodeid||s.nodeId;
-      if(nid && typeof _fetchBusArrival==='function'){ try { _fetchBusArrival(cc, nid, function(){}); } catch(e){} }
+      var cc = (typeof _tagoCityCode === 'function') ? _tagoCityCode(s) : (s.citycode || s.cityCode || '');
+      var nid = s.nodeid || s.nodeId;
+      if(nid && cc && typeof _busArrFetch === 'function'){
+        try { _busArrFetch(cc, nid).catch(function(){}); } catch(e){}
+      }
     });
     // 버스 near 탭이 지금 열려있고 아직 목록이 없으면 즉시 반영
     var le=document.getElementById('mapBusStopList');
@@ -9456,10 +9470,26 @@ function _busArrEnqueue(fn){
   _busArrQueue.push(fn); _busArrNext();
 }
 
-// 타임아웃 있는 도착정보 조회 (캐시 15초)
-function _busArrFetch(cityCode, nodeId){
+// 타임아웃 있는 도착정보 조회
+//   · 20초 이내 → 캐시 즉시 반환
+//   · 20~120초  → 캐시 즉시 반환(화면이 바로 뜸) + 백그라운드로 갱신 후 재렌더
+var _BUS_ARR_FRESH = 20000;    // 이 안이면 그대로 사용
+var _BUS_ARR_STALE = 120000;   // 이 안이면 우선 보여주고 뒤에서 갱신
+function _busArrFetch(cityCode, nodeId, _bg){
   var c = _busArrCache[nodeId];
-  if(c && Date.now() - c.ts < 15000) return Promise.resolve(c.items);
+  if(c && !_bg){
+    var age = Date.now() - c.ts;
+    if(age < _BUS_ARR_FRESH) return Promise.resolve(c.items);
+    if(age < _BUS_ARR_STALE){
+      // 즉시 표시 + 뒤에서 최신화
+      setTimeout(function(){
+        _busArrFetch(cityCode, nodeId, true).then(function(){
+          if(typeof _busArrRefreshCards === 'function') _busArrRefreshCards(nodeId);
+        }, function(){});
+      }, 0);
+      return Promise.resolve(c.items);
+    }
+  }
   return new Promise(function(resolve, reject){
     _busArrEnqueue(function(){
       var url = _SERVER_URL + '/tago?url=' + encodeURIComponent(
@@ -9493,6 +9523,18 @@ function _busArrFetch(cityCode, nodeId){
   });
 }
 window._busArrFetch = _busArrFetch;
+
+// 백그라운드 갱신이 끝나면 해당 nodeId를 쓰는 카드만 조용히 재렌더
+function _busArrRefreshCards(nodeId){
+  try{
+    (window._mapBusCards || []).forEach(function(c){
+      if(!c || !c.stop) return;
+      if(String(c.stop.nodeId || c.stop.nodeid) !== String(nodeId)) return;
+      _loadMapBusArrival(c.stop, c.cardIdx, 0);
+    });
+  }catch(e){}
+}
+window._busArrRefreshCards = _busArrRefreshCards;
 
 // ══════════════════════════════════════════════════════════════════
 // ★ TAGO 정류장 ID 재해석
@@ -9653,7 +9695,7 @@ function _loadMapBusArrival(stop, cardIdx, _try) {
         card._busSig = null;
         if(!card.querySelector('.kbus-empty-row')){
           var empty = document.createElement('div');
-          empty.className = 'map-bus-row kbus-empty-row';
+          empty.className = 'map-bus-row kbus-empty-row kbus-in';
           empty.style.cssText = 'color:var(--sub);font-size:12px;display:flex;align-items:center;gap:8px;';
           empty.innerHTML = '<span style="flex:1;">운행 정보 없음</span>'
             + '<span class="kbus-retry" style="color:#2f7cf6;font-weight:700;cursor:pointer;">다시 시도 ›</span>';
@@ -9720,7 +9762,13 @@ function _loadMapBusArrival(stop, cardIdx, _try) {
           _busArrReg(cardIdx, rid, 1, g.arrs[1]);
 
           var row = document.createElement('div');
-          row.className = 'map-bus-row kbus-row';
+          row.className = 'map-bus-row kbus-row kbus-in';
+          row.style.animationDelay = (i * 55) + 'ms';   // 위에서부터 차례로 펼쳐짐
+          row.addEventListener('animationend', function(){
+            row.classList.remove('kbus-in');
+            row.style.animationDelay = '';
+            row.style.overflow = '';
+          }, { once: true });
           row.setAttribute('data-rid', rid);
           row.innerHTML =
             '<div class="kbus-left">' +
@@ -9762,7 +9810,7 @@ function _loadMapBusArrival(stop, cardIdx, _try) {
         var _ph = card.querySelector('.map-bus-row:not(.kbus-row)'); if(_ph) _ph.remove();
         if(!card.querySelector('.kbus-err-row')){
           var err = document.createElement('div');
-          err.className = 'map-bus-row kbus-err-row';
+          err.className = 'map-bus-row kbus-err-row kbus-in';
           err.style.cssText = 'color:var(--sub);font-size:12px;display:flex;align-items:center;gap:8px;';
           err.innerHTML = '<span style="flex:1;">정보 불러오기 실패</span>'
             + '<span class="kbus-retry" style="color:#2f7cf6;font-weight:700;cursor:pointer;">다시 시도 ›</span>';
@@ -24251,6 +24299,21 @@ window.onload=function(){
         function(){}, { enableHighAccuracy:false, timeout:8000, maximumAge:60000 });
     } catch(e){}
   }, 2000);
+  // ★ 위치가 잡혀 있으면 45초마다 주변 정류장·도착정보를 미리 갱신
+  //   (버스 탭을 누르는 순간 네트워크 대기 없이 바로 보이도록)
+  setInterval(function(){
+    try{
+      if(document.hidden) return;
+      if(typeof _prefetchNearStops !== 'function') return;
+      var la = (typeof _busGpsLat !== 'undefined' && _busGpsLat)
+            || window._lastGPSLat
+            || (typeof S !== 'undefined' && S.lastGPSFix && S.lastGPSFix.lat);
+      var ln = (typeof _busGpsLng !== 'undefined' && _busGpsLng)
+            || window._lastGPSLng
+            || (typeof S !== 'undefined' && S.lastGPSFix && S.lastGPSFix.lng);
+      if(la && ln) _prefetchNearStops(la, ln);
+    }catch(e){}
+  }, 45000);
   setTimeout(function(){ if(typeof _renderFavRecent==='function') _renderFavRecent(); }, 500);  // ★ 즐겨찾기/최근경로
   setTimeout(function(){ if(typeof renderHorizontalTimeline==='function') renderHorizontalTimeline(); }, 600);  // ★ 경로 노선도 빈 상태 표시
   // 10분마다 실시간 뉴스 갱신
@@ -34251,6 +34314,19 @@ document.addEventListener('DOMContentLoaded', function() {
 .map-bus-loading{text-align:center;padding:40px;color:var(--sub);}
 .map-bus-row{display:flex;align-items:center;gap:12px;padding:14px 16px;
   border-top:1px solid var(--border);}
+/* ★ 도착정보가 툭 튀어나오지 않고 위에서 아래로 부드럽게 펼쳐지도록 */
+@keyframes kbusSlideDown{
+  from{ opacity:0; transform:translateY(-10px); max-height:0;
+        padding-top:0; padding-bottom:0; border-top-color:transparent; }
+  to  { opacity:1; transform:translateY(0); max-height:140px;
+        padding-top:14px; padding-bottom:14px; }
+}
+.kbus-row.kbus-in, .kbus-empty-row.kbus-in, .kbus-err-row.kbus-in{
+  animation:kbusSlideDown .3s cubic-bezier(.22,.9,.3,1) both; overflow:hidden;
+}
+@media (prefers-reduced-motion: reduce){
+  .kbus-row.kbus-in, .kbus-empty-row.kbus-in, .kbus-err-row.kbus-in{ animation:none; }
+}
 .map-bus-row .bus-num{min-width:48px;font-size:16px;font-weight:800;text-align:left;
   background:none !important;padding:0 !important;color:#0066FF;}
 .map-bus-row .bus-num.express{color:#e74c3c;}
