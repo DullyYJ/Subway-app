@@ -8906,18 +8906,54 @@ window._busDragInit = _busDragInit;
 
 // ── 주변 정류장 프리페치: GPS 확보 시 미리 로드해 캐시(정류장+도착정보) ──
 function _busCoordClose(a,b,c,d){ try { return haversineM(a,b,c,d) < 200; } catch(e){ return false; } }
+// ★ 정류장 1곳 미리 데우기 — 캐시된 보정 ID 적용 → 조회 → 비면 대체 ID까지 확정
+//   (탭을 열기 전에 ID 보정을 끝내두면 첫 렌더부터 도착정보가 바로 뜬다)
+function _prewarmStop(st){
+  try{
+    if(!st) return;
+    if(typeof _applyNodeFix === 'function') _applyNodeFix(st);
+    var cc = (typeof _tagoCityCode === 'function') ? _tagoCityCode(st) : (st.citycode || st.cityCode || '');
+    var nid = st.nodeid || st.nodeId;
+    if(!nid || !cc || typeof _busArrFetch !== 'function') return;
+    _busArrFetch(cc, nid).then(function(items){
+      if(items && items.length) return;
+      if(st._preFixed) return;
+      st._preFixed = 1;
+      var alts = (typeof _tagoAltNodeIds === 'function') ? _tagoAltNodeIds(nid) : [];
+      var tryAlt = function(k){
+        if(k >= alts.length){
+          if(typeof _tagoResolveStop === 'function'){
+            _tagoResolveStop(st, function(fix){
+              if(fix && fix.nodeid){
+                st.nodeid = fix.nodeid; st.nodeId = fix.nodeid;
+                if(fix.citycode){ st.citycode = fix.citycode; st.cityCode = fix.citycode; }
+                _busArrFetch(fix.citycode || cc, fix.nodeid).catch(function(){});
+              }
+            });
+          }
+          return;
+        }
+        _busArrFetch(cc, alts[k]).then(function(it2){
+          if(it2 && it2.length){
+            var key = String(nid) + '|' + String(st.nodenm || st.name || '');
+            _tagoNodeFix[key] = { nodeid: alts[k], citycode: cc, nm: st.nodenm || st.name || '' };
+            if(typeof _tagoNodeFixSave === 'function') _tagoNodeFixSave();
+            st.nodeid = alts[k]; st.nodeId = alts[k];
+          } else { tryAlt(k+1); }
+        }, function(){ tryAlt(k+1); });
+      };
+      tryAlt(0);
+    }, function(){});
+  }catch(e){}
+}
+window._prewarmStop = _prewarmStop;
+
 function _prefetchNearStops(lat, lng){
   if(!lat || !lng || typeof _fetchNearStops!=='function') return;
   var c = window._nearStopsCache;
   if(c && c.stops && c.stops.length && (Date.now()-c.ts < 40000) && _busCoordClose(c.lat,c.lng,lat,lng)){
     // 정류장 목록은 신선 → 도착정보만 조용히 데워둔다
-    c.stops.forEach(function(s2){
-      var cc2 = (typeof _tagoCityCode === 'function') ? _tagoCityCode(s2) : (s2.citycode || s2.cityCode || '');
-      var nid2 = s2.nodeid || s2.nodeId;
-      if(nid2 && cc2 && typeof _busArrFetch === 'function'){
-        try { _busArrFetch(cc2, nid2).catch(function(){}); } catch(e){}
-      }
-    });
+    c.stops.forEach(function(s2){ _prewarmStop(s2); });
     return;
   }
   if(window._nearPrefetching) return;
@@ -8929,13 +8965,7 @@ function _prefetchNearStops(lat, lng){
     window._nearStopsCache = { ts: Date.now(), lat: lat, lng: lng, stops: top };
     // ★ 도착정보 미리 데우기 — 반드시 렌더러와 '같은' 캐시(_busArrCache)를 채워야 한다.
     //   예전엔 _fetchBusArrival(_busCache)만 데워서 탭 열 때 다시 네트워크를 탔음.
-    top.forEach(function(s){
-      var cc = (typeof _tagoCityCode === 'function') ? _tagoCityCode(s) : (s.citycode || s.cityCode || '');
-      var nid = s.nodeid || s.nodeId;
-      if(nid && cc && typeof _busArrFetch === 'function'){
-        try { _busArrFetch(cc, nid).catch(function(){}); } catch(e){}
-      }
-    });
+    top.forEach(function(s){ _prewarmStop(s); });
     // 버스 near 탭이 지금 열려있고 아직 목록이 없으면 즉시 반영
     var le=document.getElementById('mapBusStopList');
     if(le && (typeof _busViewMode==='undefined' || _busViewMode==='near') && !(window._nearOrderedStops && window._nearOrderedStops.length)){
@@ -8956,12 +8986,18 @@ function _renderNearStops(stops){
   stops.forEach(function(stop, idx){
     var card = _renderMapBusCard(stop, idx, 'near', total);
     listEl.appendChild(card);
+    // ★ 좌표를 반드시 함께 넘긴다 — 없으면 nodeId 자동 보정(_tagoResolveStop)이 즉시 실패
     var arrStop = {
-      name: stop.nodenm || stop.nodeName,
-      nodeId: stop.nodeid || stop.nodeId,
+      name:     stop.nodenm || stop.nodeName,
+      nodenm:   stop.nodenm || stop.nodeName,
+      nodeId:   stop.nodeid || stop.nodeId,
+      nodeid:   stop.nodeid || stop.nodeId,
       cityCode: (typeof _tagoCityCode==='function' ? _tagoCityCode(stop) : '') || stop.citycode || stop.cityCode || '',
-      nodeDir: stop.nodeDir || stop.dir
+      citycode: (typeof _tagoCityCode==='function' ? _tagoCityCode(stop) : '') || stop.citycode || stop.cityCode || '',
+      gpslati:  stop.gpslati, gpslong: stop.gpslong,
+      nodeDir:  stop.nodeDir || stop.dir
     };
+    if(typeof _applyNodeFix === 'function') _applyNodeFix(arrStop);   // 캐시된 보정 ID 즉시 적용
     window._mapBusCards.push({ stop: arrStop, cardIdx: 'near_' + idx });
     _loadMapBusArrival(arrStop, 'near_' + idx);
   });
@@ -9550,6 +9586,33 @@ function _tagoNodeFixSave(){
 function _nmKeyStop(x){
   return String(x||'').replace(/\(.*?\)/g,'').replace(/[\s.·,]/g,'').replace(/(정류장|정류소)$/,'').trim();
 }
+// 캐시(localStorage tagoNodeFix)에 저장된 보정 ID를 정류장 객체에 즉시 반영
+function _applyNodeFix(stop){
+  try{
+    if(!stop) return false;
+    var key = String(stop.nodeId || stop.nodeid || '') + '|' + String(stop.nodenm || stop.name || '');
+    var fix = _tagoNodeFix[key];
+    if(fix && fix.nodeid){
+      stop.nodeid = fix.nodeid; stop.nodeId = fix.nodeid;
+      if(fix.citycode){ stop.citycode = fix.citycode; stop.cityCode = fix.citycode; }
+      return true;
+    }
+  }catch(e){}
+  return false;
+}
+window._applyNodeFix = _applyNodeFix;
+
+// ★ 인천 정류장 ID 빠른 후보 — 우리 DB는 ICB1…, TAGO 도착정보는 ICB3…을 쓴다.
+//   (진단 결과: ICB164000541 → ICB364000541)
+//   API 호출 없이 먼저 시도해 첫 렌더부터 바로 뜨게 한다.
+function _tagoAltNodeIds(nodeId){
+  var out = [], id = String(nodeId || '');
+  if(/^ICB1/.test(id)) out.push('ICB3' + id.slice(4));
+  else if(/^ICB3/.test(id)) out.push('ICB1' + id.slice(4));
+  return out;
+}
+window._tagoAltNodeIds = _tagoAltNodeIds;
+
 function _tagoResolveStop(stop, cb){
   try{
     var key = String(stop.nodeId || stop.nodeid || '') + '|' + String(stop.nodenm || stop.name || '');
@@ -9677,17 +9740,38 @@ function _loadMapBusArrival(stop, cardIdx, _try) {
           setTimeout(function(){ _loadMapBusArrival(stop, cardIdx, _try + 1); }, _bo);
           return;
         }
-        // ★ 여전히 비었으면 TAGO에서 진짜 nodeId를 찾아 한 번 더 시도
-        //   (우리 DB의 정류장 ID가 TAGO와 다른 경우)
-        if(!stop._idFixed && typeof _tagoResolveStop === 'function'){
+        // ★ 여전히 비었으면 정류장 ID 보정 (우리 DB ID가 TAGO와 다른 경우)
+        if(!stop._idFixed){
           stop._idFixed = 1;
-          _tagoResolveStop(stop, function(fix){
-            if(fix && fix.nodeid && fix.nodeid !== (stop.nodeId || stop.nodeid)){
-              stop.nodeid = fix.nodeid; stop.nodeId = fix.nodeid;
-              if(fix.citycode){ stop.citycode = fix.citycode; stop.cityCode = fix.citycode; }
-              _loadMapBusArrival(stop, cardIdx, 0);
-            }
-          });
+          var origId = stop.nodeId || stop.nodeid;
+          // ①-a 대체 ID 후보 즉시 시도 (인천 ICB1↔ICB3 — 추가 API 호출 없음)
+          var alts = (typeof _tagoAltNodeIds === 'function') ? _tagoAltNodeIds(origId) : [];
+          var tryAlt = function(k){
+            if(k >= alts.length){ resolveByCoord(); return; }
+            _busArrFetch(cityCode, alts[k]).then(function(it2){
+              if(it2 && it2.length){
+                // 성공 → 보정 ID 확정 + 캐시 저장
+                var key = String(origId) + '|' + String(stop.nodenm || stop.name || '');
+                _tagoNodeFix[key] = { nodeid: alts[k], citycode: cityCode, nm: stop.nodenm || stop.name || '' };
+                _tagoNodeFixSave();
+                stop.nodeid = alts[k]; stop.nodeId = alts[k];
+                console.log('[정류장ID 보정·빠름]', stop.nodenm, origId, '→', alts[k]);
+                _loadMapBusArrival(stop, cardIdx, 0);
+              } else { tryAlt(k+1); }
+            }, function(){ tryAlt(k+1); });
+          };
+          // ①-b 좌표로 TAGO 정류장 재조회
+          var resolveByCoord = function(){
+            if(typeof _tagoResolveStop !== 'function') return;
+            _tagoResolveStop(stop, function(fix){
+              if(fix && fix.nodeid && fix.nodeid !== (stop.nodeId || stop.nodeid)){
+                stop.nodeid = fix.nodeid; stop.nodeId = fix.nodeid;
+                if(fix.citycode){ stop.citycode = fix.citycode; stop.cityCode = fix.citycode; }
+                _loadMapBusArrival(stop, cardIdx, 0);
+              }
+            });
+          };
+          tryAlt(0);
           return;
         }
         // 재시도 후에도 비었지만 이전 도착행이 남아 있으면 그대로 유지(깜박임 방지)
