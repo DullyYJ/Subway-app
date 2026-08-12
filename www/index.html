@@ -1064,6 +1064,22 @@ header h1 em{color:var(--gold);font-style:normal;}
   100%{ box-shadow:0 0 0 0 rgba(10,132,255,.85), 0 0 6px rgba(10,132,255,.6); opacity:1; }
 }
 .htl-gps-blink{animation:htl-gps-blink 1.3s ease-in-out infinite;}
+/* ★ 승차 대기 마커 — 아직 역에 도착하지 않았음을 명확히 (주황 + 맥박) */
+#htl-gps-marker-dot.htl-gps-wait{
+  background:#ff9f0a !important;
+  box-shadow:0 0 0 4px rgba(255,159,10,.28);
+  animation:htlWaitPulse 1.6s ease-in-out infinite !important;
+}
+@keyframes htlWaitPulse{
+  0%,100%{ transform:translateX(-50%) scale(1); opacity:1; }
+  50%    { transform:translateX(-50%) scale(1.25); opacity:.75; }
+}
+.htl-wait-badge{
+  position:absolute; top:-24px; transform:translateX(-50%);
+  background:#ff9f0a; color:#fff; font-size:10px; font-weight:800;
+  padding:3px 8px; border-radius:20px; white-space:nowrap; pointer-events:none;
+  box-shadow:0 2px 6px rgba(255,159,10,.35); z-index:11;
+}
 @keyframes htl-gps-ring{ 0%{transform:translateX(-50%) scale(.5);opacity:.85;} 100%{transform:translateX(-50%) scale(2.4);opacity:0;} }
 .htl-gps-ring{animation:htl-gps-ring 1.4s ease-out infinite;}
 @keyframes gps-pulse{0%,100%{box-shadow:0 0 0 3px rgba(10,132,255,.4);}50%{box-shadow:0 0 0 8px rgba(10,132,255,.08);}}
@@ -1385,10 +1401,15 @@ header h1 em{color:var(--gold);font-style:normal;}
 .shop-timer b{color:var(--orange);font-size:13px;font-variant-numeric:tabular-nums;}
 .shop-sec{font-size:12px;color:var(--sub);font-weight:500;letter-spacing:.4px;margin:4px 0 8px;display:flex;justify-content:space-between;align-items:center;}
 .shop-sec span{font-size:10px;color:var(--sub);}
-.prod-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-.prod{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:11px;display:flex;flex-direction:column;}
-.prod-img{width:100%;height:96px;border-radius:9px;background:var(--prod-img-bg,#252528);display:flex;align-items:center;justify-content:center;font-size:28px;margin-bottom:6px;overflow:hidden;}
-.prod-img img{width:100%;height:100%;object-fit:contain;background:#fff;border-radius:9px;}
+.prod-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.prod{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:8px;display:flex;flex-direction:column;}
+.prod-img{width:100%;height:78px;border-radius:8px;background:var(--prod-img-bg,#252528);display:flex;align-items:center;justify-content:center;font-size:26px;margin-bottom:5px;overflow:hidden;}
+.prod-img img{width:100%;height:100%;object-fit:contain;background:#fff;border-radius:8px;}
+/* ★ 상품명 + 최저가를 한 줄에 — 카테고리 배지 제거로 카드 높이 축소 */
+.prod-row{display:flex;align-items:flex-start;gap:6px;}
+.prod-row .prod-name{flex:1;min-width:0;margin-bottom:0;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.prod-buy{flex-shrink:0;font-size:11px;font-weight:800;color:var(--gold);white-space:nowrap;line-height:1.35;}
 .prod-tag{font-size:9px;color:var(--green);background:rgba(52,199,89,.1);padding:2px 5px;border-radius:4px;display:inline-block;margin-bottom:3px;align-self:flex-start;}
 .prod-brand{font-size:9px;color:var(--sub);margin-bottom:2px;}
 .prod-name{font-size:11px;font-weight:700;color:var(--text);margin-bottom:2px;line-height:1.35;}
@@ -5214,6 +5235,22 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
 
   if(typeof _startTransitGpsTracking==='function') _startTransitGpsTracking(nodes);
 
+  // ★ 승차 대기 모드 진입 판단
+  //   · 알림에서 들어온 탐색이면 무조건 대기로 시작
+  //   · 그 외에도 승차역에서 충분히 멀면 자동 대기
+  setTimeout(function(){
+    try{
+      if(typeof _htlWaitStart !== 'function') return;
+      if(window._htlWaitPending){
+        window._htlWaitPending = false;
+        _htlWaitStart();
+        return;
+      }
+      var d0 = (typeof _htlDistToBoard === 'function') ? _htlDistToBoard() : null;
+      if(d0 != null && d0 > _HTL_LEAVE_M) _htlWaitStart();
+    }catch(e){}
+  }, 600);
+
   // ── GPS 마커 초기화 (단일 dot + ring 구조) ──
   document.querySelectorAll('#htl-gps-marker-dot, #htl-gps-marker-ring, .htl-gps-blink, .htl-gps-ring').forEach(function(e){e.remove();});
   window._htlGpsDot = null; window._htlGpsRing = null;
@@ -5414,6 +5451,7 @@ window._renderTransitResultCard = _renderTransitResultCard;
 function _applyRealBoardTime(opts){
   opts = opts || {};
   var _allowEarlier = !!opts.allowEarlier;
+  var _maxWait = (opts.maxWait != null) ? opts.maxWait : 30;   // 반영할 최대 대기(분)
   try{
     if(window._metroRouteMode === true) return;   // ★ 노선도 경로: 순수 소요시간만(대기 보정 안 함)
     if(_baseTimeMs != null) return;   // 예상(미래 기준시각)일 땐 실시간 도착 보정 안 함
@@ -5423,6 +5461,8 @@ function _applyRealBoardTime(opts){
     for(var i=0;i<_transitNodeData.length;i++){ var n=_transitNodeData[i]; if(!n.isOrigin && !n.isWalk && (n.isBus||n.isSub)){ idx=i; nd=n; break; } }
     if(!nd || nd._schedMin==null) return;
     var nowMin = (typeof kstMinutesAdj==='function') ? kstMinutesAdj() : (new Date().getHours()*60+new Date().getMinutes());
+    // ★ opts.fromMin = '승차역에 실제로 도착할 시각'(도보 ETA 반영). 없으면 현재 시각.
+    if(opts.fromMin != null) nowMin = opts.fromMin;
     var arriveStopMin = nd._schedMin;   // 현재 계산상 탑승(정류장 도착) 시각
 
     // ★ allowEarlier=true 이면 '더 빠른 차'로 앞당기는 보정도 허용
@@ -5433,12 +5473,12 @@ function _applyRealBoardTime(opts){
       if(wait < -720) wait += 1440;
       if(wait > 720)  wait -= 1440;
       if(allowEarlier){
-        if(Math.abs(wait) < 1) return;   // 1분 미만 차이는 무시
-        if(wait > 30) return;            // 30분 초과 대기는 반영 안 함
-        if(wait < -180) return;          // 비정상 값 방어
+        if(Math.abs(wait) < 1) return;         // 1분 미만 차이는 무시
+        if(wait > _maxWait) return;
+        if(wait < -180) return;                // 비정상 값 방어
       } else {
-        if(wait <= 0.5) return;          // 이미 탈 수 있으면 보정 안 함
-        if(wait > 30) return;            // ★ 30분 초과 대기(첫차 대기/운행종료 등)는 소요시간에 반영 안 함 (232분 튐 방지)
+        if(wait <= 0.5) return;                // 이미 탈 수 있으면 보정 안 함
+        if(wait > _maxWait) return;            // 상한 초과(첫차 대기·운행종료 등)는 미반영
       }
       _transitNodeData.forEach(function(n2, i2){
         if(i2 < idx || n2._schedMin==null) return;
@@ -5446,7 +5486,8 @@ function _applyRealBoardTime(opts){
         var t=((n2._schedMin%1440)+1440)%1440;
         var hh=('0'+Math.floor(t/60)).slice(-2), mm=('0'+Math.round(t%60)).slice(-2);
         n2.arrTime = hh+':'+mm;
-        if(n2.el){ var lbl=n2.el.querySelector('.htl-time-lbl'); if(lbl) lbl.textContent=n2.arrTime; }
+        // 라벨 갱신 실패가 나머지 노드 보정을 막지 않도록 방어
+        try{ if(n2.el && n2.el.querySelector){ var lbl=n2.el.querySelector('.htl-time-lbl'); if(lbl) lbl.textContent=n2.arrTime; } }catch(e){}
       });
       if(typeof window._homeRouteBaseMin==='number') window._homeRouteBaseMin += wait;
       try{ if(typeof _updateRouteRemaining==='function') _updateRouteRemaining(); }catch(e){}
@@ -5576,6 +5617,222 @@ function _htlResyncBoard(force){
   }catch(e){}
 }
 window._htlResyncBoard = _htlResyncBoard;
+
+
+
+// ── 마커를 승차역에 고정할지 판단 ──
+//   ① 아직 승차 예정 시각 전     → 고정 (당연히 안 탔음)
+//   ② GPS가 신선(5분 이내)하고 승차역에서 200m 이상 떨어짐 → 고정 (아직 가는 중)
+//   그 외(GPS가 오래됨 + 예정 시각 지남)에는 탑승했다고 보고 기존 시간 기반 진행을 허용
+//   → GPS를 못 쓰는 기기에서도 마커가 멈춰버리지 않는다.
+function _htlShouldPin(lat, lng, validGps, nowMin){
+  var res = { pin:false, boardIdx:-1 };
+  try{
+    var bi = _htlBoardIdx();
+    if(bi < 0) return res;
+    res.boardIdx = bi;
+
+    var dep = _htlBoardDepMin();
+    if(dep != null){
+      var diff = dep - nowMin;
+      if(diff < -720) diff += 1440;
+      if(diff > 720)  diff -= 1440;
+      if(diff > 0){ res.pin = true; return res; }        // ① 아직 출발 전
+    }
+
+    // ② GPS 신선도 확인
+    var fx = (typeof S!=='undefined' && S.lastGPSFix) ? S.lastGPSFix : null;
+    var fresh = validGps || (fx && fx.ts && (Date.now() - fx.ts) < 300000);
+    if(!fresh) return res;
+
+    var la = (validGps && lat != null) ? lat : (fx ? fx.lat : null);
+    var ln = (validGps && lng != null) ? lng : (fx ? fx.lng : null);
+    var bNd = _transitNodeData[bi];
+    if(la == null || ln == null || !bNd || bNd.lat == null || typeof haversineM !== 'function') return res;
+
+    if(haversineM(la, ln, bNd.lat, bNd.lng) > 200) res.pin = true;   // 아직 역에 못 감
+    return res;
+  }catch(e){ return res; }
+}
+window._htlShouldPin = _htlShouldPin;
+
+// ══════════════════════════════════════════════════════════════════
+// ★ 승차 대기 모드 (_htlWait)
+//   알림을 보고 경로를 켜도 실제로 역까지 가는 수단(도보·차·버스)은 알 수 없다.
+//   그래서 이동 시간을 '추정하지 않는다'. 대신 승차역 밖에 있는 동안은
+//   타임라인을 진행시키지 않고 '대기 마커'로 두었다가,
+//   GPS가 승차역 도착을 확인하는 순간 그때 기준 다음 열차로 다시 계산한다.
+//   위치 확인 주기는 남은 거리에 따라 자동 조절(멀면 뜸하게·가까우면 촘촘히).
+// ══════════════════════════════════════════════════════════════════
+var _HTL_ARRIVE_M = 160;      // 이 안에 들면 '승차역 도착'으로 판정
+var _HTL_LEAVE_M  = 260;      // 대기 모드 진입 기준(이보다 멀면 아직 못 감)
+
+var _htlWait = {
+  on: false,        // 대기 중인가
+  boardIdx: -1,
+  startedAt: 0,
+  lastCheck: 0,
+  nextGap: 0,       // 다음 위치 확인까지 간격(ms)
+  dist: null        // 마지막으로 잰 승차역까지 거리(m)
+};
+window._htlWait = _htlWait;
+
+// 남은 거리에 따른 위치 확인 주기
+//   2km 초과 3분 · 1~2km 2분 · 500m~1km 60초 · 200~500m 25초 · 그 이하 12초
+function _htlWaitInterval(d){
+  if(d == null)     return 120000;
+  if(d > 2000)      return 180000;
+  if(d > 1000)      return 120000;
+  if(d > 500)       return 60000;
+  if(d > 200)       return 25000;
+  return 12000;
+}
+
+function _htlWaitStop(reason){
+  if(!_htlWait.on) return;
+  _htlWait.on = false;
+  try{ _htlWaitBadge(false); }catch(e){}
+  if(reason) console.log('[대기모드 해제]', reason);
+}
+window._htlWaitStop = _htlWaitStop;
+
+// 대기 마커 배지 표시/숨김
+function _htlWaitBadge(show, txt){
+  try{
+    var dot = window._htlGpsDot || document.getElementById('htl-gps-marker-dot');
+    if(!dot) return;
+    var b = document.getElementById('htlWaitBadge');
+    if(!show){ if(b) b.remove(); dot.classList.remove('htl-gps-wait'); return; }
+    dot.classList.add('htl-gps-wait');
+    if(!b){
+      b = document.createElement('div');
+      b.id = 'htlWaitBadge';
+      b.className = 'htl-wait-badge';
+      if(dot.parentNode) dot.parentNode.appendChild(b);
+    }
+    b.textContent = txt || '대기 중';
+    b.style.left = dot.style.left || '50%';   // 마커와 같은 x좌표
+    b.style.display = (dot.style.display === 'none') ? 'none' : 'block';
+  }catch(e){}
+}
+
+// 현재 위치에서 승차역까지 거리(m) — 최근 픽스 사용, 없으면 null
+function _htlDistToBoard(){
+  try{
+    var bi = _htlBoardIdx(); if(bi < 0) return null;
+    var bNd = _transitNodeData[bi];
+    if(!bNd || bNd.lat == null || typeof haversineM !== 'function') return null;
+    var fx = (typeof S !== 'undefined' && S.lastGPSFix) ? S.lastGPSFix : null;
+    var la = fx ? fx.lat : window._lastGPSLat;
+    var ln = fx ? fx.lng : window._lastGPSLng;
+    if(la == null || ln == null) return null;
+    return haversineM(la, ln, bNd.lat, bNd.lng);
+  }catch(e){ return null; }
+}
+window._htlDistToBoard = _htlDistToBoard;
+
+// 대기 모드 시작 — 알림에서 들어온 경로 탐색 등에서 호출
+function _htlWaitStart(){
+  try{
+    if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return;
+    if(window._metroRouteMode === true) return;
+    if(typeof _isManualStart === 'function' && _isManualStart()) return;
+    var bi = _htlBoardIdx(); if(bi < 0) return;
+    _htlWait.on = true;
+    _htlWait.boardIdx = bi;
+    _htlWait.startedAt = Date.now();
+    _htlWait.lastCheck = 0;
+    _htlWait.dist = _htlDistToBoard();
+    _htlWait.nextGap = _htlWaitInterval(_htlWait.dist);
+    _htlWaitTick(true);
+  }catch(e){}
+}
+window._htlWaitStart = _htlWaitStart;
+
+// 위치 1회 확인 (적응형 주기)
+function _htlWaitTick(force){
+  try{
+    if(!_htlWait.on) return;
+    if(!_htlNotDeparted()){ _htlWaitStop('승차 확인'); return; }
+    var now = Date.now();
+    if(!force && _htlWait.lastCheck && (now - _htlWait.lastCheck) < _htlWait.nextGap) return;
+    _htlWait.lastCheck = now;
+
+    var handle = function(){
+      var d = _htlDistToBoard();
+      _htlWait.dist = d;
+      _htlWait.nextGap = _htlWaitInterval(d);
+      if(d != null && d <= _HTL_ARRIVE_M){
+        // ★ 승차역 도착 확인 → 지금 기준 다음 열차로 타임라인 재계산
+        _htlWaitArrived(d);
+      } else {
+        var txt = (d == null) ? '대기 중'
+                : (d >= 1000) ? ('대기 중 · ' + (d/1000).toFixed(1) + 'km')
+                : ('대기 중 · ' + Math.round(d) + 'm');
+        _htlWaitBadge(true, txt);
+      }
+    };
+
+    // 신선한 픽스가 있으면 그대로, 없으면 새로 측위
+    var fx = (typeof S !== 'undefined' && S.lastGPSFix) ? S.lastGPSFix : null;
+    if(fx && fx.ts && (now - fx.ts) < 60000){ handle(); return; }
+    if(!navigator.geolocation){ handle(); return; }
+    navigator.geolocation.getCurrentPosition(
+      function(p){
+        if(typeof S !== 'undefined') S.lastGPSFix = { lat:p.coords.latitude, lng:p.coords.longitude, ts:Date.now(), acc:p.coords.accuracy };
+        window._lastGPSLat = p.coords.latitude; window._lastGPSLng = p.coords.longitude;
+        handle();
+      },
+      function(){ handle(); },
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }
+    );
+  }catch(e){}
+}
+window._htlWaitTick = _htlWaitTick;
+
+// 승차역 도착 확정 처리
+function _htlWaitArrived(d){
+  try{
+    _htlWaitStop('승차역 도착');
+    var bi = _htlBoardIdx();
+    var before = _htlBoardDepMin();
+    // 지금 시각 기준 다음 열차로 다시 맞춤 (앞당김·미룸 모두 허용)
+    _applyRealBoardTime({ allowEarlier: true, maxWait: 90 });
+    var after = _htlBoardDepMin();
+    var nd = (bi >= 0) ? _transitNodeData[bi] : null;
+    var msg = '🚉 ' + ((nd && nd.name) ? nd.name : '승차역') + ' 도착'
+            + ((nd && nd.arrTime) ? (' · 다음 열차 ' + nd.arrTime) : '');
+    if(typeof toast === 'function') toast(msg);
+    try { if('vibrate' in navigator) navigator.vibrate([180, 90, 180]); } catch(e){}
+    if(before !== after) console.log('[대기모드] 승차역 도착 → 시각표 재계산', before, '→', after);
+    // 마커를 승차역으로 이동
+    if(bi >= 0 && _transitNodeData[bi] && typeof _placeGpsMarkerSmooth === 'function'){
+      window._markerMaxProg = null;
+      _placeGpsMarkerSmooth(_transitNodeData[bi], null, 0);
+    }
+  }catch(e){}
+}
+
+// 15초마다 호출되는 감시자 — 대기 중이면 주기에 맞춰 위치 확인
+function _htlBoardWatch(){
+  try{
+    if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return;
+    if(window._metroRouteMode === true) return;
+    if(typeof _isManualStart === 'function' && _isManualStart()) return;
+    var card = document.getElementById('transitResultCard');
+    if(!card || card.style.display === 'none'){ _htlWaitStop(); return; }
+    if(!_htlNotDeparted()){ _htlWaitStop('승차 확인'); return; }
+
+    // 대기 모드가 아직 아니면, 승차역에서 충분히 멀 때 자동 진입
+    if(!_htlWait.on){
+      var d0 = _htlDistToBoard();
+      if(d0 != null && d0 > _HTL_LEAVE_M) _htlWaitStart();
+      return;
+    }
+    _htlWaitTick(false);
+  }catch(e){}
+}
+window._htlBoardWatch = _htlBoardWatch;
 
 // 목적지 맛집 프리페치 (백그라운드 → _foodCache 채움)
 function prefetchFoodForDest(){
@@ -8423,6 +8680,7 @@ function _updateTransitGps() {
       window._htlBoardNear = false;
     }
     if(typeof _htlResyncBoard==='function') _htlResyncBoard();
+    if(typeof _htlBoardWatch==='function') _htlBoardWatch();
   }catch(e){}
 
   // isOrigin(출발지 가상 노드): 출발 대기 중 → 첫 역에 마커 표시
@@ -8497,20 +8755,26 @@ function _updateTransitGps() {
       if(seg){ fromNd = _transitNodeData[seg.fromIdx]; toNd = _transitNodeData[seg.toIdx]; ratio = seg.ratio; usedGps = true; }
     }
     if(!usedGps) ratio = Math.min(Math.max(0, ratio), 0.85);
-    // ★ 아직 열차 출발 시각 전 + 승차역 대기 중이면 마커를 승차역에 고정
-    //   (출발도 안 했는데 시간 비율만으로 다음 역 쪽으로 흘러가던 문제 수정)
+    // ★ 아직 승차하지 않았으면 마커는 승차역을 넘어가지 않는다.
+    //   예전에는 '예정 출발 시각이 지나면' 고정이 풀려, 알림 받고 늦게 출발한 경우
+    //   시간 비율만으로 마커가 몇 정거장 앞서 나갔다(퇴근 알림 → 35분 뒤 승차 사례).
+    //   출발 판정은 오직 GPS 진행(_gpsMaxIdx) / 통과 기록(_nodePassMs)으로만 한다.
     try{
-      if(typeof _htlNotDeparted==='function' && _htlNotDeparted()){
-        var _bIdx = _htlBoardIdx();
-        var _dep  = (typeof _htlBoardDepMin==='function') ? _htlBoardDepMin() : null;
-        if(_bIdx >= 0 && _dep != null){
-          var _nm2 = _nowMin;
-          var _diff = _dep - _nm2; if(_diff < -720) _diff += 1440; if(_diff > 720) _diff -= 1440;
-          if(_diff > 0){                       // 아직 출발 전
-            fromNd = _transitNodeData[_bIdx];
-            toNd   = null;
-            ratio  = 0;
+      if(typeof _htlNotDeparted==='function' && _htlNotDeparted() && typeof _htlShouldPin==='function'){
+        var _pin = _htlShouldPin(lat, lng, _validGps, _nowMin);
+        if(_pin.pin){
+          var _bIdx = _pin.boardIdx;
+          // ★ 대기 중이면 출발지 노드에 '대기 마커'로 세워둔다.
+          //   이동 수단(도보·차·버스)을 알 수 없으므로 진행률을 추정하지 않는다.
+          var _oNd = null;
+          for(var _oi = _bIdx - 1; _oi >= 0; _oi--){
+            if(_transitNodeData[_oi] && _transitNodeData[_oi].el){ _oNd = _transitNodeData[_oi]; break; }
           }
+          var _waitOn = (typeof _htlWait !== 'undefined') && _htlWait.on;
+          fromNd = (_waitOn && _oNd) ? _oNd : _transitNodeData[_bIdx];
+          toNd   = null;
+          ratio  = 0;
+          window._markerMaxProg = null;   // 대기 중에는 진행도 잠금 해제(승차 후 정상 이동)
         }
       }
     }catch(e){}
@@ -20147,6 +20411,8 @@ function _cmRouteFromBriefing(){
         if(s2) s2.value = st.name;
         if(d2) d2.value = ds.name;
         if(typeof toast==='function') toast('🔎 ' + st.name + ' → ' + ds.name + ' 경로 탐색 중');
+        // ★ 알림에서 들어온 탐색 — 아직 역으로 이동 전이므로 '승차 대기 모드'로 시작
+        window._htlWaitPending = true;
         if(typeof fmapDoRoute==='function') fmapDoRoute();
       }catch(e){
         if(typeof toast==='function') toast('경로 탐색을 시작하지 못했어요');
@@ -24398,6 +24664,10 @@ window.onload=function(){
       if(la && ln) _prefetchNearStops(la, ln);
     }catch(e){}
   }, 45000);
+  // ★ 승차 전 타임라인 재동기화 — 알림 받고 역까지 이동하는 동안 계속 맞춰준다
+  setInterval(function(){
+    try{ if(!document.hidden && typeof _htlBoardWatch === 'function') _htlBoardWatch(); }catch(e){}
+  }, 15000);
   setTimeout(function(){ if(typeof _renderFavRecent==='function') _renderFavRecent(); }, 500);  // ★ 즐겨찾기/최근경로
   setTimeout(function(){ if(typeof renderHorizontalTimeline==='function') renderHorizontalTimeline(); }, 600);  // ★ 경로 노선도 빈 상태 표시
   // 10분마다 실시간 뉴스 갱신
@@ -30339,7 +30609,7 @@ function initChart24Scroll(){
 window.initChart24Scroll = initChart24Scroll;
 
 // ── 쇼핑 시스템 ─────────────────────────────────────────────
-// ── 쿠팝 파트너스 시간대별 추천 (2시간 단위 · 요일별 · 날씨반영 · 엑셀 연동) ──
+// ── 쿠팡 파트너스 시간대별 추천 (2시간 단위 · 요일별 · 날씨반영 · 엑셀 연동) ──
 var SHOP_EMOJI={'다이어트':'🥗','대량구매':'📦','브런치':'🥐','사무용품':'🖇️','생필품':'🧻','셀프케어':'🧴','신선식품마감':'🥬','아침대용식':'🥣','야식':'🌙','우천대비':'☂️','자기계발':'📚','저녁식재료':'🥘','정육':'🥩','출근룩소품':'👔','취미스포츠':'⚽','캠핑나들이':'⛺','커피음료':'☕','홈파티':'🎉'};
 var SHOP_DATA={
  WEEKDAY:[
@@ -31157,11 +31427,13 @@ function _renderShopGrid(pick){
     var _imgHtml = it.i
       ? '<img src="'+it.i+'" loading="lazy" alt="'+it.n+'" data-e="'+emo+'" onerror="this.outerHTML=this.dataset.e">'
       : emo;
+    // 카테고리 배지 제거 + 상품명 오른쪽에 '최저가 ›' → 카드 높이 축소
     return '<div class="prod" data-url="'+it.u+'" onclick="openExternalApp(this.dataset.url)" style="cursor:pointer;position:relative;">'
       +'<div class="prod-img">'+_imgHtml+'</div>'
-      +'<div class="prod-tag">'+it._cat+'</div>'
-      +'<div style="font-size:12px;font-weight:700;color:var(--text);margin:3px 0 2px;">'+it.n+'</div>'
-      +'<div style="font-size:12px;color:var(--gold);font-weight:700;margin-top:5px;">\uCFE0\uD31D \uCD5C\uC800\uAC00 \u203A</div>'
+      +'<div class="prod-row">'
+      +  '<span class="prod-name">'+it.n+'</span>'
+      +  '<span class="prod-buy">\uCD5C\uC800\uAC00 \u203A</span>'
+      +'</div>'
       +'</div>';
   }).join('');
 }
