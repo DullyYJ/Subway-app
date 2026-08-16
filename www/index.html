@@ -9480,9 +9480,35 @@ function loadMapNearStops(force) {
     }
     _fetchNearStops(la, ln, function(err, stops){
       if(err || !stops || !stops.length){
-        if(!shown) listEl.innerHTML = '<div class="map-bus-empty">😢<br>주변 300m 내<br>버스 정류장이 없습니다</div>';
+        // ★ 반경을 넓혀 한 번 더 시도 (도심 외곽·DB 누락 지역 대응)
+        if(!silent && !window._nearWideTried){
+          window._nearWideTried = 1;
+          fetch(_SERVER_URL + '/bus-stops?lat=' + la + '&lng=' + ln + '&radius=2500')
+            .then(function(r){ return r.json(); })
+            .then(function(d){
+              var s2 = (d.stops || []).map(function(x){
+                return { nodenm:x.node_nm, nodeid:x.node_id,
+                         citycode:(x.city_code && String(x.city_code)!=='0') ? String(x.city_code) : '',
+                         gpslati:x.lat, gpslong:x.lng,
+                         dist: haversineM(la, ln, x.lat, x.lng) };
+              });
+              s2.sort(function(a,b){ return a.dist - b.dist; });
+              if(s2.length){ paint(s2.slice(0,6), la, ln, true); }
+              else if(!shown){
+                listEl.innerHTML = '<div class="map-bus-empty">😢<br>주변에 등록된<br>버스 정류장이 없습니다<br>'
+                  + '<button class="map-bus-set-btn" onclick="window._nearWideTried=0;loadMapNearStops(true)">다시 시도</button></div>';
+              }
+            })
+            .catch(function(){
+              if(!shown) listEl.innerHTML = '<div class="map-bus-empty">😢<br>정류장 정보를 불러오지 못했어요<br>'
+                + '<button class="map-bus-set-btn" onclick="window._nearWideTried=0;loadMapNearStops(true)">다시 시도</button></div>';
+            });
+          return;
+        }
+        if(!shown) listEl.innerHTML = '<div class="map-bus-empty">😢<br>주변에 등록된<br>버스 정류장이 없습니다</div>';
         return;
       }
+      window._nearWideTried = 0;
       stops.sort(function(a,b){ return (parseInt(a.dist||0)) - (parseInt(b.dist||0)); });
       paint(stops.slice(0,6), la, ln, true);
     });
@@ -10142,12 +10168,86 @@ function _tagoRawProbe(st, cc, log){
   });
 }
 
+// 현재 위치 확보 (진단 전용 — 버스 탭을 안 열었어도 동작)
+function _diagPos(){
+  return new Promise(function(resolve){
+    var fx = (typeof S !== 'undefined' && S.lastGPSFix) ? S.lastGPSFix : null;
+    if(fx && fx.lat) { resolve({ lat: fx.lat, lng: fx.lng, src: '추적 픽스' }); return; }
+    if(typeof _busGpsLat !== 'undefined' && _busGpsLat) { resolve({ lat: _busGpsLat, lng: _busGpsLng, src: '버스탭 좌표' }); return; }
+    if(window._lastGPSLat) { resolve({ lat: window._lastGPSLat, lng: window._lastGPSLng, src: '마지막 좌표' }); return; }
+    if(!navigator.geolocation){ resolve(null); return; }
+    var done = false;
+    var to = setTimeout(function(){ if(!done){ done = true; resolve(null); } }, 8000);
+    navigator.geolocation.getCurrentPosition(
+      function(p){ if(done) return; done = true; clearTimeout(to);
+        resolve({ lat: p.coords.latitude, lng: p.coords.longitude, src: '즉시 측위', acc: p.coords.accuracy }); },
+      function(){ if(done) return; done = true; clearTimeout(to); resolve(null); },
+      { enableHighAccuracy: true, timeout: 7000, maximumAge: 30000 }
+    );
+  });
+}
+
+// D1 정류장 조회 (진단용 — 반경을 넓혀 실제 응답을 확인)
+function _diagStops(lat, lng, radius){
+  return new Promise(function(resolve){
+    var url = _SERVER_URL + '/bus-stops?lat=' + lat + '&lng=' + lng + '&radius=' + (radius || 800);
+    fetch(url).then(function(r){ return r.text(); }).then(function(t){
+      var d = null;
+      try{ d = JSON.parse(t); }catch(e){}
+      resolve({ ok: !!d, raw: String(t || '').slice(0, 200), stops: (d && d.stops) || [] });
+    }).catch(function(e){ resolve({ ok: false, raw: 'fetch 실패: ' + (e.message || e), stops: [] }); });
+  });
+}
+
 async function _busDiag(){
   var out = [];
   var log = function(t){ out.push(t); console.log(t); _busDiagEl(t); };
   _busDiagEl('🚌 버스 도착정보 진단 시작...', true);
+
+  // ── 0. 프록시 상태 ──
+  log('── 설정 ──');
+  log('  버스 프록시: ' + _busProxyBase());
+  await new Promise(function(res){
+    fetch(_busProxyBase() + '/health').then(function(r){ return r.text(); }).then(function(t){
+      log('  /health: ' + String(t||'').replace(/\s+/g,' ').slice(0,150)); res();
+    }).catch(function(e){ log('  /health: 실패 — ' + (e.message||e)); res(); });
+  });
+
+  // ── 1. 위치 ──
+  var pos = await _diagPos();
+  if(!pos){ log('❌ 현재 위치를 확인할 수 없어요. 위치 권한을 확인해주세요.'); return; }
+  log('── 위치 ──');
+  log('  ' + pos.lat.toFixed(5) + ', ' + pos.lng.toFixed(5) + ' (' + pos.src + (pos.acc ? (' ±' + Math.round(pos.acc) + 'm') : '') + ')');
+
+  // ── 2. 정류장 목록(D1) ──
   var stops = (window._nearStopsCache && window._nearStopsCache.stops) ? window._nearStopsCache.stops.slice(0,4) : [];
-  if(!stops.length){ _busDiagEl('주변 정류장 정보가 없어요. 노선도 > 버스 탭을 먼저 열어주세요.'); return; }
+  if(!stops.length){
+    log('── 정류장 목록(D1) ──');
+    var r800 = await _diagStops(pos.lat, pos.lng, 800);
+    log('  반경 800m: ' + (r800.ok ? (r800.stops.length + '건') : ('응답 오류 — ' + r800.raw)));
+    if(!r800.stops.length){
+      var r3k = await _diagStops(pos.lat, pos.lng, 3000);
+      log('  반경 3km: ' + (r3k.ok ? (r3k.stops.length + '건') : ('응답 오류 — ' + r3k.raw)));
+      if(r3k.stops.length){
+        log('  → 가장 가까운 정류장: ' + (r3k.stops[0].node_nm || '?') + ' (' + Math.round(haversineM(pos.lat,pos.lng,r3k.stops[0].lat,r3k.stops[0].lng)) + 'm)');
+        log('  ※ 800m 안에 등록된 정류장이 없어요. DB에 이 지역 정류장이 빠졌을 수 있습니다.');
+      } else if(r3k.ok){
+        log('  ※ 3km 안에도 정류장이 없어요 — DB에 이 지역 데이터가 없습니다.');
+      }
+      if(!r3k.stops.length) return;
+      stops = r3k.stops.slice(0,4).map(function(s2){
+        return { nodenm:s2.node_nm, nodeid:s2.node_id,
+                 citycode:(s2.city_code && String(s2.city_code)!=='0') ? String(s2.city_code) : '',
+                 gpslati:s2.lat, gpslong:s2.lng };
+      });
+    } else {
+      stops = r800.stops.slice(0,4).map(function(s2){
+        return { nodenm:s2.node_nm, nodeid:s2.node_id,
+                 citycode:(s2.city_code && String(s2.city_code)!=='0') ? String(s2.city_code) : '',
+                 gpslati:s2.lat, gpslong:s2.lng };
+      });
+    }
+  }
   // 첫 정류장으로 TAGO 원본 상태 먼저 확인
   try{
     var st0 = stops[0];
