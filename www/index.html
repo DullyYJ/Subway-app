@@ -10185,16 +10185,25 @@ async function _busDiag(){
               if(/ws\.bus\.go\.kr|6410000/.test(k)) raw = raws[k];   // 지역 API 응답만
             });
             if(!raw) raw = String(window._lastProxyRaw || '');
+            // ★ API가 알려주는 코드·메시지를 그대로 읽어 원인을 특정
+            var g = function(tag){
+              var m = new RegExp('<' + tag + '[^>]*>([\\s\\S]*?)<\\/' + tag + '>').exec(raw);
+              return m ? String(m[1]).replace(/<!\[CDATA\[|\]\]>/g,'').trim() : '';
+            };
+            var hCd = g('headerCd'), hMsg = g('headerMsg');
+            var rCd = g('resultCode') || g('returnReasonCode'), rMsg = g('resultMsg') || g('returnAuthMsg');
             var why = '원인 불명';
-            if(!raw)                                    why = '응답 없음(워커가 이 도메인을 막았을 가능성)';
+            if(!raw)                                     why = '응답 없음(워커가 이 도메인을 막았을 가능성)';
+            else if(hCd && hCd !== '0')                  why = '서울 API 코드 ' + hCd + (hMsg ? (' — ' + hMsg) : '');
+            else if(rCd && !/^0*0$/.test(rCd))           why = '코드 ' + rCd + (rMsg ? (' — ' + rMsg) : '');
             else if(/SERVICE_KEY_IS_NOT_REGISTERED/i.test(raw)) why = '인증키 미등록 — data.go.kr에서 이 서비스 활용신청 필요';
             else if(/SERVICE.?ACCESS.?DENIED|ACCESS_DENIED/i.test(raw))  why = '접근 거부 — 활용신청 승인 대기/거절';
             else if(/LIMITED_NUMBER_OF_SERVICE_REQUESTS/i.test(raw))     why = '일일 호출 한도 초과';
-            else if(/NODATA|없는 데이터|resultCode>0*3/i.test(raw))       why = '해당 정류소 데이터 없음';
-            else if(/<html|<!DOCTYPE/i.test(raw))       why = 'HTML 응답(프록시 차단 또는 잘못된 URL)';
-            else if(raw.length < 5)                     why = '빈 응답';
+            else if(/NODATA|없는 데이터/i.test(raw))      why = '해당 정류소 데이터 없음';
+            else if(/<html|<!DOCTYPE/i.test(raw))        why = 'HTML 응답(프록시 차단 또는 잘못된 URL)';
+            else if(raw.length < 5)                      why = '빈 응답';
             log('  ' + nm + ': 0건 — ' + why);
-            log('    응답: ' + raw.replace(/\s+/g,' ').slice(0, 120));
+            log('    응답: ' + raw.replace(/\s+/g,' ').slice(0, 200));
           }
           res();
         });
