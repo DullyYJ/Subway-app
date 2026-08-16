@@ -10105,9 +10105,22 @@ async function _busDiag(){
     log('  도착정보(현재 ID): ' + (items === null ? '오류' : items.length + '건')
         + (items && items.length ? ' · ' + items.slice(0,3).map(function(x){ return x.routeno; }).join(', ') : ''));
 
+    // ② 지역 원천 API 확인 (경기 GBIS / 서울 TOPIS)
+    if(typeof _arrRegionFallback === 'function' && (/^31/.test(cc) || cc === '11')){
+      await new Promise(function(res){
+        var done = false;
+        var to = setTimeout(function(){ if(!done){ done = true; log('  ' + (/^31/.test(cc)?'경기 GBIS':'서울 TOPIS') + ': 응답 없음(타임아웃)'); res(); } }, 13000);
+        _arrRegionFallback(cc, st, function(rows){
+          if(done) return; done = true; clearTimeout(to);
+          log('  ' + (/^31/.test(cc)?'경기 GBIS':'서울 TOPIS') + ': ' + ((rows && rows.length) ? (rows.length + '건 · ' + rows.slice(0,4).map(function(x){ return x.routeno; }).join(', ')) : '0건'));
+          res();
+        });
+      });
+    }
+
     if(items && items.length) continue;
 
-    // ② 좌표로 TAGO 정류장 재조회
+    // ③ 좌표로 TAGO 정류장 재조회
     await new Promise(function(res){
       _tagoResolveStop(st, function(fix){
         if(!fix){ log('  TAGO 좌표조회: 매칭 정류장 없음'); res(); return; }
@@ -10130,6 +10143,243 @@ function _busDiagEl(txt, clear){
   el.textContent += (el.textContent ? '\n' : '') + txt;
   el.scrollTop = el.scrollHeight;
 }
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ★ 지역별 버스 도착정보 보강 (경기 GBIS / 서울 TOPIS)
+//   TAGO(국토부) 도착정보는 서울 미제공 + 경기도는 광역·직행 위주로만 있어
+//   일반·마을버스가 통째로 빠진다(의왕역2번출구 → G3900만 조회됨).
+//   그래서 지역별 원천 API를 직접 호출해 합친다.
+//   · 경기: apis.data.go.kr/6410000/... (TAGO와 같은 도메인 → 프록시 그대로 사용)
+//   · 서울: ws.bus.go.kr (도메인이 달라 워커 허용이 필요할 수 있음 → 실패해도 무해)
+// ══════════════════════════════════════════════════════════════════════
+
+// XML/텍스트 응답용 프록시 (GBIS·TOPIS는 JSON을 주지 않는다)
+function _busProxyGetText(apiUrl, cb, _try){
+  _try = _try || 0;
+  var proxyUrl = _SERVER_URL + '/tago?url=' + encodeURIComponent(apiUrl);
+  var run = function(){
+    return new Promise(function(fin){
+      var done = false;
+      var tid = setTimeout(function(){
+        if(done) return; done = true;
+        retryOrFail(new Error('timeout')); fin();
+      }, 9000);
+      fetch(proxyUrl)
+        .then(function(r){ return r.text(); })
+        .then(function(t){
+          if(done) return; done = true; clearTimeout(tid);
+          cb(null, t); fin();
+        })
+        .catch(function(e){
+          if(done) return; done = true; clearTimeout(tid);
+          retryOrFail(e); fin();
+        });
+    });
+  };
+  var retryOrFail = function(e){
+    if(_try < 1){ setTimeout(function(){ _busProxyGetText(apiUrl, cb, _try + 1); }, 900); }
+    else cb(e, null);
+  };
+  if(typeof _busArrEnqueue === 'function') _busArrEnqueue(run);
+  else run();
+}
+window._busProxyGetText = _busProxyGetText;
+
+// XML → 태그값 배열
+function _xmlItems(text, itemTag){
+  var out = [];
+  try{
+    var re = new RegExp('<' + itemTag + '[^>]*>([\\s\\S]*?)<\\/' + itemTag + '>', 'g');
+    var m;
+    while((m = re.exec(text)) !== null) out.push(m[1]);
+  }catch(e){}
+  return out;
+}
+function _xmlVal(chunk, tag){
+  try{
+    var m = new RegExp('<' + tag + '[^>]*>([\\s\\S]*?)<\\/' + tag + '>').exec(chunk);
+    if(!m) return '';
+    return String(m[1]).replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+  }catch(e){ return ''; }
+}
+
+// ── 경기도 GBIS ───────────────────────────────────────────────
+var _gbisStnCache = {};                       // nodeId → {ts, stationId}
+var _gbisRouteNm = (function(){
+  try { return JSON.parse(localStorage.getItem('gbisRouteNm') || '{}') || {}; } catch(e){ return {}; }
+})();
+function _gbisRouteNmSave(){
+  try { localStorage.setItem('gbisRouteNm', JSON.stringify(_gbisRouteNm)); } catch(e){}
+}
+
+// 좌표로 경기도 정류소ID 찾기
+function _gbisStationId(stop, cb){
+  var key = String(stop.nodeId || stop.nodeid || '') + '|' + String(stop.nodenm || stop.name || '');
+  var c = _gbisStnCache[key];
+  if(c && Date.now() - c.ts < 3600000){ cb(c.stationId); return; }
+
+  var la = parseFloat(stop.gpslati || stop.lat), ln = parseFloat(stop.gpslong || stop.lng);
+  if(isNaN(la) || isNaN(ln)){ cb(null); return; }
+
+  var url = 'https://apis.data.go.kr/6410000/busstationservice/getBusStationAroundList'
+    + '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY)
+    + '&x=' + ln + '&y=' + la;
+
+  _busProxyGetText(url, function(err, text){
+    if(err || !text){ cb(null); return; }
+    var items = _xmlItems(text, 'busStationAroundList');
+    if(!items.length) items = _xmlItems(text, 'busStationList');
+    if(!items.length){ _gbisStnCache[key] = { ts: Date.now(), stationId: null }; cb(null); return; }
+
+    var want = (typeof _nmKeyStop === 'function') ? _nmKeyStop(stop.nodenm || stop.name) : '';
+    var best = null, bestScore = 1e18;
+    items.forEach(function(ch){
+      var id = _xmlVal(ch, 'stationId');
+      if(!id) return;
+      var nm = _xmlVal(ch, 'stationName');
+      var x = parseFloat(_xmlVal(ch, 'x')), y = parseFloat(_xmlVal(ch, 'y'));
+      var d = (!isNaN(x) && !isNaN(y) && typeof haversineM === 'function')
+              ? haversineM(la, ln, y, x) : 500;
+      var nmOk = want && (typeof _nmKeyStop === 'function') && _nmKeyStop(nm) === want;
+      var score = d - (nmOk ? 400 : 0);
+      if(score < bestScore){ bestScore = score; best = id; }
+    });
+    if(bestScore > 300) best = best;            // 이름이 달라도 가장 가까운 곳 채택
+    _gbisStnCache[key] = { ts: Date.now(), stationId: best };
+    cb(best);
+  });
+}
+
+// 경기도 노선ID → 노선번호
+function _gbisRouteName(routeId, cb){
+  if(!routeId){ cb(''); return; }
+  if(_gbisRouteNm[routeId]){ cb(_gbisRouteNm[routeId]); return; }
+  var url = 'https://apis.data.go.kr/6410000/busrouteservice/getBusRouteInfoItem'
+    + '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY)
+    + '&routeId=' + encodeURIComponent(routeId);
+  _busProxyGetText(url, function(err, text){
+    var nm = '';
+    if(!err && text){
+      var it = _xmlItems(text, 'busRouteInfoItem')[0] || text;
+      nm = _xmlVal(it, 'routeName');
+    }
+    if(nm){ _gbisRouteNm[routeId] = nm; _gbisRouteNmSave(); }
+    cb(nm);
+  });
+}
+
+// 경기도 도착정보 → TAGO 형식으로 변환
+function _gbisArrivals(stop, cb){
+  _gbisStationId(stop, function(sid){
+    if(!sid){ cb([]); return; }
+    var url = 'https://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList'
+      + '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY)
+      + '&stationId=' + encodeURIComponent(sid);
+    _busProxyGetText(url, function(err, text){
+      if(err || !text){ cb([]); return; }
+      var items = _xmlItems(text, 'busArrivalList');
+      if(!items.length){ cb([]); return; }
+
+      var rows = [];
+      items.forEach(function(ch){
+        var rid = _xmlVal(ch, 'routeId');
+        var t1 = parseInt(_xmlVal(ch, 'predictTime1'), 10);
+        var n1 = parseInt(_xmlVal(ch, 'locationNo1'), 10);
+        var t2 = parseInt(_xmlVal(ch, 'predictTime2'), 10);
+        var n2 = parseInt(_xmlVal(ch, 'locationNo2'), 10);
+        if(isFinite(t1) && t1 > 0) rows.push({ routeid: rid, arrtime: t1 * 60, arrprevstationcnt: isFinite(n1) ? n1 : null });
+        if(isFinite(t2) && t2 > 0) rows.push({ routeid: rid, arrtime: t2 * 60, arrprevstationcnt: isFinite(n2) ? n2 : null });
+      });
+      if(!rows.length){ cb([]); return; }
+
+      // 노선번호 채우기 (캐시 우선, 없는 것만 조회)
+      var ids = [];
+      rows.forEach(function(r){ if(r.routeid && ids.indexOf(r.routeid) < 0) ids.push(r.routeid); });
+      var pending = ids.length;
+      if(!pending){ cb(rows); return; }
+      ids.forEach(function(id){
+        _gbisRouteName(id, function(nm){
+          rows.forEach(function(r){ if(r.routeid === id) r.routeno = nm || id; });
+          if(--pending <= 0){
+            cb(rows.filter(function(r){ return r.routeno; }));
+          }
+        });
+      });
+    });
+  });
+}
+window._gbisArrivals = _gbisArrivals;
+
+// ── 서울 TOPIS ────────────────────────────────────────────────
+//   ws.bus.go.kr 도메인이라 워커가 막으면 조용히 실패한다.
+var _seoulArsCache = {};
+function _seoulArsId(stop, cb){
+  var key = String(stop.nodeId || stop.nodeid || '');
+  var c = _seoulArsCache[key];
+  if(c && Date.now() - c.ts < 3600000){ cb(c.arsId); return; }
+  var la = parseFloat(stop.gpslati || stop.lat), ln = parseFloat(stop.gpslong || stop.lng);
+  if(isNaN(la) || isNaN(ln)){ cb(null); return; }
+  var url = 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByPos'
+    + '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY)
+    + '&tmX=' + ln + '&tmY=' + la + '&radius=200';
+  _busProxyGetText(url, function(err, text){
+    if(err || !text){ cb(null); return; }
+    var items = _xmlItems(text, 'itemList');
+    if(!items.length){ _seoulArsCache[key] = { ts: Date.now(), arsId: null }; cb(null); return; }
+    var want = (typeof _nmKeyStop === 'function') ? _nmKeyStop(stop.nodenm || stop.name) : '';
+    var best = null, bestD = 1e18;
+    items.forEach(function(ch){
+      var ars = _xmlVal(ch, 'arsId');
+      if(!ars) return;
+      var nm = _xmlVal(ch, 'stationNm');
+      var d = parseFloat(_xmlVal(ch, 'dist'));
+      if(!isFinite(d)) d = 200;
+      var nmOk = want && (typeof _nmKeyStop === 'function') && _nmKeyStop(nm) === want;
+      var score = d - (nmOk ? 300 : 0);
+      if(score < bestD){ bestD = score; best = ars; }
+    });
+    _seoulArsCache[key] = { ts: Date.now(), arsId: best };
+    cb(best);
+  });
+}
+
+function _seoulArrivals(stop, cb){
+  _seoulArsId(stop, function(ars){
+    if(!ars){ cb([]); return; }
+    var url = 'http://ws.bus.go.kr/api/rest/arrive/getArrInfoByUid'
+      + '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY)
+      + '&arsId=' + encodeURIComponent(ars);
+    _busProxyGetText(url, function(err, text){
+      if(err || !text){ cb([]); return; }
+      var items = _xmlItems(text, 'itemList');
+      var rows = [];
+      items.forEach(function(ch){
+        var rt = _xmlVal(ch, 'rtNm');
+        if(!rt) return;
+        var t1 = parseInt(_xmlVal(ch, 'traTime1'), 10);
+        var t2 = parseInt(_xmlVal(ch, 'traTime2'), 10);
+        var s1 = parseInt(_xmlVal(ch, 'stationNm1'), 10);
+        var n1 = parseInt(_xmlVal(ch, 'sectOrdNext1'), 10);
+        if(isFinite(t1) && t1 > 0) rows.push({ routeno: rt, arrtime: t1, arrprevstationcnt: null });
+        if(isFinite(t2) && t2 > 0) rows.push({ routeno: rt, arrtime: t2, arrprevstationcnt: null });
+      });
+      cb(rows);
+    });
+  });
+}
+window._seoulArrivals = _seoulArrivals;
+
+// ── 지역별 보강 진입점 ────────────────────────────────────────
+function _arrRegionFallback(cityCode, stop, cb){
+  try{
+    var cc = String(cityCode || '');
+    if(/^31/.test(cc))      { _gbisArrivals(stop, cb); return; }   // 경기
+    if(cc === '11')         { _seoulArrivals(stop, cb); return; }  // 서울
+    cb([]);
+  }catch(e){ cb([]); }
+}
+window._arrRegionFallback = _arrRegionFallback;
 
 // ══════════════════════════════════════════════════════════════════
 // ★ 인접 시·도 정류장 병합 조회
@@ -10191,24 +10441,49 @@ function _busArrFetchMerged(cityCode, stop){
   var nodeId = stop.nodeId || stop.nodeid;
   return _busArrFetch(cityCode, nodeId).then(function(items){
     items = items || [];
-    // 노선이 충분히 나오면 추가 조회 없이 종료
-    var routes = {};
-    items.forEach(function(x){ if(x && x.routeno) routes[String(x.routeno)] = 1; });
-    if(Object.keys(routes).length >= 4 || stop._peerDone) return items;
+    var uniq = function(arr){
+      var seen = {}, out = [];
+      arr.forEach(function(x){
+        if(!x || !x.routeno) return;
+        var k = String(x.routeno) + '|' + String(x.arrtime || '');
+        if(seen[k]) return; seen[k] = 1; out.push(x);
+      });
+      return out;
+    };
+    var routeCount = function(arr){
+      var r = {}; arr.forEach(function(x){ if(x && x.routeno) r[String(x.routeno)] = 1; });
+      return Object.keys(r).length;
+    };
+    if(routeCount(items) >= 4 || stop._peerDone) return items;
     stop._peerDone = 1;
+
     return new Promise(function(resolve){
+      // ① 인접 시 등록분(TAGO) 병합
       _busFindPeers(stop, function(peers){
-        if(!peers || !peers.length){ resolve(items); return; }
-        var merged = items.slice(), pending = peers.length;
+        var merged = items.slice();
+        var afterPeers = function(){
+          // ② 그래도 부족하면 지역 원천 API(경기 GBIS / 서울 TOPIS)로 보강
+          if(routeCount(merged) >= 3 || typeof _arrRegionFallback !== 'function'){
+            resolve(uniq(merged)); return;
+          }
+          var done = false;
+          var to = setTimeout(function(){ if(!done){ done = true; resolve(uniq(merged)); } }, 12000);
+          _arrRegionFallback(cityCode, stop, function(extra){
+            if(done) return; done = true; clearTimeout(to);
+            if(extra && extra.length){
+              merged = merged.concat(extra);
+              console.log('[버스] 지역 API 보강 ' + extra.length + '건 — ' + (stop.nodenm || stop.name || ''));
+            }
+            resolve(uniq(merged));
+          });
+        };
+        if(!peers || !peers.length){ afterPeers(); return; }
+        var pending = peers.length;
         peers.forEach(function(p){
           _busArrFetch(p.citycode || cityCode, p.nodeid).then(function(it2){
-            (it2 || []).forEach(function(x){
-              var k = String(x.routeno || '') + '|' + String(x.arrtime || '');
-              if(!merged.some(function(m){ return (String(m.routeno||'')+'|'+String(m.arrtime||'')) === k; }))
-                merged.push(x);
-            });
-            if(--pending <= 0) resolve(merged);
-          }, function(){ if(--pending <= 0) resolve(merged); });
+            merged = merged.concat(it2 || []);
+            if(--pending <= 0) afterPeers();
+          }, function(){ if(--pending <= 0) afterPeers(); });
         });
       });
     });
