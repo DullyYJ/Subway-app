@@ -3799,6 +3799,19 @@ function _busDist(m) {
 // ── TAGO API: 주변 정류장 조회 ────────────────────────────────
 // ★ TAGO 좌표 기반 정류장 조회 (D1이 죽어도 동작하는 폴백)
 //   TAGO가 주는 nodeid/citycode를 그대로 쓰므로 도착정보 조회가 바로 맞아떨어진다.
+// haversineM은 다른 스크립트 블록에 정의돼 있어, 이른 시점 호출에 대비한 안전 래퍼
+function _distM(aLat, aLng, bLat, bLng){
+  try{
+    if(typeof haversineM === 'function') return haversineM(aLat, aLng, bLat, bLng);
+  }catch(e){}
+  var R = 6371000, t = Math.PI / 180;
+  var dLat = (bLat - aLat) * t, dLng = (bLng - aLng) * t;
+  var x = Math.sin(dLat/2) * Math.sin(dLat/2)
+        + Math.cos(aLat*t) * Math.cos(bLat*t) * Math.sin(dLng/2) * Math.sin(dLng/2);
+  return 2 * R * Math.asin(Math.sqrt(Math.max(0, Math.min(1, x))));
+}
+window._distM = _distM;
+
 function _fetchNearStopsTago(lat, lng, callback){
   var url = 'https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList'
     + '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY)
@@ -3807,28 +3820,33 @@ function _fetchNearStopsTago(lat, lng, callback){
   if(typeof _busProxyGet !== 'function'){ callback(new Error('no proxy'), []); return; }
   _busProxyGet(url, function(err, data){
     if(err){ callback(err, []); return; }
-    var items = [];
     try{
-      items = data.response.body.items.item || [];
-      if(!Array.isArray(items)) items = [items];
-    }catch(e){}
-    var stops = [];
-    items.forEach(function(it){
-      var la = parseFloat(it.gpslati), ln = parseFloat(it.gpslong);
-      if(isNaN(la) || isNaN(ln) || !it.nodeid) return;
-      stops.push({
-        nodenm:   it.nodenm,
-        nodeid:   String(it.nodeid),
-        nodeno:   it.nodeno ? String(it.nodeno) : '',
-        citycode: it.citycode ? String(it.citycode) : '',
-        gpslati:  la,
-        gpslong:  ln,
-        dist:     haversineM(lat, lng, la, ln),
-        _src:     'tago'
+      var items = [];
+      try{
+        items = data.response.body.items.item || [];
+        if(!Array.isArray(items)) items = [items];
+      }catch(e){}
+      var stops = [];
+      items.forEach(function(it){
+        var la = parseFloat(it.gpslati), ln = parseFloat(it.gpslong);
+        if(isNaN(la) || isNaN(ln) || !it.nodeid) return;
+        stops.push({
+          nodenm:   it.nodenm,
+          nodeid:   String(it.nodeid),
+          nodeno:   it.nodeno ? String(it.nodeno) : '',
+          citycode: it.citycode ? String(it.citycode) : '',
+          gpslati:  la,
+          gpslong:  ln,
+          dist:     _distM(lat, lng, la, ln),
+          _src:     'tago'
+        });
       });
-    });
-    stops.sort(function(a,b){ return a.dist - b.dist; });
-    callback(null, stops);
+      stops.sort(function(a,b){ return a.dist - b.dist; });
+      callback(null, stops);
+    }catch(e2){
+      console.error('[정류장 TAGO 파싱]', e2);
+      callback(e2, []);     // 예외 시 즉시 폴백으로 넘긴다(18초 대기 방지)
+    }
   });
 }
 window._fetchNearStopsTago = _fetchNearStopsTago;
@@ -3837,6 +3855,22 @@ window._fetchNearStopsTago = _fetchNearStopsTago;
 //   정류장 목록과 도착정보를 같은 출처(TAGO)에서 받으면 nodeid/citycode가
 //   그대로 맞아떨어져 ID 매핑이 필요 없다. D1은 TAGO가 비었을 때만 보조로 쓴다.
 function _fetchNearStops(lat, lng, callback) {
+  // ★ 어떤 경로로 끝나든 콜백은 정확히 한 번, 그리고 반드시 시간 안에 돌아온다.
+  //   (한 단계라도 응답이 없으면 '검색 중...'에서 멈춰 버리던 문제 차단)
+  var _origCb = callback;
+  var called = false;
+  var guard = null;
+  var finish = function(err, stops){
+    if(called) return; called = true;
+    if(guard) clearTimeout(guard);
+    _origCb(err || null, stops || []);
+  };
+  guard = setTimeout(function(){
+    console.log('[정류장] 전체 타임아웃(18초) — 빈 목록 반환');
+    finish(new Error('timeout'), []);
+  }, 18000);
+  callback = finish;
+
   var d1Fallback = function(reason){
     console.log('[정류장] TAGO 0건/실패(' + reason + ') → D1 보조 조회');
     var url = _SERVER_URL + '/bus-stops?lat=' + lat + '&lng=' + lng + '&radius=800';
@@ -3850,7 +3884,7 @@ function _fetchNearStops(lat, lng, callback) {
             citycode: (s.city_code && String(s.city_code) !== '0') ? String(s.city_code) : '',
             gpslati:  s.lat,
             gpslong:  s.lng,
-            dist:     haversineM(lat, lng, s.lat, s.lng),
+            dist:     _distM(lat, lng, s.lat, s.lng),
             _src:     'd1'
           };
         });
@@ -4079,7 +4113,39 @@ function _fetchT(url, opts, ms){
 }
 window._fetchT = _fetchT;
 
-// ★ TAGO 프록시 공통 호출 — 큐(동시 2건)·9초 타임아웃·2회 재시도
+// ══════════════════════════════════════════════════════════════════
+// ★ 버스 API 전용 프록시 주소
+//   기본 워커는 도메인 화이트리스트가 있어 ws.bus.go.kr 등을 막는다.
+//   전용 프록시를 배포한 뒤 이 값을 쓰면 앱 재빌드 없이 전환된다.
+//   ※ 반드시 _busProxyGet보다 먼저 정의돼야 한다(참조 순서 주의).
+// ══════════════════════════════════════════════════════════════════
+var _BUS_PROXY_DEFAULT = 'https://gildongmu-bus.phg0643.workers.dev';
+var _BUS_PROXY_URL = (function(){
+  try {
+    var saved = localStorage.getItem('busProxyUrl');
+    if(saved === '') return '';                 // 사용자가 의도적으로 비운 경우 기본 서버 사용
+    return saved || _BUS_PROXY_DEFAULT;
+  } catch(e){ return _BUS_PROXY_DEFAULT; }
+})();
+function _busProxyBase(){
+  return (_BUS_PROXY_URL && /^https?:\/\//.test(_BUS_PROXY_URL))
+    ? _BUS_PROXY_URL.replace(/\/+$/, '')
+    : _SERVER_URL;
+}
+function _setBusProxyUrl(u){
+  u = String(u || '').trim().replace(/\/+$/, '');
+  _BUS_PROXY_URL = u;
+  try { if(u) localStorage.setItem('busProxyUrl', u); else localStorage.setItem('busProxyUrl', ''); } catch(e){}
+  try {
+    if(typeof _busArrCache !== 'undefined') _busArrCache = {};
+    if(typeof _busPeerCache !== 'undefined') _busPeerCache = {};
+    if(typeof _tagoNodeFix !== 'undefined') _tagoNodeFix = {};
+  } catch(e){}
+}
+window._busProxyBase = _busProxyBase;
+window._setBusProxyUrl = _setBusProxyUrl;
+
+// ★ TAGO 프록시 공통 호출 — 큐(동시 3건)·9초 타임아웃·2회 재시도
 //   노선 정류장/버스위치 조회가 도착정보 요청과 동시에 몰려 실패하던 문제 방지
 function _busProxyGet(apiUrl, cb, _try){
   _try = _try || 0;
@@ -4095,9 +4161,11 @@ function _busProxyGet(apiUrl, cb, _try){
         .then(function(r){ return r.json(); })
         .then(function(d){
           if(done) return; done = true; clearTimeout(tid);
-          cb(null, d); fin();
-        })
-        .catch(function(e){
+          // ★ 콜백에서 예외가 나도 큐 슬롯은 반드시 반납한다.
+          //   (예전엔 done=true 뒤라 .catch가 무시돼 콜백도 해제도 영영 안 됐다)
+          try { cb(null, d); } catch(err){ console.error('[busProxyGet cb]', err); }
+          fin();
+        }, function(e){
           if(done) return; done = true; clearTimeout(tid);
           retryOrFail(e); fin();
         });
@@ -9534,6 +9602,17 @@ function loadMapNearStops(force) {
     }
     if(!shown && !silent){
       listEl.innerHTML = '<div class="map-bus-loading"><div class="bus-spinner"></div>현재 위치로 주변 정류장 검색 중...</div>';
+      // 응답이 끝내 안 오면 로딩에서 멈추지 않도록
+      clearTimeout(window._nearLoadGuard);
+      window._nearLoadGuard = setTimeout(function(){
+        try{
+          if(shown) return;
+          if(listEl.querySelector('.bus-spinner')){
+            listEl.innerHTML = '<div class="map-bus-empty">😕<br>정류장 정보를 불러오지 못했어요<br>'
+              + '<button class="map-bus-set-btn" onclick="window._nearWideTried=0;loadMapNearStops(true)">다시 시도</button></div>';
+          }
+        }catch(e){}
+      }, 20000);
     }
     _fetchNearStops(la, ln, function(err, stops){
       if(err || !stops || !stops.length){
@@ -10003,8 +10082,15 @@ function _busArrNext(){
   var job = _busArrQueue.shift() || _busLowQueue.shift();
   if(!job) return;
   _busArrRunning++;
-  job().then(function(){ _busArrRunning--; setTimeout(_busArrNext, 80); },
-            function(){ _busArrRunning--; setTimeout(_busArrNext, 80); });
+  var release = function(){ _busArrRunning--; setTimeout(_busArrNext, 80); };
+  var p;
+  try { p = job(); } catch(e){ release(); return; }   // 동기 예외로 큐가 멈추지 않게
+  if(!p || typeof p.then !== 'function'){ release(); return; }
+  // 잡이 영원히 끝나지 않아도 슬롯은 15초 뒤 회수한다
+  var freed = false;
+  var once = function(){ if(freed) return; freed = true; release(); };
+  var t = setTimeout(once, 15000);
+  p.then(function(){ clearTimeout(t); once(); }, function(){ clearTimeout(t); once(); });
 }
 function _busArrEnqueue(fn, low){
   if(!_busArrQueue) _busArrQueue = [];
@@ -10055,11 +10141,12 @@ function _busArrFetch(cityCode, nodeId, _bg){
               if(!Array.isArray(items)) items = [items];
             }catch(e){}
             if(items.length) _busArrCache[nodeId] = { ts: Date.now(), items: items };
-            resolve(items); fin();
-          })
-          .catch(function(e){
+            try { resolve(items); } catch(err){}
+            fin();
+          }, function(e){
             if(done) return; done = true; clearTimeout(tid);
-            reject(e); fin();
+            try { reject(e); } catch(err){}
+            fin();
           });
       });
     });
@@ -10456,9 +10543,9 @@ function _busProxyGetText(apiUrl, cb, _try){
           window._lastProxyRaw = snip;
           window._proxyRawBy = window._proxyRawBy || {};
           window._proxyRawBy[apiUrl] = snip;
-          cb(null, t); fin();
-        })
-        .catch(function(e){
+          try { cb(null, t); } catch(err){ console.error('[busProxyGetText cb]', err); }
+          fin();
+        }, function(e){
           if(done) return; done = true; clearTimeout(tid);
           retryOrFail(e); fin();
         });
@@ -10505,6 +10592,7 @@ function _fetchNearStopsSeoul(lat, lng, callback){
     + '&tmX=' + lng + '&tmY=' + lat + '&radius=800';
   _busProxyGetText(url, function(err, text){
     if(err || !text){ callback(err || new Error('no response'), []); return; }
+    try{
     var e = _topisErr(text);
     if(e){ console.log('[TOPIS 정류장]', e); callback(new Error(e), []); return; }
     var items = _xmlItems(text, 'itemList');
@@ -10524,12 +10612,13 @@ function _fetchNearStopsSeoul(lat, lng, callback){
         citycode: '11',
         gpslati:  gy,
         gpslong:  gx,
-        dist:     isFinite(d) ? d : haversineM(lat, lng, gy, gx),
+        dist:     isFinite(d) ? d : _distM(lat, lng, gy, gx),
         _src:     'topis'
       });
     });
     stops.sort(function(a,b){ return a.dist - b.dist; });
     callback(null, stops);
+    }catch(e2){ console.error('[정류장 TOPIS 파싱]', e2); callback(e2, []); }
   });
 }
 window._fetchNearStopsSeoul = _fetchNearStopsSeoul;
