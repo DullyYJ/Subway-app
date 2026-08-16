@@ -4026,7 +4026,7 @@ window._fetchT = _fetchT;
 //   노선 정류장/버스위치 조회가 도착정보 요청과 동시에 몰려 실패하던 문제 방지
 function _busProxyGet(apiUrl, cb, _try){
   _try = _try || 0;
-  var proxyUrl = _SERVER_URL + '/tago?url=' + encodeURIComponent(apiUrl);
+  var proxyUrl = _busProxyBase() + '/tago?url=' + encodeURIComponent(apiUrl);
   var run = function(){
     return new Promise(function(fin){
       var done = false;
@@ -9952,7 +9952,7 @@ function _busArrFetch(cityCode, nodeId, _bg){
   }
   return new Promise(function(resolve, reject){
     _busArrEnqueue(function(){
-      var url = _SERVER_URL + '/tago?url=' + encodeURIComponent(
+      var url = _busProxyBase() + '/tago?url=' + encodeURIComponent(
         'https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList' +
         '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY) +
         '&cityCode=' + cityCode + '&nodeId=' + nodeId + '&_type=json');
@@ -10179,7 +10179,12 @@ async function _busDiag(){
             log('  ' + nm + ': ' + rows.length + '건 · ' + rows.slice(0,4).map(function(x){ return x.routeno; }).join(', '));
           } else {
             // ★ 0건이면 원인 구분: 권한 미신청 / 도메인 차단 / 진짜 빈 데이터
-            var raw = String(window._lastProxyRaw || '');
+            var raws = window._proxyRawBy || {};
+            var raw = '';
+            Object.keys(raws).forEach(function(k){
+              if(/ws\.bus\.go\.kr|6410000/.test(k)) raw = raws[k];   // 지역 API 응답만
+            });
+            if(!raw) raw = String(window._lastProxyRaw || '');
             var why = '원인 불명';
             if(!raw)                                    why = '응답 없음(워커가 이 도메인을 막았을 가능성)';
             else if(/SERVICE_KEY_IS_NOT_REGISTERED/i.test(raw)) why = '인증키 미등록 — data.go.kr에서 이 서비스 활용신청 필요';
@@ -10214,6 +10219,33 @@ async function _busDiag(){
   log('진단 완료 — 이 내용을 개발자에게 보여주세요.');
 }
 window._busDiag = _busDiag;
+
+function _saveBusProxy(){
+  try{
+    var el = document.getElementById('busProxyInput');
+    if(!el) return;
+    var v = String(el.value || '').trim();
+    if(v && !/^https?:\/\//.test(v)){ if(typeof toast==='function') toast('https:// 로 시작하는 주소를 넣어주세요'); return; }
+    _setBusProxyUrl(v);
+    _busDiagEl(v ? ('버스 프록시 저장됨: ' + v + '\n이제 진단을 다시 실행해 보세요.')
+                 : '버스 프록시 해제됨 — 기본 서버를 사용합니다.', true);
+    if(typeof toast==='function') toast(v ? '✅ 프록시 주소 저장' : '기본 서버로 되돌림');
+  }catch(e){}
+}
+window._saveBusProxy = _saveBusProxy;
+
+// 설정 화면 열릴 때 저장된 주소 채우기
+(function _fillBusProxyInput(){
+  var t = setInterval(function(){
+    var el = document.getElementById('busProxyInput');
+    if(!el) return;
+    clearInterval(t);
+    try {
+      var sv = localStorage.getItem('busProxyUrl');
+      el.value = (sv === null) ? _BUS_PROXY_DEFAULT : sv;
+    } catch(e){ el.value = _BUS_PROXY_DEFAULT; }
+  }, 1500);
+})();
 function _busDiagEl(txt, clear){
   var el = document.getElementById('busDiagLog');
   if(!el) return;
@@ -10232,10 +10264,35 @@ function _busDiagEl(txt, clear){
 //   · 서울: ws.bus.go.kr (도메인이 달라 워커 허용이 필요할 수 있음 → 실패해도 무해)
 // ══════════════════════════════════════════════════════════════════════
 
+// ★ 버스 API 전용 프록시 주소
+//   기본 워커는 도메인 화이트리스트가 있어 ws.bus.go.kr 등을 막는다("host not allowed").
+//   전용 프록시를 배포한 뒤 설정에서 주소를 넣으면 그쪽으로 보낸다(앱 재빌드 불필요).
+var _BUS_PROXY_DEFAULT = 'https://gildongmu-bus.phg0643.workers.dev';   // 버스 전용 프록시(서울 TOPIS·경기 GBIS 허용)
+var _BUS_PROXY_URL = (function(){
+  try {
+    var saved = localStorage.getItem('busProxyUrl');
+    if(saved === '') return '';                 // 사용자가 의도적으로 비운 경우 기본 서버 사용
+    return saved || _BUS_PROXY_DEFAULT;
+  } catch(e){ return _BUS_PROXY_DEFAULT; }
+})();
+function _busProxyBase(){
+  return (_BUS_PROXY_URL && /^https?:\/\//.test(_BUS_PROXY_URL))
+    ? _BUS_PROXY_URL.replace(/\/+$/, '')
+    : _SERVER_URL;
+}
+function _setBusProxyUrl(u){
+  u = String(u || '').trim().replace(/\/+$/, '');
+  _BUS_PROXY_URL = u;
+  try { if(u) localStorage.setItem('busProxyUrl', u); else localStorage.removeItem('busProxyUrl'); } catch(e){}
+  try { _busArrCache = {}; _busPeerCache = {}; _gbisStnCache = {}; _seoulArsCache = {}; } catch(e){}
+}
+window._setBusProxyUrl = _setBusProxyUrl;
+window._busProxyBase = _busProxyBase;
+
 // XML/텍스트 응답용 프록시 (GBIS·TOPIS는 JSON을 주지 않는다)
 function _busProxyGetText(apiUrl, cb, _try){
   _try = _try || 0;
-  var proxyUrl = _SERVER_URL + '/tago?url=' + encodeURIComponent(apiUrl);
+  var proxyUrl = _busProxyBase() + '/tago?url=' + encodeURIComponent(apiUrl);
   var run = function(){
     return new Promise(function(fin){
       var done = false;
@@ -10247,7 +10304,10 @@ function _busProxyGetText(apiUrl, cb, _try){
         .then(function(r){ window._lastProxyStatus = r.status; return r.text(); })
         .then(function(t){
           if(done) return; done = true; clearTimeout(tid);
-          window._lastProxyRaw = String(t || '').slice(0, 300);   // 진단용 응답 앞부분
+          var snip = String(t || '').slice(0, 300);
+          window._lastProxyRaw = snip;                       // 하위호환
+          window._proxyRawBy = window._proxyRawBy || {};
+          window._proxyRawBy[apiUrl] = snip;                 // ★ 요청별로 따로 보관
           cb(null, t); fin();
         })
         .catch(function(e){
@@ -11707,6 +11767,14 @@ window.addEventListener('unhandledrejection', function(e) {
         <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">🚌 버스 도착정보 진단</div>
         <p style="font-size:12px;color:var(--sub);margin-bottom:12px;">도착정보가 안 뜨는 정류장의 원인을 확인해요. (노선도 &gt; 버스 탭을 먼저 연 뒤 실행)</p>
         <button onclick="_busDiag()" style="width:100%;padding:11px;border-radius:10px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:var(--gold);color:#121214;font-family:inherit;margin-bottom:10px;">진단 실행</button>
+        <div style="margin-bottom:10px;">
+          <div style="font-size:11.5px;color:var(--sub);margin-bottom:6px;">버스 전용 프록시 주소 (서울·경기 도착정보용, 비워두면 기본 서버 사용)</div>
+          <div style="display:flex;gap:6px;">
+            <input id="busProxyInput" type="text" placeholder="https://gildongmu-bus.xxx.workers.dev"
+              style="flex:1;min-width:0;padding:9px 10px;border-radius:9px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-family:inherit;">
+            <button onclick="_saveBusProxy()" style="padding:9px 14px;border-radius:9px;border:none;cursor:pointer;font-size:12px;font-weight:800;background:#2f7cf6;color:#fff;font-family:inherit;">저장</button>
+          </div>
+        </div>
         <div id="busDiagLog" style="background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px;font-size:11px;line-height:1.6;color:var(--text);font-family:monospace;min-height:44px;max-height:260px;overflow-y:auto;white-space:pre-wrap;">진단을 실행하면 결과가 여기에 표시돼요.</div>
       </div>
 
