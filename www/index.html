@@ -10060,19 +10060,24 @@ function _tagoResolveStop(stop, cb){
         items = data.response.body.items.item || [];
         if(!Array.isArray(items)) items = [items];
       }catch(e){}
-      if(!items.length){ _tagoNodeFix[key] = null; _tagoNodeFixSave(); cb(null); return; }
+      if(!items.length){
+        window._tagoResolveWhy = 'TAGO 응답 0건';
+        _tagoNodeFix[key] = null; _tagoNodeFixSave(); cb(null); return;
+      }
 
       var want = _nmKeyStop(stop.nodenm || stop.name || '');
-      var best = null, bestD = 1e18;
+      var best = null, bestD = 1e18, bestDist = 1e18;
       items.forEach(function(it){
         var ila = parseFloat(it.gpslati), iln = parseFloat(it.gpslong);
         if(isNaN(ila) || isNaN(iln)) return;
         var d = (typeof haversineM === 'function') ? haversineM(la, ln, ila, iln) : 0;
         var nmOk = want && _nmKeyStop(it.nodenm) === want;
         var score = d - (nmOk ? 300 : 0);        // 이름이 같으면 크게 우대
-        if(score < bestD){ bestD = score; best = it; }
+        if(score < bestD){ bestD = score; best = it; bestDist = d; }
       });
-      if(!best || (bestD > 250 && !(want && _nmKeyStop(best.nodenm) === want))){
+      // 이름 표기가 달라도(예: '충무로역8번출구' vs '충무로역') 400m 이내면 같은 지점으로 본다
+      if(!best || bestDist > 400){
+        window._tagoResolveWhy = best ? ('가장 가까운 후보가 ' + Math.round(bestDist) + 'm — 너무 멂') : '좌표 후보 없음';
         _tagoNodeFix[key] = null; _tagoNodeFixSave(); cb(null); return;
       }
       var fix = { nodeid: String(best.nodeid||''), citycode: String(best.citycode||cc||''), nm: best.nodenm||'' };
@@ -10086,12 +10091,69 @@ function _tagoResolveStop(stop, cb){
 window._tagoResolveStop = _tagoResolveStop;
 
 // ── 정류장 도착정보 진단 (설정 > 버스 진단) ──
+// TAGO 원본 확인 — 도시코드 목록에 이 지역이 있는지, 좌표로 정류소가 잡히는지
+function _tagoRawProbe(st, cc, log){
+  return new Promise(function(resolve){
+    var steps = 2, done = function(){ if(--steps <= 0) resolve(); };
+
+    // (1) 도시코드 목록 조회 — 서울(11)·경기(31xxx) 포함 여부 확인
+    var u1 = 'https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCtyCodeList'
+      + '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY) + '&_type=json';
+    _busProxyGet(u1, function(err, data){
+      if(err){ log('  [TAGO] 도시코드 목록: 오류'); done(); return; }
+      var items = [];
+      try{
+        items = data.response.body.items.item || [];
+        if(!Array.isArray(items)) items = [items];
+      }catch(e){}
+      if(!items.length){
+        log('  [TAGO] 도시코드 목록: 0건 — ' + String(window._lastProxyRaw||'').replace(/\s+/g,' ').slice(0,90));
+      } else {
+        var hit = items.filter(function(x){ return String(x.citycode) === String(cc); });
+        log('  [TAGO] 도시코드 ' + items.length + '개 중 ' + cc + ' '
+            + (hit.length ? ('있음 (' + (hit[0].cityname||'') + ') ✅') : '없음 ❌'));
+      }
+      done();
+    });
+
+    // (2) 좌표로 정류소 조회 — 필터 없이 원본 개수·샘플
+    var la = st.gpslati || st.lat, ln = st.gpslong || st.lng;
+    var u2 = 'https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList'
+      + '?serviceKey=' + encodeURIComponent(_BUS_TAGO_KEY)
+      + '&gpsLati=' + la + '&gpsLong=' + ln
+      + '&numOfRows=20&pageNo=1&_type=json';
+    _busProxyGet(u2, function(err, data){
+      if(err){ log('  [TAGO] 좌표 정류소조회: 오류'); done(); return; }
+      var items = [];
+      try{
+        items = data.response.body.items.item || [];
+        if(!Array.isArray(items)) items = [items];
+      }catch(e){}
+      if(!items.length){
+        log('  [TAGO] 좌표 정류소조회: 0건 — ' + String(window._lastProxyRaw||'').replace(/\s+/g,' ').slice(0,90));
+      } else {
+        log('  [TAGO] 좌표 정류소조회: ' + items.length + '건');
+        items.slice(0,3).forEach(function(x){
+          log('     · ' + (x.nodenm||'?') + ' / ' + (x.nodeid||'?') + ' / city=' + (x.citycode||'?'));
+        });
+      }
+      done();
+    });
+  });
+}
+
 async function _busDiag(){
   var out = [];
   var log = function(t){ out.push(t); console.log(t); _busDiagEl(t); };
   _busDiagEl('🚌 버스 도착정보 진단 시작...', true);
   var stops = (window._nearStopsCache && window._nearStopsCache.stops) ? window._nearStopsCache.stops.slice(0,4) : [];
   if(!stops.length){ _busDiagEl('주변 정류장 정보가 없어요. 노선도 > 버스 탭을 먼저 열어주세요.'); return; }
+  // 첫 정류장으로 TAGO 원본 상태 먼저 확인
+  try{
+    var st0 = stops[0];
+    log('── TAGO 원본 확인 ──');
+    await _tagoRawProbe(st0, _tagoCityCode(st0), log);
+  }catch(e){}
 
   for(var i=0;i<stops.length;i++){
     var st = stops[i];
@@ -10112,7 +10174,23 @@ async function _busDiag(){
         var to = setTimeout(function(){ if(!done){ done = true; log('  ' + (/^31/.test(cc)?'경기 GBIS':'서울 TOPIS') + ': 응답 없음(타임아웃)'); res(); } }, 13000);
         _arrRegionFallback(cc, st, function(rows){
           if(done) return; done = true; clearTimeout(to);
-          log('  ' + (/^31/.test(cc)?'경기 GBIS':'서울 TOPIS') + ': ' + ((rows && rows.length) ? (rows.length + '건 · ' + rows.slice(0,4).map(function(x){ return x.routeno; }).join(', ')) : '0건'));
+          var nm = (/^31/.test(cc) ? '경기 GBIS' : '서울 TOPIS');
+          if(rows && rows.length){
+            log('  ' + nm + ': ' + rows.length + '건 · ' + rows.slice(0,4).map(function(x){ return x.routeno; }).join(', '));
+          } else {
+            // ★ 0건이면 원인 구분: 권한 미신청 / 도메인 차단 / 진짜 빈 데이터
+            var raw = String(window._lastProxyRaw || '');
+            var why = '원인 불명';
+            if(!raw)                                    why = '응답 없음(워커가 이 도메인을 막았을 가능성)';
+            else if(/SERVICE_KEY_IS_NOT_REGISTERED/i.test(raw)) why = '인증키 미등록 — data.go.kr에서 이 서비스 활용신청 필요';
+            else if(/SERVICE.?ACCESS.?DENIED|ACCESS_DENIED/i.test(raw))  why = '접근 거부 — 활용신청 승인 대기/거절';
+            else if(/LIMITED_NUMBER_OF_SERVICE_REQUESTS/i.test(raw))     why = '일일 호출 한도 초과';
+            else if(/NODATA|없는 데이터|resultCode>0*3/i.test(raw))       why = '해당 정류소 데이터 없음';
+            else if(/<html|<!DOCTYPE/i.test(raw))       why = 'HTML 응답(프록시 차단 또는 잘못된 URL)';
+            else if(raw.length < 5)                     why = '빈 응답';
+            log('  ' + nm + ': 0건 — ' + why);
+            log('    응답: ' + raw.replace(/\s+/g,' ').slice(0, 120));
+          }
           res();
         });
       });
@@ -10123,7 +10201,7 @@ async function _busDiag(){
     // ③ 좌표로 TAGO 정류장 재조회
     await new Promise(function(res){
       _tagoResolveStop(st, function(fix){
-        if(!fix){ log('  TAGO 좌표조회: 매칭 정류장 없음'); res(); return; }
+        if(!fix){ log('  TAGO 좌표조회: 실패 — ' + (window._tagoResolveWhy || '원인 불명')); res(); return; }
         log('  TAGO 좌표조회 → nodeId=' + fix.nodeid + ' (' + fix.nm + ', city ' + fix.citycode + ')');
         _busArrFetch(fix.citycode, fix.nodeid).then(function(it2){
           log('  도착정보(보정 ID): ' + it2.length + '건'
@@ -10166,9 +10244,10 @@ function _busProxyGetText(apiUrl, cb, _try){
         retryOrFail(new Error('timeout')); fin();
       }, 9000);
       fetch(proxyUrl)
-        .then(function(r){ return r.text(); })
+        .then(function(r){ window._lastProxyStatus = r.status; return r.text(); })
         .then(function(t){
           if(done) return; done = true; clearTimeout(tid);
+          window._lastProxyRaw = String(t || '').slice(0, 300);   // 진단용 응답 앞부분
           cb(null, t); fin();
         })
         .catch(function(e){
