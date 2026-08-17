@@ -3901,25 +3901,49 @@ function _fetchNearStops(lat, lng, callback) {
     });
   };
 
-  // ★ 서울은 TAGO에 정류장 자체가 없다 → TOPIS 먼저
-  if(typeof _isSeoulPos === 'function' && _isSeoulPos(lat, lng) && typeof _fetchNearStopsSeoul === 'function'){
-    _fetchNearStopsSeoul(lat, lng, function(e2, s2){
-      if(!e2 && s2 && s2.length){ callback(null, s2); return; }
-      console.log('[정류장] TOPIS 실패/0건 → TAGO 시도');
-      tagoThenD1();
+  // ── 경기 GBIS ──
+  //   TAGO의 경기 커버리지가 광역·직행버스 위주라 일반·마을버스가 통째로 빠진다.
+  var _ggUsable = (typeof _isGGSearchable === 'function') && _isGGSearchable(lat, lng)
+                  && (typeof _fetchNearStopsGG === 'function');
+
+  var ggThenD1 = function(reason){                 // TAGO가 비었을 때의 GBIS 보조
+    if(!_ggUsable){ d1Fallback(reason); return; }
+    _fetchNearStopsGG(lat, lng, function(e, s){
+      if(!e && s && s.length){ callback(null, s); return; }
+      console.log('[정류장] GBIS도 실패/0건 → D1 보조');
+      d1Fallback(reason);
     });
-    return;
-  }
-  // ★ 경기는 TAGO가 광역·직행버스 위주라 일반·마을버스가 빠짐 → 경기도 GBIS 먼저
-  if(typeof _isGyeonggiPos === 'function' && _isGyeonggiPos(lat, lng) && typeof _fetchNearStopsGG === 'function'){
-    _fetchNearStopsGG(lat, lng, function(e3, s3){
-      if(!e3 && s3 && s3.length){ callback(null, s3); return; }
+  };
+  var tagoThenGG = function(){                     // 인천 박스 안: TAGO 먼저
+    _fetchNearStopsTago(lat, lng, function(err, stops){
+      if(!err && stops && stops.length){ callback(null, stops); return; }
+      ggThenD1(err ? (err.message || err) : '0건');
+    });
+  };
+  var ggThenTago = function(){                     // 그 외 경기권: GBIS 먼저
+    if(!_ggUsable){ tagoThenD1(); return; }
+    _fetchNearStopsGG(lat, lng, function(e, s){
+      if(!e && s && s.length){ callback(null, s); return; }
       console.log('[정류장] GBIS 실패/0건 → TAGO 시도');
       tagoThenD1();
     });
+  };
+  var afterSeoul = function(){
+    if(!_ggUsable){ tagoThenD1(); return; }
+    if(typeof _isGGPreferred === 'function' && _isGGPreferred(lat, lng)) ggThenTago();
+    else tagoThenGG();                             // 인천권은 TAGO가 정상이라 먼저 본다
+  };
+
+  // ★ 서울은 TAGO에 정류장 자체가 없다 → TOPIS 먼저, 비면 경기/TAGO 순으로
+  if(typeof _isSeoulPos === 'function' && _isSeoulPos(lat, lng) && typeof _fetchNearStopsSeoul === 'function'){
+    _fetchNearStopsSeoul(lat, lng, function(e2, s2){
+      if(!e2 && s2 && s2.length){ callback(null, s2); return; }
+      console.log('[정류장] TOPIS 실패/0건 → 경기/TAGO 시도');
+      afterSeoul();
+    });
     return;
   }
-  tagoThenD1();
+  afterSeoul();
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -9467,6 +9491,11 @@ function _prewarmStop(st){
     if(typeof _applyNodeFix === 'function') _applyNodeFix(st);
     var cc = (typeof _tagoCityCode === 'function') ? _tagoCityCode(st) : (st.citycode || st.cityCode || '');
     var nid = st.nodeid || st.nodeId;
+    // ★ 경기(GBIS) 정류장은 cityCode가 없고 TAGO로 조회되지 않는다 → 전용 경로로 데운다
+    if((st._src === 'gbis' || String(nid || '').indexOf('GG:') === 0) && typeof _ggArrivals === 'function'){
+      _ggArrivals(st, function(){});
+      return;
+    }
     if(!nid || !cc || typeof _busArrFetch !== 'function') return;
     _busArrFetch(cc, nid).then(function(items){
       if(items && items.length) return;
@@ -10409,6 +10438,8 @@ async function _busDiag(){
       try{
         var pp = localStorage.getItem('topisPath_pos'), pu = localStorage.getItem('topisPath_uid');
         log('  사용 경로: 정류장=' + (pp || '탐색 실패') + ' / 도착=' + (pu || '미확인'));
+        if(typeof _topisFailed === 'function' && (_topisFailed('pos') || _topisFailed('uid')))
+          log('  ※ 최근 전 경로 실패로 6시간 동안 TOPIS를 건너뜁니다(경기 GBIS로 폴백 중).');
       }catch(e){}
       if(!seoulStops.length){
         var raws0 = window._proxyRawBy || {};
@@ -10426,7 +10457,7 @@ async function _busDiag(){
       }
     }
     // ★ 경기면 GBIS 정류장 조회부터 확인
-    if(!stops.length && typeof _isGyeonggiPos === 'function' && _isGyeonggiPos(pos.lat, pos.lng)){
+    if(!stops.length && typeof _isGGSearchable === 'function' && _isGGSearchable(pos.lat, pos.lng)){
       log('── 정류장 목록(경기 GBIS) ──');
       var ggStops = await new Promise(function(res){
         var done = false;
@@ -10440,7 +10471,7 @@ async function _busDiag(){
       log('  결과: ' + ggStops.length + '건'
           + (ggStops.length ? (' · ' + ggStops.slice(0,3).map(function(x){ return x.nodenm + '(id ' + x.stationId + ')'; }).join(', ')) : ''));
       try{
-        if(window._ggLastRawStops) log('  원본 응답(필드명 확인용): ' + JSON.stringify(window._ggLastRawStops).slice(0, 500));
+        if(window._ggLastRawStops) log('  원본 응답: ' + String(window._ggLastRawStops).replace(/\s+/g,' ').slice(0, 300));
       }catch(e){}
       if(ggStops.length){
         stops = ggStops.slice(0,4);
@@ -10450,7 +10481,7 @@ async function _busDiag(){
             log('  도착정보(경기 GBIS): ' + rows.length + '건'
                 + (rows.length ? (' · ' + rows.slice(0,3).map(function(x){ return x.routeno; }).join(', ')) : ''));
             try{
-              if(window._ggLastRawArr) log('  원본 응답(필드명 확인용): ' + JSON.stringify(window._ggLastRawArr).slice(0, 500));
+              if(window._ggLastRawArr) log('  원본 응답: ' + String(window._ggLastRawArr).replace(/\s+/g,' ').slice(0, 300));
             }catch(e){}
             res();
           });
@@ -10523,7 +10554,7 @@ async function _busDiag(){
             log('  경기 GBIS: ' + rows.length + '건 · ' + rows.slice(0,4).map(function(x){ return x.routeno; }).join(', '));
           } else {
             log('  경기 GBIS: 0건');
-            try{ if(window._ggLastRawArr) log('    응답: ' + JSON.stringify(window._ggLastRawArr).slice(0, 300)); }catch(e){}
+            try{ if(window._ggLastRawArr) log('    응답: ' + String(window._ggLastRawArr).replace(/\s+/g,' ').slice(0, 240)); }catch(e){}
           }
           res();
         });
@@ -10698,20 +10729,19 @@ function _topisErr(text){
   return '';
 }
 
-// 서울 API 경로 후보 — 순서대로 시도해 성공하는 것을 caching(_topisPathSave)한다.
-//   getStationByPos/getStationByUid는 TOPIS가 수년째 공개해 온 표준 경로라 1순위로 두고,
-//   활용신청 화면의 상세기능명(Staions 오타 포함, List/Item 유무)을 이후 후보로 둔다.
-var _TOPIS_POS_PATHS = [
-  'getStationByPos',      // 표준(가장 유력) — tmX/tmY/radius
-  'getStaionsByPosList',  // 활용신청 상세기능명 그대로('Staions' 오타가 공식 표기)
-  'getStaionsByPos',
-  'getStationByPosList'
-];
-var _TOPIS_UID_PATHS = [
-  'getStationByUid',      // 표준(가장 유력) — arsId
-  'getStationByUidItem',  // 활용신청 상세기능명 그대로
-  'getStationByUidList'
-];
+// 서울 API 경로 — 2026-08-17 종결. 더 이상 '후보 탐색'이 아니다.
+//   서울시 공식 레퍼런스(api.bus.go.kr/contents/sub02/)에서 확정:
+//     · 요청 URL      http://ws.bus.go.kr/api/rest/stationinfo
+//     · 좌표기반 근접  getStationByPos?tmX=<경도>&tmY=<위도>&radius=<0~1500>   (WGS84)
+//     · 고유번호별     getStationByUid?arsId=<정류소번호>
+//     · 변수명은 대소문자를 구분한다(공식 경고).
+//   data.go.kr 활용신청 화면의 상세기능명(getStaionsByPosList / getStationByUidItem)은
+//   문서상 명칭일 뿐이고, 실제 경로는 접미사를 뗀 위 이름이다. 오타 철자('Staions')와
+//   List/Item 붙은 형태는 브라우저 실측에서 전부 404 HTML이었다.
+//   배열 형태는 유지한다 — 서울시가 경로를 바꾸면 후보만 추가하면 되고, _topisTry가
+//   404를 만나면 다음 후보로 넘어가는 구조가 그대로 보험이 된다.
+var _TOPIS_POS_PATHS = ['getStationByPos'];
+var _TOPIS_UID_PATHS = ['getStationByUid'];
 // 성공한 경로를 기억해 다음부터 바로 사용
 function _topisPath(kind){
   try{
@@ -10721,25 +10751,85 @@ function _topisPath(kind){
   return null;
 }
 function _topisPathSave(kind, p){
-  try{ localStorage.setItem('topisPath_' + kind, p); }catch(e){}
+  try{
+    localStorage.setItem('topisPath_' + kind, p);
+    localStorage.removeItem('topisFail_' + kind);   // 살아났으면 실패 기록 해제
+  }catch(e){}
 }
+
+// ★ 전 경로 실패를 기억한다(음성 캐시).
+//   TOPIS 경로가 막혀 있으면 후보 4개를 매번 순차로 두드리느라 최대 수십 초가 날아가고,
+//   그동안 서울 화면이 멈춰 보인다. 한 번 전부 실패하면 _TOPIS_FAIL_TTL 동안은
+//   즉시 실패로 응답해 GBIS 폴백으로 바로 넘어가게 한다.
+//   TTL이 지나면 다시 한 번 시도하므로 TOPIS가 복구되면 자동으로 되돌아온다.
+var _TOPIS_FAIL_TTL = 6 * 60 * 60 * 1000;   // 6시간
+function _topisFailed(kind){
+  try{
+    var t = parseInt(localStorage.getItem('topisFail_' + kind), 10);
+    if(isFinite(t) && (Date.now() - t) < _TOPIS_FAIL_TTL) return true;
+  }catch(e){}
+  return false;
+}
+function _topisFailSave(kind){
+  try{ localStorage.setItem('topisFail_' + kind, String(Date.now())); }catch(e){}
+}
+// 사용자가 진단에서 강제로 재시도할 수 있도록 노출
+function _topisResetPaths(){
+  try{
+    ['pos','uid'].forEach(function(k){
+      localStorage.removeItem('topisPath_' + k);
+      localStorage.removeItem('topisFail_' + k);
+    });
+  }catch(e){}
+}
+window._topisResetPaths = _topisResetPaths;
 // 404(HTML) 응답인지
 function _topisNotFound(text){
   return /요청하신 페이지를 찾을 수 없|404|<html/i.test(String(text || ''));
+}
+// ★ 인증 실패(headerCd 7)인지 — 경로가 틀린 것과 반드시 구분해야 한다.
+//   2026-08-17 실측: getStationByPos·getStationByUid는 <ServiceResult> XML을 돌려준다.
+//   즉 경로 자체는 실재하고, 막힌 건 키다("Key인증실패: SERVICE KEY IS NOT REGISTERED
+//   ERROR.[인증모듈 에러코드(30)]"). 가이드에 명시된 arrive/getArrInfoByRouteAll도
+//   똑같이 7이 나오므로 서비스 전체가 인증 단계에서 막힌 상태.
+//   이걸 '성공'으로 보면 그 경로를 캐시해버려서, 매 조회마다 인증실패를 한 번씩
+//   왕복하고 실패 스킵(_topisFailSave)도 영영 발동하지 않는다.
+function _topisAuthFail(text){
+  var t = String(text || '');
+  if(/Key인증실패|SERVICE\s*KEY\s*IS\s*NOT\s*REGISTERED|인증모듈 에러코드/i.test(t)) return true;
+  var cd = (/<headerCd[^>]*>([\s\S]*?)<\/headerCd>/.exec(t) || [])[1];
+  return String(cd || '').trim() === '7';
 }
 
 // 여러 경로를 순차 시도해 XML 응답이 나오는 것을 채택
 function _topisTry(kind, paths, query, cb){
   var known = _topisPath(kind);
+  if(!known && _topisFailed(kind)){
+    // 최근에 전 경로가 실패했다 → 네트워크를 아예 두드리지 않고 즉시 폴백
+    cb(new Error('경로 탐색 실패 기록됨(잠시 후 재시도)'), null, null);
+    return;
+  }
   var list = known ? [known].concat(paths.filter(function(p){ return p !== known; })) : paths.slice();
   var i = 0;
   var next = function(){
-    if(i >= list.length){ cb(new Error('모든 경로 실패'), null, null); return; }
+    if(i >= list.length){
+      _topisFailSave(kind);
+      cb(new Error('모든 경로 실패'), null, null);
+      return;
+    }
     var p = list[i++];
     var url = 'http://ws.bus.go.kr/api/rest/stationinfo/' + p + '?' + query;
     _busProxyGetText(url, function(err, text){
       if(err){ next(); return; }
       if(_topisNotFound(text)){ console.log('[TOPIS] 경로 없음:', p); next(); return; }
+      // 인증 실패는 다음 경로를 시도해도 똑같다(키 문제라 경로와 무관) → 즉시 중단하고
+      // 실패를 기록해 일정 시간 TOPIS를 건너뛴다.
+      if(_topisAuthFail(text)){
+        console.log('[TOPIS] 인증 실패 — 경로는 유효, 키가 등록 안 됨:', p);
+        _topisFailSave(kind);
+        cb(new Error('인증 실패(headerCd 7) — 서울 서비스 키 미등록'), null, null);
+        return;
+      }
       if(String(text||'').indexOf('<ServiceResult') < 0 && String(text||'').indexOf('<itemList') < 0){
         console.log('[TOPIS] 예상 밖 응답:', p); next(); return;
       }
@@ -10752,6 +10842,7 @@ function _topisTry(kind, paths, query, cb){
 
 // 좌표 → 서울 정류장 목록 (arsId 포함)
 function _fetchNearStopsSeoul(lat, lng, callback){
+  // radius는 공식 스펙상 0~1500m. tmX=경도, tmY=위도(WGS84) — 이름이 헷갈리니 주의.
   _topisTry('pos', _TOPIS_POS_PATHS, 'tmX=' + lng + '&tmY=' + lat + '&radius=800', function(err, text, used){
     if(err || !text){ callback(err || new Error('no response'), []); return; }
     if(used) console.log('[TOPIS] 정류장 경로:', used);
@@ -10834,76 +10925,142 @@ window._seoulArrivals = _seoulArrivals;
 // ══════════════════════════════════════════════════════════════════════
 // ★ 경기 = 경기도 자체 GBIS v2 (apis.data.go.kr/6410000, 2026-08-17 신청·자동승인)
 //   TAGO의 경기 커버리지가 광역·직행버스 위주라 일반·마을버스가 누락되는 문제를
-//   경기도가 직접 배포하는 API로 보강한다. 좌표는 TOPIS와 달리 WGS84 그대로
-//   (x=경도,y=위도, TM변환 불필요), 응답은 format=json으로 요청 가능(TAGO와 동일
-//   {response:{header,body:{items:{item:[...]}}}} 포맷으로 가정 — 실제 필드명은
-//   응답 확인 전까지 여러 후보 키를 함께 시도한다).
+//   경기도가 직접 배포하는 API로 보강한다.
+//   ※ 공식 매뉴얼(gbis.go.kr 공유서비스) 확인 사항 — 추측 아님:
+//     · 좌표는 WGS84 그대로 (x=경도, y=위도). TM 변환 불필요. 반경은 500m 고정.
+//     · 응답 봉투가 TAGO와 다르다:
+//         {response:{msgHeader:{queryTime,resultCode,resultMessage},
+//                    msgBody:{busStationAroundList:[...] | busArrivalList:[...]}}}
+//       → TAGO의 response.body.items.item 파서를 그대로 쓰면 무조건 0건이 된다.
+//     · resultCode: 0 정상 / 1 시스템에러 / 2 필수파라미터 없음 / 4 결과 없음
+//     · 도착정보는 predictTimeSec1·2(초)와 predictTime1·2(분)를 함께 준다 → 초 우선.
 //   호스트가 TAGO와 같은 apis.data.go.kr라 워커 ALLOWED_HOSTS 추가 불필요.
 // ══════════════════════════════════════════════════════════════════════
 var _GG_BOX = [36.9, 38.3, 126.3, 127.9];   // 남,북,서,동 — 대략 경기 전역
-function _isGyeonggiPos(lat, lng){
+
+// ★ 박스로 '배제'하지 않고 '순서'로 푼다.
+//   기존 _SEOUL_BOX·인천 박스는 경계가 헐거워서 배제 조건으로 쓰면 구멍이 난다:
+//     · _SEOUL_BOX(126.76~127.19)가 고양 일산·광명 일부를 삼킨다
+//     · 인천 박스(126.34~126.81)가 부천·시흥 일부를 삼킨다
+//   박스를 조이면 다른 쪽이 새므로, 경기 박스 안이면 GBIS를 '언젠가 한 번은' 시도하되
+//   인천 박스 안일 때만 TAGO를 먼저 본다(인천은 TAGO가 정상이라 헛호출을 아낀다).
+//   경기 밖이면 GBIS가 resultCode 4(결과 없음)를 주므로 오작동하지 않는다.
+function _isGGSearchable(lat, lng){
   try{
-    if(typeof _isSeoulPos === 'function' && _isSeoulPos(lat, lng)) return false;
-    // 인천 박스와 겹치면 인천(TAGO가 이미 정상 처리 중이므로 그대로 둔다)
-    var ib = _TAGO_CITY_BOX[0];   // ['23', 37.29, 37.66, 126.34, 126.81]
-    if(lat>=ib[1] && lat<=ib[2] && lng>=ib[3] && lng<=ib[4]) return false;
     return lat >= _GG_BOX[0] && lat <= _GG_BOX[1] && lng >= _GG_BOX[2] && lng <= _GG_BOX[3];
   }catch(e){ return false; }
 }
+window._isGGSearchable = _isGGSearchable;
+
+// GBIS를 TAGO보다 먼저 볼 좌표인가 (= 인천 박스 밖의 경기권)
+function _isGGPreferred(lat, lng){
+  try{
+    if(!_isGGSearchable(lat, lng)) return false;
+    if(typeof _TAGO_CITY_BOX !== 'undefined'){
+      for(var i=0;i<_TAGO_CITY_BOX.length;i++){
+        var b = _TAGO_CITY_BOX[i];
+        if(b[0] !== '23') continue;                 // 인덱스 대신 코드로 인천을 찾는다
+        if(lat>=b[1] && lat<=b[2] && lng>=b[3] && lng<=b[4]) return false;
+      }
+    }
+    return true;
+  }catch(e){ return false; }
+}
+window._isGGPreferred = _isGGPreferred;
+
+// 확실히 경기(= 서울도 인천도 아님) — 진단 표기용
+function _isGyeonggiPos(lat, lng){
+  if(typeof _isSeoulPos === 'function' && _isSeoulPos(lat, lng)) return false;
+  return _isGGPreferred(lat, lng);
+}
 window._isGyeonggiPos = _isGyeonggiPos;
 
-function _ggErr(json){
+// 텍스트 응답 → JSON. 게이트웨이 인증 실패 시 XML/HTML이 오므로 그때는 null.
+function _ggParse(text){
+  var t = String(text || '').trim();
+  if(!t || t.charAt(0) !== '{') return null;
+  try{ return JSON.parse(t); }catch(e){ return null; }
+}
+// resultCode 해석 — 정상(0)·결과없음(4)은 오류로 보지 않는다
+function _ggErr(json, text){
   try{
-    var hd = json && json.response && json.response.header;
-    if(hd && String(hd.resultCode) !== '0' && String(hd.resultCode).toUpperCase() !== 'INFO-0'){
-      return '코드 ' + hd.resultCode + (hd.resultMsg ? (' — ' + hd.resultMsg) : '');
+    if(!json){
+      var t = String(text || '');
+      if(/SERVICE_?KEY_?IS_?NOT_?REGISTERED|등록되지 않은 키|SERVICE ACCESS DENIED/i.test(t)) return '인증키 미등록/미승인';
+      if(/LIMITED_NUMBER_OF_SERVICE_REQUESTS|일일 트래픽/i.test(t)) return '일일 호출 한도 초과';
+      if(/<html|<!DOCTYPE/i.test(t)) return '엔드포인트 응답이 JSON이 아님(경로/키 확인)';
+      return t ? ('응답 해석 실패: ' + t.replace(/\s+/g,' ').slice(0,80)) : '응답 없음';
     }
+    var hd = (json.response && json.response.msgHeader) || json.msgHeader || null;
+    if(!hd) return '';
+    var cd = String(hd.resultCode);
+    if(cd === '0' || cd === '4') return '';        // 4 = 결과 없음(정상 응답)
+    return '코드 ' + cd + (hd.resultMessage ? (' — ' + hd.resultMessage) : '');
   }catch(e){}
   return '';
 }
-function _ggItems(json){
+// msgBody에서 목록 꺼내기 (문서 표기와 실제 키가 갈려 둘 다 받는다)
+function _ggList(json, keys){
   try{
-    var body = json.response.body;
-    var items = body.items;
-    if(items && items.item !== undefined) items = items.item;
-    if(!items) return [];
-    if(!Array.isArray(items)) items = [items];
-    return items;
+    var body = (json.response && json.response.msgBody) || json.msgBody;
+    if(!body) return [];
+    var v = null;
+    for(var i=0;i<keys.length;i++){
+      if(body[keys[i]] !== undefined && body[keys[i]] !== null){ v = body[keys[i]]; break; }
+    }
+    if(v === null){                                 // 키 이름이 바뀌어도 첫 배열을 집는다
+      var ks = Object.keys(body);
+      for(var j=0;j<ks.length;j++){ if(Array.isArray(body[ks[j]])){ v = body[ks[j]]; break; } }
+    }
+    if(v === null || v === undefined) return [];
+    if(!Array.isArray(v)) v = [v];                  // 결과 1건이면 객체로 오는 경우
+    return v;
   }catch(e){ return []; }
 }
-// 필드명이 아직 실측 전이라 흔한 후보 키를 순서대로 확인
-function _ggPick(it, keys){
-  for(var i=0;i<keys.length;i++){ if(it[keys[i]] !== undefined && it[keys[i]] !== null && it[keys[i]] !== '') return it[keys[i]]; }
-  return undefined;
+// 노선유형코드 → 표시·정렬용 이름 (매뉴얼 routeTypeCd 표)
+function _ggRouteType(cd){
+  var m = { 11:'직행좌석', 12:'좌석', 13:'일반', 14:'광역급행', 15:'따복', 16:'순환',
+            21:'직행좌석', 22:'좌석', 23:'일반', 30:'마을',
+            41:'고속시외', 42:'좌석시외', 43:'시외', 51:'리무진공항', 52:'좌석공항', 53:'공항' };
+  return m[parseInt(cd, 10)] || '';
 }
+// ★ 빈자리수(remainSeatCnt)는 좌석형 계열에서만 의미가 있다.
+//   2026-08-17 실측: 일반형(13)·마을(30) 노선도 remainSeatCnt1을 0으로 채워 보낸다.
+//   그대로 믿으면 만석 아닌 일반버스를 '빈자리 0'으로 표시하게 되므로 유형으로 걸러낸다.
+//   (매뉴얼 명시 제공 유형: 11,12,14,16,17,21,22)
+var _GG_SEAT_TYPES = { 11:1, 12:1, 14:1, 16:1, 17:1, 21:1, 22:1 };
+// 도착예정이 이보다 멀면 '도착정보'로서 의미가 없어 표시하지 않는다.
+//   실측에 predictTime1=120(분) / predictTimeSec1=7209 같은 값이 섞여 나온다.
+var _GG_MAX_ARR_SEC = 3600;
 
-// 좌표 → 경기 정류장 목록(반경 500m 고정, API 스펙)
+// 좌표 → 경기 정류장 목록 (반경 500m 고정)
 function _fetchNearStopsGG(lat, lng, callback){
   var url = 'https://apis.data.go.kr/6410000/busstationservice/v2/getBusStationAroundListv2'
     + '?x=' + lng + '&y=' + lat + '&format=json';
-  if(typeof _busProxyGet !== 'function'){ callback(new Error('no proxy'), []); return; }
-  _busProxyGet(url, function(err, data){
-    window._ggLastRawStops = data;   // 진단용(필드명 확인) 원본 보관
+  if(typeof _busProxyGetText !== 'function'){ callback(new Error('no proxy'), []); return; }
+  _busProxyGetText(url, function(err, text){
     if(err){ callback(err, []); return; }
     try{
-      var e = _ggErr(data);
+      var data = _ggParse(text);
+      window._ggLastRawStops = String(text || '').slice(0, 400);   // 진단용
+      var e = _ggErr(data, text);
       if(e){ console.log('[GBIS 정류장]', e); callback(new Error(e), []); return; }
-      var items = _ggItems(data);
+      var items = _ggList(data, ['busStationAroundList', 'busStationList']);
       var stops = [];
       items.forEach(function(it){
-        var id = _ggPick(it, ['stationId','stationid','STATION_ID','id']);
-        var nm = _ggPick(it, ['stationName','stationNm','STATION_NM','stationNM','name']);
-        var la = parseFloat(_ggPick(it, ['y','gpsY','Y','gpslati']));
-        var ln = parseFloat(_ggPick(it, ['x','gpsX','X','gpslong']));
+        var id = it.stationId;
+        var la = parseFloat(it.y), ln = parseFloat(it.x);
         if(!id || isNaN(la) || isNaN(ln)) return;
+        var d = parseFloat(it.distance);
         stops.push({
-          nodenm:    nm || '',
-          nodeid:    'GG:' + id,
+          nodenm:    String(it.stationName || ''),
+          nodeid:    'GG:' + id,             // 내부 식별자(도착정보는 stationId로 조회)
           stationId: String(id),
-          citycode:  '',            // 경기는 시·군별 코드가 갈려 GBIS 경로에선 안 씀
+          nodeno:    it.mobileNo ? String(it.mobileNo) : '',
+          citycode:  '',                     // 경기는 시·군별로 갈려 GBIS 경로에선 안 씀
           gpslati:   la,
           gpslong:   ln,
-          dist:      _distM(lat, lng, la, ln),
+          dist:      isFinite(d) ? d : _distM(lat, lng, la, ln),
           _src:      'gbis'
         });
       });
@@ -10914,31 +11071,65 @@ function _fetchNearStopsGG(lat, lng, callback){
 }
 window._fetchNearStopsGG = _fetchNearStopsGG;
 
-// 경기 정류장 도착정보 → TAGO 형식으로 변환
+// 경기 정류장 도착정보 → 앱 공통(TAGO) 형식으로 변환
+//   TAGO 쪽 _busArrCache와 같은 감각으로 20초 캐시를 둔다(프리페치·재렌더 중복 호출 방지).
+var _ggArrCache = {};                 // stationId → { ts, rows }
+var _GG_ARR_FRESH = 20000;
 function _ggArrivals(stop, cb){
-  var sid = stop.stationId || (String(stop.nodeid || '').indexOf('GG:') === 0 ? String(stop.nodeid).slice(3) : '');
+  var sid = stop.stationId
+         || (String(stop.nodeid || '').indexOf('GG:') === 0 ? String(stop.nodeid).slice(3) : '');
   if(!sid){ cb([]); return; }
+  var c = _ggArrCache[sid];
+  if(c && (Date.now() - c.ts) < _GG_ARR_FRESH){ cb(c.rows); return; }
   var url = 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2'
     + '?stationId=' + encodeURIComponent(sid) + '&format=json';
-  if(typeof _busProxyGet !== 'function'){ cb([]); return; }
-  _busProxyGet(url, function(err, data){
-    window._ggLastRawArr = data;     // 진단용(필드명 확인) 원본 보관
+  if(typeof _busProxyGetText !== 'function'){ cb([]); return; }
+  _busProxyGetText(url, function(err, text){
     if(err){ cb([]); return; }
     try{
-      var e = _ggErr(data);
+      var data = _ggParse(text);
+      window._ggLastRawArr = String(text || '').slice(0, 400);     // 진단용
+      var e = _ggErr(data, text);
       if(e){ console.log('[GBIS 도착]', e); cb([]); return; }
-      var items = _ggItems(data);
+      var items = _ggList(data, ['busArrivalList']);
       var rows = [];
       items.forEach(function(it){
-        var rt  = _ggPick(it, ['routeName','routeNm','ROUTE_NM','routeTypeName','routeNumber','routeId']);
-        var rid = _ggPick(it, ['routeId','ROUTE_ID','routeid']);
-        if(!rt) return;
-        var t1 = parseFloat(_ggPick(it, ['predictTime1','arrTime1','PREDICT_TIME1','locationNo1']));
-        var t2 = parseFloat(_ggPick(it, ['predictTime2','arrTime2','PREDICT_TIME2','locationNo2']));
-        // 응답이 '분' 단위일 가능성이 높아 60을 곱해 초로 통일(추후 실측 응답으로 보정 필요)
-        if(isFinite(t1) && t1 > 0) rows.push({ routeno: rt, routeid: rid, arrtime: Math.round(t1*60), arrprevstationcnt: null, _src:'gbis' });
-        if(isFinite(t2) && t2 > 0) rows.push({ routeno: rt, routeid: rid, arrtime: Math.round(t2*60), arrprevstationcnt: null, _src:'gbis' });
+        var rt = it.routeName;
+        if(rt === undefined || rt === null || rt === '') return;
+        if(String(it.flag || '') === 'STOP') return;               // 운행종료는 표시하지 않음
+        // 초 단위(predictTimeSec)가 있으면 그대로, 없으면 분 단위를 초로 환산
+        var sec = function(s, m){
+          var v = parseInt(s, 10);
+          if(isFinite(v) && v > 0) return v;
+          var mm = parseInt(m, 10);
+          return (isFinite(mm) && mm > 0) ? mm * 60 : 0;
+        };
+        var s1 = sec(it.predictTimeSec1, it.predictTime1);
+        var s2 = sec(it.predictTimeSec2, it.predictTime2);
+        if(s1 > _GG_MAX_ARR_SEC) s1 = 0;              // 1시간 넘는 예측은 버림
+        if(s2 > _GG_MAX_ARR_SEC) s2 = 0;
+        if(s1 <= 0 && s2 <= 0) return;
+        if(s1 <= 0){ s1 = s2; s2 = 0; }               // 첫 차만 잘렸으면 두번째를 앞으로
+        var n1 = parseInt(it.locationNo1, 10), n2 = parseInt(it.locationNo2, 10);
+        var tp = parseInt(it.routeTypeCd, 10);
+        var seat = parseInt(it.remainSeatCnt1, 10);
+        rows.push({
+          routeno:            String(rt),
+          routeid:            it.routeId !== undefined ? String(it.routeId) : '',
+          routetp:            _ggRouteType(it.routeTypeCd),
+          arrtime:            s1,
+          arrprevstationcnt:  isFinite(n1) ? n1 : null,
+          arrtime2:           s2,
+          arrprevstationcnt2: isFinite(n2) ? n2 : null,
+          vehicletp:          (parseInt(it.lowPlate1, 10) === 1) ? '저상버스' : '',
+          remainSeatCnt:      (_GG_SEAT_TYPES[tp] && isFinite(seat) && seat >= 0) ? seat : null,
+          crowded:            (parseInt(it.crowded1, 10) > 0) ? parseInt(it.crowded1, 10) : null,
+          staOrder:           it.staOrder,
+          routeDestName:      it.routeDestName || '',
+          _src:               'gbis'
+        });
       });
+      if(rows.length) _ggArrCache[sid] = { ts: Date.now(), rows: rows };
       cb(rows);
     }catch(e2){ console.error('[도착 GBIS 파싱]', e2); cb([]); }
   });
@@ -10948,12 +11139,13 @@ window._ggArrivals = _ggArrivals;
 // 지역별 도착정보 보강 — 서울만 TOPIS, 나머지는 TAGO가 담당
 function _arrRegionFallback(cityCode, stop, cb){
   try{
+    // GBIS 먼저 — 서울 좌표의 GBIS 정류장이 cityCode '11'로 추정돼 TOPIS로 새는 것 방지
+    var isGG = stop._src === 'gbis' || String(stop.nodeid || '').indexOf('GG:') === 0;
+    if(isGG && typeof _ggArrivals === 'function'){ _ggArrivals(stop, cb); return; }
     var isSeoul = (String(cityCode) === '11')
                 || stop._src === 'topis'
                 || String(stop.nodeid || '').indexOf('SEOUL:') === 0;
     if(isSeoul){ _seoulArrivals(stop, cb); return; }
-    var isGG = stop._src === 'gbis' || String(stop.nodeid || '').indexOf('GG:') === 0;
-    if(isGG && typeof _ggArrivals === 'function'){ _ggArrivals(stop, cb); return; }
     cb([]);
   }catch(e){ cb([]); }
 }
@@ -11018,6 +11210,23 @@ function _busFindPeers(stop, cb){
 function _busArrFetchMerged(cityCode, stop){
   var nodeId = stop.nodeId || stop.nodeid;
 
+  // ★ 판정 순서 주의 — 반드시 GBIS를 먼저 본다.
+  //   GBIS 주변정류소는 서울 정류소도 돌려주는데(2026-08-17 실측), 그 정류장의
+  //   좌표를 _tagoCityCode에 넣으면 서울 박스에 걸려 cityCode가 '11'이 된다.
+  //   서울 분기를 먼저 두면 GBIS 정류장이 TOPIS 경로로 빨려들어가고, 거기엔
+  //   arsId가 없어서 무조건 빈 배열이 나온다(= 서울 정류장 카드가 통째로 빔).
+  var isGG = (stop._src === 'gbis') || String(nodeId || '').indexOf('GG:') === 0;
+  if(isGG && typeof _ggArrivals === 'function'){
+    return new Promise(function(resolve){
+      var done = false;
+      var to = setTimeout(function(){ if(!done){ done = true; resolve([]); } }, 12000);
+      _ggArrivals(stop, function(rows){
+        if(done) return; done = true; clearTimeout(to);
+        resolve(rows || []);
+      });
+    });
+  }
+
   // ★ 서울 정류장(TOPIS 출처)은 TAGO로 조회할 수 없다 → 바로 TOPIS
   var isSeoul = (stop._src === 'topis')
              || String(nodeId || '').indexOf('SEOUL:') === 0
@@ -11027,19 +11236,6 @@ function _busArrFetchMerged(cityCode, stop){
       var done = false;
       var to = setTimeout(function(){ if(!done){ done = true; resolve([]); } }, 12000);
       _seoulArrivals(stop, function(rows){
-        if(done) return; done = true; clearTimeout(to);
-        resolve(rows || []);
-      });
-    });
-  }
-
-  // ★ 경기 정류장(GBIS 출처)은 TAGO로 조회할 수 없다 → 바로 GBIS
-  var isGG = (stop._src === 'gbis') || String(nodeId || '').indexOf('GG:') === 0;
-  if(isGG && typeof _ggArrivals === 'function'){
-    return new Promise(function(resolve){
-      var done = false;
-      var to = setTimeout(function(){ if(!done){ done = true; resolve([]); } }, 12000);
-      _ggArrivals(stop, function(rows){
         if(done) return; done = true; clearTimeout(to);
         resolve(rows || []);
       });
@@ -11113,8 +11309,8 @@ function _loadMapBusArrival(stop, cardIdx, _try) {
   if(!cityCode) cityCode = stop.cityCode || stop.citycode || '';
   var nodeId   = stop.nodeId   || stop.nodeid   || '';
   // 서울(TOPIS)·경기(GBIS) 정류장은 cityCode 없이도 arsId/stationId로 조회한다
-  var _isSeoulStop = (stop._src === 'topis') || String(nodeId).indexOf('SEOUL:') === 0 || String(cityCode) === '11';
   var _isGGStop = (stop._src === 'gbis') || String(nodeId).indexOf('GG:') === 0;
+  var _isSeoulStop = !_isGGStop && ((stop._src === 'topis') || String(nodeId).indexOf('SEOUL:') === 0 || String(cityCode) === '11');
   if(!nodeId || (!cityCode && !_isSeoulStop && !_isGGStop)){
     _busShowEmptyRow(cardIdx, '정류장 정보가 불완전해요', stop);
     return;
@@ -11147,6 +11343,12 @@ function _loadMapBusArrival(stop, cardIdx, _try) {
           return;
         }
         // ★ 여전히 비었으면 정류장 ID 보정 (우리 DB ID가 TAGO와 다른 경우)
+        //   단, 서울(TOPIS)·경기(GBIS) 정류장은 TAGO에 애초에 없는 ID라 보정 시도가
+        //   무의미할 뿐 아니라 stop.nodeid를 TAGO ID로 덮어써 출처가 뒤섞인다 → 건너뛴다.
+        if(_isSeoulStop || _isGGStop){
+          _busShowEmptyRow(cardIdx, '운행 정보 없음', stop);
+          return;
+        }
         if(!stop._idFixed){
           stop._idFixed = 1;
           var origId = stop.nodeId || stop.nodeid;
