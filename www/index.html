@@ -4310,6 +4310,51 @@ function _fetchBusLocations(cityCode, routeId, cb){
   });
 }
 
+// ②-b 경기 GBIS 노선별 실시간 버스 위치
+//   공식 매뉴얼(gbis.go.kr, cmd=mBusLocation) 확인:
+//     GET buslocationservice/v2/getBusLocationListv2?routeId=&format=json
+//     msgBody.busLocationList[] = stationId / stationSeq / plateNo / vehId
+//                                 / lowPlate(0일반 1저상 2이층 5전세 6예약 7트롤리)
+//                                 / crowded(1여유~4매우혼잡) / remainSeatCnt(-1 정보없음)
+//                                 / stateCd(0교차로통과 1정류소도착 2정류소출발) / taglessCd
+//   _renderBusRoute가 버스 객체에서 쓰는 건 nodeord와 vehicleno 둘뿐이라 그 이름으로 맞춘다.
+function _fetchBusLocationsGG(routeId, cb){
+  var rid = String(routeId || '').replace(/^GG:/, '');
+  if(!rid){ cb(new Error('routeId 없음'), []); return; }
+  var url = 'https://apis.data.go.kr/6410000/buslocationservice/v2/getBusLocationListv2'
+    + '?routeId=' + encodeURIComponent(rid) + '&format=json';
+  if(typeof _busProxyGetText !== 'function'){ cb(new Error('no proxy'), []); return; }
+  _busProxyGetText(url, function(err, text){
+    if(err){ cb(err, []); return; }
+    try{
+      var data = _ggParse(text);
+      window._ggLastRawPos = String(text || '').slice(0, 400);   // 진단용
+      var e = _ggErr(data, text);
+      if(e){ console.log('[GBIS 위치]', e); cb(new Error(e), []); return; }
+      var items = _ggList(data, ['busLocationList']);
+      var out = [];
+      items.forEach(function(it){
+        var seq = parseInt(it.stationSeq, 10);
+        if(!isFinite(seq)) return;
+        var seat = parseInt(it.remainSeatCnt, 10);
+        out.push({
+          nodeord:       seq,
+          vehicleno:     String(it.plateNo || ''),
+          nodeid:        (it.stationId !== undefined && it.stationId !== null) ? ('GG:' + it.stationId) : '',
+          vehId:         it.vehId,
+          vehicletp:     (parseInt(it.lowPlate, 10) === 1) ? '저상버스' : '',
+          crowded:       (parseInt(it.crowded, 10) > 0) ? parseInt(it.crowded, 10) : null,
+          remainSeatCnt: (isFinite(seat) && seat >= 0) ? seat : null,
+          stateCd:       it.stateCd,
+          _src:          'gbis'
+        });
+      });
+      cb(null, out);
+    }catch(e2){ console.error('[위치 GBIS 파싱]', e2); cb(e2, []); }
+  });
+}
+window._fetchBusLocationsGG = _fetchBusLocationsGG;
+
 // 버스 행 탭 → 노선 추적 모달 열기
 function openBusRoute(cityCode, routeId, routeNo, routeTp, originStop){
   if(!routeId || routeId === 'undefined' || routeId === ''){
@@ -4360,8 +4405,15 @@ function _loadBusRouteData(cityCode, routeId, src){
     src = (_m && _m.dataset) ? (_m.dataset.src || '') : '';
   }
 
-  var done = function(stations){
-    // 버스 위치는 TAGO 전용이라 경기·서울 노선에서는 비어 있을 수 있다(정류장만 표시).
+  var done = function(stations, viaGG){
+    // 정류장을 어디서 받았는지에 맞춰 버스 위치도 같은 출처에서 가져온다.
+    //   (TAGO는 cityCode가 필수라 경기 노선에서는 애초에 조회가 안 된다)
+    if(viaGG && typeof _fetchBusLocationsGG === 'function'){
+      _fetchBusLocationsGG(routeId, function(e4, buses){
+        _renderBusRoute(stations, buses || []);
+      });
+      return;
+    }
     _fetchBusLocations(cityCode, routeId, function(err2, buses){
       _renderBusRoute(stations, buses || []);
     });
@@ -4381,7 +4433,7 @@ function _loadBusRouteData(cityCode, routeId, src){
   var tryGG = (src === 'gbis') || !cityCode;
   if(tryGG && typeof _fetchRouteStationsGG === 'function'){
     _fetchRouteStationsGG(routeId, function(e3, s3){
-      if(!e3 && s3 && s3.length){ done(s3); return; }
+      if(!e3 && s3 && s3.length){ done(s3, true); return; }
       console.log('[노선] GBIS 실패/0건 → TAGO 시도');
       if(!cityCode){ fail(); return; }   // cityCode가 없으면 TAGO는 시도할 수 없다
       tago();
@@ -7702,11 +7754,25 @@ function _estimateTimeBasedPos(){
     return { fromIdx: timed[0].idx, toIdx: timed[0].idx, ratio: 0,
              curLat: timed[0].lat, curLng: timed[0].lng };
   }
+  // ★ 확정 범위 안에서만 위치를 반환한다 (미커버 노선 도착 확정 게이트)
+  var _emit = function(j, r){
+    if(j >= timed.length - 1){
+      var L = timed[timed.length-1];
+      return { fromIdx: L.idx, toIdx: L.idx, ratio: 1, curLat: L.lat, curLng: L.lng };
+    }
+    var a = timed[j], b = timed[j+1];
+    return {
+      fromIdx: a.idx, toIdx: b.idx, ratio: r,
+      curLat: a.lat + (b.lat - a.lat) * r,
+      curLng: a.lng + (b.lng - a.lng) * r
+    };
+  };
+
   // 도착 후
   var last = timed[timed.length-1];
   if(nowMin >= last.min){
-    return { fromIdx: last.idx, toIdx: last.idx, ratio: 1,
-             curLat: last.lat, curLng: last.lng };
+    var g0 = _rtGateProgress(timed, nowMin, timed.length-1, 1);
+    return _emit(g0.j, g0.ratio);
   }
   // 두 노드 사이 보간
   for(var j=0;j<timed.length-1;j++){
@@ -7714,11 +7780,8 @@ function _estimateTimeBasedPos(){
     if(nowMin >= a.min && nowMin <= b.min){
       var span = (b.min - a.min) || 1;
       var r = _rtDwellRatio(nowMin - a.min, span, _rtDwellMin(a.nd || _transitNodeData[a.idx]));  // 미커버 노선 30초 정차 반영
-      return {
-        fromIdx: a.idx, toIdx: b.idx, ratio: r,
-        curLat: a.lat + (b.lat - a.lat) * r,
-        curLng: a.lng + (b.lng - a.lng) * r
-      };
+      var g = _rtGateProgress(timed, nowMin, j, r);
+      return _emit(g.j, g.ratio);
     }
   }
   return null;
@@ -7731,10 +7794,49 @@ window._estimateTimeBasedPos = _estimateTimeBasedPos;
 //   → 역 도착 후 30초간은 출발역에 고정(정차)했다가 이후 다음 역으로 이동시킨다.
 //   실시간 커버 노선(서울1~9호선 등)은 API가 위치를 직접 보정하므로 정차 미적용.
 var _RT_NOCOVER_DWELL_MIN = 0.5;   // 30초
+function _rtNoCover(nd){
+  if(!nd || !nd.isSub) return false;
+  if(typeof _rtCovered==='function' && _rtCovered(nd.lineName||'')) return false;  // 커버 노선=API 보정
+  return true;
+}
 function _rtDwellMin(nd){
-  if(!nd || !nd.isSub) return 0;
-  if(typeof _rtCovered==='function' && _rtCovered(nd.lineName||'')) return 0;  // 커버 노선=API 보정
-  return _RT_NOCOVER_DWELL_MIN;
+  return _rtNoCover(nd) ? _RT_NOCOVER_DWELL_MIN : 0;
+}
+
+// ── 도착 확정 게이트 (실시간 열차위치 미커버 노선 전용) ───────────────
+//   문제: 시각표만으로 그리면 예정시각을 1초라도 넘기는 순간 마커가 그 역을
+//         '지나간' 것으로 처리된다. 열차가 몇 초만 늦어도 아직 역에 닿지 않았는데
+//         마커는 이미 다음 역으로 가 있어, 사용자가 내릴 역을 지나친 줄 안다.
+//   해결: 어떤 역을 '지났다'고 인정하려면 도착이 확정돼야 한다.
+//         확정 근거 ① GPS가 그 역(또는 그 이후)에 도달 ② 예정 도착시각 + 유예 경과.
+//         확정 전이면 그 역 바로 앞(_RT_HOLD_RATIO)에 멈춰 세운다.
+//   ★ 백그라운드 안전: 아래 판정은 누적 카운터를 쓰지 않고 매번 벽시계(now)와
+//     시각표·GPS 진행도만으로 다시 계산한다. 앱이 잠들었다 깨어나도 그 시점
+//     기준으로 곧바로 같은 답이 나오므로 별도 복구 로직이 필요 없다.
+var _RT_ARRIVE_GRACE_MIN = 0.5;    // 도착 확정 유예 30초
+var _RT_HOLD_RATIO       = 0.97;   // 확정 전 대기 위치(역 직전)
+
+// timed[i] 역의 도착이 확정되었는가
+function _rtArriveConfirmed(t, nowMin){
+  if(!t) return true;
+  if(!_rtNoCover(t.nd || (typeof _transitNodeData !== 'undefined' ? _transitNodeData[t.idx] : null))) return true;
+  var gi = (window._gpsMaxIdx == null ? -1 : window._gpsMaxIdx);
+  if(gi >= t.idx) return true;                       // ① GPS가 이미 그 역 이상 진행
+  return nowMin >= t.min + _RT_ARRIVE_GRACE_MIN;      // ② 예정시각 + 유예 경과
+}
+
+// 확정된 범위 안으로 진행 위치를 되돌린다.
+//   반환: { j, ratio } — timed[j] → timed[j+1] 구간과 그 안에서의 비율
+function _rtGateProgress(timed, nowMin, j, ratio){
+  var maxJ = 0;
+  for(var i = 1; i < timed.length; i++){
+    if(_rtArriveConfirmed(timed[i], nowMin)) maxJ = i; else break;
+  }
+  if(j <= maxJ) return { j: j, ratio: ratio };
+  // 미확정 역을 지나쳐 있었다 → 그 역 직전에서 대기.
+  //   ratio는 '지나쳐 간 뒤 구간'의 값이라 여기선 쓰면 안 된다(정차 모델 탓에 0이 되어
+  //   마커가 오히려 뒤로 튄다). 되돌린 구간의 끝 근처로 고정한다.
+  return { j: maxJ, ratio: _RT_HOLD_RATIO };
 }
 // 경과분(elapsed)·구간분(span)·정차분(dwell) → 진행률. 정차 동안은 0(역에 고정), 이후 이동.
 function _rtDwellRatio(elapsedMin, spanMin, dwellMin){
@@ -8510,14 +8612,26 @@ function _estimateTimelinePos(){
   var nowMin = now.getHours()*60 + now.getMinutes() + now.getSeconds()/60;
   if(nowMin < timed[0].min - 60) nowMin += 1440;
   if(nowMin <= timed[0].min) return { fromIdx: timed[0].idx, toIdx: timed[0].idx, ratio: 0 };
+  // ★ 확정 범위 안에서만 (미커버 노선 도착 확정 게이트) — _estimateTimeBasedPos와 동일 규칙
+  var _emitT = function(j, r){
+    if(j >= timed.length - 1){
+      var L = timed[timed.length-1];
+      return { fromIdx: L.idx, toIdx: L.idx, ratio: 1 };
+    }
+    return { fromIdx: timed[j].idx, toIdx: timed[j+1].idx, ratio: r };
+  };
   var last = timed[timed.length-1];
-  if(nowMin >= last.min) return { fromIdx: last.idx, toIdx: last.idx, ratio: 1 };
+  if(nowMin >= last.min){
+    var g0 = _rtGateProgress(timed, nowMin, timed.length-1, 1);
+    return _emitT(g0.j, g0.ratio);
+  }
   for(var j=0;j<timed.length-1;j++){
     var a = timed[j], b = timed[j+1];
     if(nowMin >= a.min && nowMin <= b.min){
       var span = (b.min - a.min) || 1;
       var r = _rtDwellRatio(nowMin - a.min, span, _rtDwellMin(_transitNodeData[a.idx]));  // 미커버 노선 30초 정차 반영
-      return { fromIdx: a.idx, toIdx: b.idx, ratio: r };
+      var g = _rtGateProgress(timed, nowMin, j, r);
+      return _emitT(g.j, g.ratio);
     }
   }
   return null;
@@ -9885,16 +9999,47 @@ function _busLmSave(nodeId, label){
   } catch(err){}
 }
 // 노선 경유지 영구 캐시 (7일): 재조회 없이 즉시 계산
-function _busRouteStnsCached(cityCode, rid, cb){
-  var key = 'busRt_' + cityCode + '_' + rid;
+// ★ 경유정류소를 '출처에 맞는 API'로 가져오는 공용 진입점.
+//   방면 라벨((OO역 방향))과 도착행 방향(→ 다음정류소)이 둘 다 이 결과를 쓰므로,
+//   여기 한 곳만 GBIS 대응하면 두 표시가 같이 살아난다.
+//   GG 판단: nodeid가 'GG:'로 시작하거나 cityCode가 비어 있으면 경기로 본다
+//   (TAGO는 cityCode 없이는 조회 자체가 불가하므로 오판해도 손해가 없다).
+function _isGGRouteHint(cityCode, anyNodeId){
+  if(String(anyNodeId || '').indexOf('GG:') === 0) return true;
+  return !cityCode;
+}
+function _routeStationsFor(cityCode, routeId, ggHint, cb){
+  if(ggHint && typeof _fetchRouteStationsGG === 'function'){
+    _fetchRouteStationsGG(routeId, function(e, st){
+      if(!e && st && st.length){ cb(null, st); return; }
+      if(!cityCode){ cb(e || new Error('0건'), []); return; }   // TAGO 폴백 불가
+      _fetchRouteStations(cityCode, routeId, cb);
+    });
+    return;
+  }
+  _fetchRouteStations(cityCode, routeId, cb);
+}
+window._routeStationsFor = _routeStationsFor;
+
+function _busRouteStnsCached(cityCode, rid, cb, ggHint){
+  var key = 'busRt_' + (ggHint ? 'gg' : '') + cityCode + '_' + rid;
   try {
     var e = JSON.parse(localStorage.getItem(key) || 'null');
     if(e && Date.now() - e.t < 7 * 24 * 3600 * 1000){ cb(null, e.s); return; }
   } catch(err){}
-  _fetchRouteStations(cityCode, rid, function(err, stations){
+  _routeStationsFor(cityCode, rid, ggHint, function(err, stations){
     if(!err && stations && stations.length){
       try {
-        var slim = stations.map(function(s){ return { nodeid: String(s.nodeid || s.nodeId || ''), nodenm: String(s.nodenm || s.nodeNm || '') }; });
+        // ★ updowncd를 반드시 함께 저장한다.
+        //   예전에는 nodeid/nodenm만 캐시해서, 캐시가 살아있는 동안 방면 판정이
+        //   회차 지점을 넘어 반대 방향 역('아라역'인데 '완정역')을 집었다.
+        var slim = stations.map(function(s){
+          return {
+            nodeid:   String(s.nodeid || s.nodeId || ''),
+            nodenm:   String(s.nodenm || s.nodeNm || ''),
+            updowncd: (s.updowncd == null ? null : s.updowncd)
+          };
+        });
         localStorage.setItem(key, JSON.stringify({ t: Date.now(), s: slim }));
         cb(null, slim); return;
       } catch(e2){}
@@ -9909,6 +10054,9 @@ function _busFindLandmark(stop, arrivals, cb){
   if(cached !== undefined){ cb(cached); return; }
   if(!arrivals || !arrivals.length || typeof _fetchRouteStations !== 'function'){ cb(''); return; }
   var cityCode = (typeof _tagoCityCode==='function' ? _tagoCityCode(stop) : '') || stop.citycode || stop.cityCode || '';
+  // 경기(GBIS) 정류장이면 경유정류소도 GBIS에서 받아야 방면이 나온다
+  var _ggHint = (stop._src === 'gbis') || _isGGRouteHint(cityCode, nodeId)
+             || !!(arrivals[0] && arrivals[0]._src === 'gbis');
   var norm = function(s){ return String(s || '').replace(/\s+/g, '').split('(')[0]; };
   var myNm = norm(stop.name || stop.nodenm || stop.nodeName || '');
   var routes = [];
@@ -9975,7 +10123,7 @@ function _busFindLandmark(stop, arrivals, cb){
         _busLmSave(nodeId, label);
         cb(label);
       }
-    });
+    }, _ggHint);
   });
 }
 
@@ -10061,7 +10209,9 @@ function _fetchBusNextStop(cityCode, routeId, curNodeId, cb){
   var key = cityCode + '_' + routeId + '_' + curNodeId;
   if(window._busNextCache[key] !== undefined){ cb(window._busNextCache[key]); return; }
   if(typeof _fetchRouteStations !== 'function'){ cb(''); return; }
-  _fetchRouteStations(cityCode, routeId, function(err, stations){
+  // 경기(GBIS) 정류장이면 경유정류소도 GBIS에서 받는다 (TAGO는 cityCode가 없어 조회 불가)
+  var ggHint = (typeof _isGGRouteHint === 'function') && _isGGRouteHint(cityCode, curNodeId);
+  _routeStationsFor(cityCode, routeId, ggHint, function(err, stations){
     var next = '';
     if(!err && stations && stations.length){
       var idx = -1;
