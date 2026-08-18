@@ -23039,9 +23039,23 @@ function _classifyTopic(post){
   if(/사고|사건|목격|쓰러|싸움|폭행|화재|연기/.test(txt)) return '사건';
   // 카테고리 폴백
   if(post && post.cat==='현장제보') return '사건';
-  if(post && post.cat==='뉴스') return '연장';
   return '일상';
 }
+
+// ★ 엄격 판정 — 본문에서 주제 키워드가 실제로 잡혔을 때만 주제를 돌려준다.
+//   _classifyTopic은 아무것도 안 걸리면 '일상'을 돌려주는데, 그 '일상' 풀이
+//   뉴스·제보 같은 전혀 다른 글에도 붙으면서 "글과 상관없는 댓글"이 됐다.
+//   여기서 null이면 자동 댓글을 아예 달지 않는다.
+function _classifyTopicStrict(post){
+  var txt = ((post && post.title) || '') + ' ' + ((post && post.body) || '');
+  if(!txt.trim()) return null;
+  var t = _classifyTopic(post);
+  if(t !== '일상') return t;
+  // '일상'으로 떨어진 글은 일상 키워드가 실제로 있을 때만 인정
+  return /출근|퇴근|피곤|졸리|자리|앉아|서서|이어폰|배고|점심|저녁|주말|월요일|금요일/.test(txt)
+       ? '일상' : null;
+}
+window._classifyTopicStrict = _classifyTopicStrict;
 
 // 대댓글 템플릿 (댓글에 달리는 답글)
 var _REPLY_TEMPLATES = [
@@ -23087,7 +23101,7 @@ function _makeCmt(offsetMs, topicPool, usedIdx){
       text = _rnd(topicPool);
     }
   } else {
-    text = _rnd(_COMMENT_TEMPLATES[_rndInt(0,3)]);
+    return null;   // ★ 주제 풀이 없으면 댓글을 만들지 않는다(일반 템플릿 폴백 폐지)
   }
   return {
     id: _rndInt(1000,9999),
@@ -23102,7 +23116,7 @@ function _makeReply(parentTime, topicPool){
   if(topicPool && topicPool.length){
     text = _rnd(topicPool);  // 대댓글도 같은 주제 풀에서
   } else {
-    text = _rnd(_REPLY_TEMPLATES[_rndInt(0,2)]);
+    return null;   // ★ 주제 풀이 없으면 대댓글도 만들지 않는다
   }
   return {
     nick: _rnd(_NICK_POOL),
@@ -23114,21 +23128,26 @@ function _makeReply(parentTime, topicPool){
 // post 인자가 있으면 글 주제에 맞는 연관 댓글 생성
 function _initCmts(postTime, post){
   var topicPool = null;
-  if(post && typeof _classifyTopic === 'function'){
-    var topic = _classifyTopic(post);
-    topicPool = _TOPIC_COMMENTS[topic] || null;
+  if(post && typeof _classifyTopicStrict === 'function'){
+    var topic = _classifyTopicStrict(post);
+    topicPool = topic ? (_TOPIC_COMMENTS[topic] || null) : null;
   }
-  // 댓글 수: 주제풀이 있으면 풀 크기 이내(3~풀크기), 없으면 3~8
-  var maxCount = topicPool ? Math.min(topicPool.length, 10) : 8;
-  var count = _rndInt(3, maxCount);
+  // ★ 글 주제가 확실히 잡히지 않으면 댓글을 만들지 않는다.
+  //   아무 글에나 일반 댓글을 붙이는 게 'AI 티'의 주원인이었다.
+  if(!topicPool) return [];
+  // 주제가 잡혀도 수를 줄인다 (댓글이 우르르 달린 글 자체가 부자연스럽다)
+  var maxCount = Math.min(topicPool.length, 4);
+  var count = _rndInt(1, maxCount);
   var usedIdx = [];  // 주제 댓글 중복 방지
   var cmts = [];
   for(var i=0;i<count;i++){
     var offset = _rndInt(10000, Math.max(20000, Date.now()-postTime));
     var c = _makeCmt(offset, topicPool, usedIdx);
-    var rCount = _rndInt(0,2);
+    if(!c) continue;
+    var rCount = _rndInt(0,1);
     for(var r=0;r<rCount;r++){
-      c.replies.push(_makeReply(c.time, topicPool));  // 대댓글도 주제 연동
+      var rp = _makeReply(c.time, topicPool);
+      if(rp) c.replies.push(rp);
     }
     cmts.push(c);
   }
@@ -23194,7 +23213,8 @@ function renderCommList(){
 
   list.innerHTML='';
   var visible=_AI_POSTS.filter(function(p){
-    if(_commFilter==='all') return true;
+    // ★ 게시판(all)에는 뉴스를 섞지 않는다 — 뉴스는 전용 탭에서만 본다.
+    if(_commFilter==='all') return !_isNewsPost(p);
     return p.cat===_commFilter;
   });
   // ★ 뉴스 탭: 헤드라인 리스트 (카테고리 칩 + 최근 3일 + 탭하면 원문 이동)
@@ -23552,8 +23572,13 @@ var _commNeedRefresh = true;
 // ── 댓글 자동 누적 타이머 ──────────────────────────────────
 // 30~90초마다 랜덤 게시글에 댓글 추가 (또는 대댓글)
 var _cmtAutoTimer=null;
+// ★ 2026-08-18 중단.
+//   무작위로 고른 글에 30~90초마다 댓글이 하나씩 붙는 동작이 'AI 티'의 핵심이었다
+//   (읽고 있는 도중에 관련 없는 댓글이 계속 늘어남). 함수는 남겨 두되 아무것도 하지 않는다.
+var _CMT_AUTO_ENABLED = false;
 function _scheduleAutoComment(){
   clearTimeout(_cmtAutoTimer);
+  if(!_CMT_AUTO_ENABLED) return;
   _cmtAutoTimer=setTimeout(function(){
     if(_AI_POSTS.length===0){ _scheduleAutoComment(); return; }
     var post=_AI_POSTS[_rndInt(0,Math.min(_AI_POSTS.length-1,9))];
@@ -23608,11 +23633,13 @@ var _autoPostTimer=null;
 function initCommunityPosts(){
   _AI_POSTS=[];
   var count=15;
-  for(var i=0;i<count;i++){
+  for(var i=0, tries=0; i<count && tries<count*6; tries++){
     var p=_generatePost();
+    if(!_postAccept(p)) continue;      // ★ 6개월 내 같은 골격의 글이면 버리고 다시 뽑는다
     p.time=Date.now()-_rndInt(i*5*60000,(i+1)*12*60000);
     p.cmts=_initCmts(p.time, p);  // ★ post 전달 → 글 주제 기반 댓글
     _AI_POSTS.push(p);
+    i++;
   }
   renderCommList();
   _scheduleAutoComment();
@@ -23629,7 +23656,12 @@ function _scheduleNewPost(){
   _newPostTimer = setTimeout(function(){
     if(window._serverPostsActive) return;   // ★ 서버 게시글 사용 중 → 로컬 생성 중단
     try {
-      var p = _generatePost();
+      var p = null;
+      for(var _t=0; _t<8; _t++){        // ★ 중복 아닌 글이 나올 때까지 몇 번 재시도
+        var _c = _generatePost();
+        if(_postAccept(_c)){ p = _c; break; }
+      }
+      if(!p){ _scheduleNewPost(); return; }   // 새로 쓸 게 없으면 이번엔 건너뛴다
       p.time = Date.now();              // 방금 올라온 글
       p.cmts = _initCmts(p.time, p);    // 주제 기반 댓글 (초기 0~2개)
       // 새 글은 댓글 적게 시작 (방금 올라왔으므로)
@@ -23651,6 +23683,11 @@ window._scheduleNewPost = _scheduleNewPost;
 
 // ── 사용자 작성 글에 자동 댓글 달기 ──────────────────────
 function _autoCommentOnUserPost(postId){
+  // ★ 2026-08-18 중단.
+  //   내가 쓴 글에 모르는 닉네임들이 1~3분 뒤부터 줄줄이 댓글을 다는 건
+  //   실제 사람이 아니라는 게 가장 티나는 지점이라 실행하지 않는다.
+  return;
+  // eslint-disable-next-line no-unreachable
   // 1~3분 후 첫 댓글, 이후 랜덤하게 댓글 누적
   var delays=[_rndInt(60000,180000), _rndInt(120000,360000), _rndInt(180000,600000),
               _rndInt(300000,900000), _rndInt(600000,1800000)];
@@ -23858,7 +23895,7 @@ var _AREA_LIST = ['은평','동북','노원','강동','하남','김포','파주'
 //   ③ 한 번 쓴 주제·템플릿은 5개월(150일) 동안 재사용 금지
 //   ④ 역 이름만 바꾼 동일 내용 중복 차단 (템플릿 원문 기준으로 기록)
 // ══════════════════════════════════════════════════════════════════════
-var _POST_TOPIC_TTL = 150*24*3600*1000;   // 5개월
+var _POST_TOPIC_TTL = 183*24*3600*1000;   // 6개월
 
 function _postTopicLog(){
   if(window._postLogMem) return window._postLogMem;
@@ -23882,6 +23919,48 @@ function _postSlug(t){
     .slice(0,20).toLowerCase();
 }
 function _postUsed(key){ return !!(key && _postTopicLog()[key]); }
+
+// ★ 글의 '골격 서명' — 역·노선·지역·닉네임·숫자를 지운 뒤 제목+본문으로 만든다.
+//   목적: 같은 틀에 역 이름이나 지역만 갈아끼운 글을 같은 글로 취급해 6개월간 재등장 차단.
+//   예) "부평역 또 지연이네요" 와 "왕십리역 또 지연이네요" → 같은 서명
+function _postSig(title, body){
+  var t = String(title == null ? '' : title) + ' ' + String(body == null ? '' : body);
+  return t
+    .replace(/\{[a-z0-9]+\}/gi, ' ')                                   // 템플릿 자리표시자
+    .replace(/[가-힣A-Za-z]{1,12}(역|호선|터미널|공항|정류장|차고지|사거리)/g, ' ')  // 역·노선·정류장명
+    .replace(/[가-힣]{1,6}(시|군|구|동|읍|면)(?=\s|$|[^가-힣])/g, ' ')     // 지역명
+    .replace(/[0-9]+/g, ' ')                                            // 숫자(시각·요금·번호)
+    .replace(/[^가-힣a-zA-Z]/g, '')                                     // 기호·공백
+    .slice(0, 60).toLowerCase();
+}
+function _postSigKey(post){
+  var sig = _postSig(post && post.title, post && post.body);
+  return sig.length >= 6 ? ('post_sig_' + sig) : '';   // 너무 짧으면 판정하지 않음
+}
+// 6개월 로그 또는 현재 목록에 같은 골격의 글이 있는가
+function _postIsDup(post){
+  try{
+    var key = _postSigKey(post);
+    if(!key) return false;
+    if(_postUsed(key)) return true;
+    if(typeof _AI_POSTS !== 'undefined'){
+      for(var i=0;i<_AI_POSTS.length;i++){
+        if(_postSigKey(_AI_POSTS[i]) === key) return true;
+      }
+    }
+  }catch(e){}
+  return false;
+}
+// 목록에 넣기 직전 호출 — 중복이면 false, 아니면 기록하고 true
+function _postAccept(post){
+  if(_postIsDup(post)) return false;
+  var key = _postSigKey(post);
+  if(key) _postMark(key);
+  return true;
+}
+window._postSig = _postSig;
+window._postIsDup = _postIsDup;
+window._postAccept = _postAccept;
 function _postMark(key){
   if(!key) return;
   var m=_postTopicLog();
@@ -24172,6 +24251,74 @@ function _generatePost() {
   return post;
 }
 
+// ── 댓글 목록/입력 HTML + 등록 ───────────────────────────────
+function _dcCmtListHtml(post){
+  return (post.cmts || []).map(function(c){
+    var reply = (c.replies && c.replies.length)
+      ? c.replies.map(function(r){
+          return '<div class="dc-cmt" style="padding-left:14px;opacity:.9;">'
+            + '<span class="dc-cmt-nick">↳ ' + _dcEsc(r.nick) + '</span>'
+            + '<span class="dc-cmt-txt">' + _dcEsc(r.text) + '</span>'
+            + '<span class="dc-cmt-time">' + _timeAgo(r.time) + '</span>'
+            + '</div>';
+        }).join('')
+      : '';
+    return '<div class="dc-cmt">'
+      + '<span class="dc-cmt-nick">' + _dcEsc(c.nick) + '</span>'
+      + '<span class="dc-cmt-txt">' + _dcEsc(c.text) + '</span>'
+      + '<span class="dc-cmt-time">' + _timeAgo(c.time) + '</span>'
+      + '</div>' + reply;
+  }).join('');
+}
+function _dcCmtInputHtml(pid){
+  return '<div style="display:flex;gap:6px;align-items:center;margin-top:8px;">'
+    + '<input id="dcCmtInp-' + pid + '" type="text" maxlength="200" placeholder="댓글 남기기"'
+    +   ' onkeydown="if(event.key===\'Enter\'){event.preventDefault();dcAddComment(' + pid + ');}"'
+    +   ' style="flex:1;min-width:0;padding:8px 10px;border-radius:8px;border:1px solid var(--line,#d8d8dd);'
+    +          'background:var(--card,#fff);color:var(--text,#111);font-size:13px;font-family:inherit;">'
+    + '<button onclick="dcAddComment(' + pid + ')"'
+    +   ' style="flex-shrink:0;padding:8px 12px;border:none;border-radius:8px;cursor:pointer;'
+    +          'background:#0a84ff;color:#fff;font-size:13px;font-weight:700;font-family:inherit;">등록</button>'
+    + '</div>';
+}
+// 게시글에 내 댓글 등록
+function dcAddComment(pid){
+  var inp = document.getElementById('dcCmtInp-' + pid);
+  if(!inp) return;
+  var txt = String(inp.value || '').trim();
+  if(!txt) return;
+  // 닉네임(커뮤니티 아이디)이 있어야 작성 가능 — 글쓰기와 같은 규칙
+  if(typeof _requireCommId === 'function' && !_requireCommId()) return;
+  if(typeof _containsBadWord === 'function' && _containsBadWord(txt)){
+    if(typeof toast === 'function') toast('⚠️ 욕설·비방이 포함되어 등록할 수 없어요');
+    return;
+  }
+  var post = null;
+  for(var i=0;i<_AI_POSTS.length;i++){ if(String(_AI_POSTS[i].id) === String(pid)){ post = _AI_POSTS[i]; break; } }
+  if(!post) return;
+
+  var nick = (typeof _getCommId === 'function' && _getCommId()) || '나';
+  post.cmts = post.cmts || [];
+  post.cmts.push({
+    id: 'me' + Date.now(),
+    nick: nick,
+    text: txt,
+    time: Date.now(),
+    replies: [],
+    mine: true
+  });
+  inp.value = '';
+
+  // 해당 카드의 댓글 영역만 다시 그린다 (목록 전체 리렌더 시 펼침 상태가 닫히므로)
+  var wrap = document.getElementById('dccmts-' + pid);
+  if(wrap) wrap.innerHTML = _dcCmtListHtml(post);
+
+  if(typeof _serverPostComment === 'function') _serverPostComment(pid, nick, txt);
+  if(typeof toast === 'function') toast('💬 댓글이 등록되었어요!');
+}
+window.dcAddComment = dcAddComment;
+window._dcCmtListHtml = _dcCmtListHtml;
+
 // ── 게시글 DOM 생성 ────────────────────────────────────────
 function _renderPost(post) {
   var CAT_COLOR = {
@@ -24185,13 +24332,7 @@ function _renderPost(post) {
   el.setAttribute('data-cat', post.cat);
   el.setAttribute('data-id', post.id);
 
-  var cmtHtml = (post.cmts || []).map(function(c){
-    return '<div class="dc-cmt">'
-      + '<span class="dc-cmt-nick">' + _dcEsc(c.nick) + '</span>'
-      + '<span class="dc-cmt-txt">' + _dcEsc(c.text) + '</span>'
-      + '<span class="dc-cmt-time">' + _timeAgo(c.time) + '</span>'
-      + '</div>';
-  }).join('');
+  var cmtHtml = _dcCmtListHtml(post);
 
   // ★ 잡담·빈 카테고리는 뱃지 숨김 (게시판은 뱃지 없이 제목만)
   var _hideBadge = (!post.cat || post.cat === '잡담' || post.cat === '일상');
@@ -24216,7 +24357,8 @@ function _renderPost(post) {
         + '<button class="dc-react-btn" onclick="dcReact(' + post.id + ',\'lol\',this)">ㅋㅋ <span>' + (post.lol || 0) + '</span></button>'
         + '<button class="dc-react-btn" onclick="dcReact(' + post.id + ',\'sad\',this)">ㅠㅠ <span>' + (post.sad || 0) + '</span></button>'
       + '</div>'
-      + (cmtHtml ? '<div class="dc-cmts">' + cmtHtml + '</div>' : '')
+      + '<div class="dc-cmts" id="dccmts-' + post.id + '">' + cmtHtml + '</div>'
+      + _dcCmtInputHtml(post.id)
     + '</div>';
 
   // 클릭 시 본문 토글
@@ -24243,13 +24385,29 @@ function dcReact(id, type, btn) {
 }
 window.dcReact = dcReact;
 
+// ★ 뉴스 성격의 글인지 — 카테고리뿐 아니라 뉴스 링크·출처 표기까지 본다
+//   (서버에서 내려온 글은 cat이 비어 있어도 본문에 기사 링크가 들어있는 경우가 있다)
+function _isNewsPost(p){
+  if(!p) return false;
+  if(p.cat === '뉴스' || p.isNews) return true;
+  if(p.link && /news\.|newspaper|press|rss/i.test(String(p.link))) return true;
+  if(/news\.google\.com|\[[^\]]{1,12}\]\s*보도/.test(String(p.body || ''))) return true;
+  return false;
+}
+window._isNewsPost = _isNewsPost;
+
 // ── 게시글 목록 렌더 ──────────────────────────────────────
 // [정리] 중복 정의 제거: renderCommList (아래쪽 정의 사용)
 
 // ── autoGeneratePost: 게시글 1개 생성 후 목록 갱신 ────────
 function autoGeneratePost() {
   if(window._serverPostsActive) return;   // ★ 서버 게시글 사용 중 → 로컬 생성 중단
-  var post = _generatePost();
+  var post = null;
+  for(var _t=0; _t<8; _t++){             // ★ 6개월 내 중복 골격이면 다시 뽑는다
+    var _c = _generatePost();
+    if(_postAccept(_c)){ post = _c; break; }
+  }
+  if(!post) return;
   _AI_POSTS.unshift(post);
   if(_AI_POSTS.length > 50) _AI_POSTS.pop();  // 최대 50개 유지
   // 커뮤니티 탭이 활성화 상태면 즉시 렌더
@@ -35815,11 +35973,18 @@ function submitPost() {
 }
 window.submitPost = submitPost;
 
+// 하단 시트(postSheet)의 댓글 입력 — 예전 코드가 존재하지 않는 'commentInp'를
+// 찾고 있어서 토스트만 뜨고 실제로는 아무것도 저장되지 않았다. 실제 입력칸에 맞추고,
+// 열려 있는 게시글이 특정되면 목록과 동일한 경로(dcAddComment)로 넘긴다.
 function submitComment() {
-  var inp = document.getElementById('commentInp');
-  if(!inp||!inp.value.trim()) return;
-  toast('💬 댓글이 등록되었어요!');
-  inp.value='';
+  var inp = document.getElementById('psCommentInput');
+  if(!inp || !inp.value.trim()) return;
+  var pid = (typeof window._psOpenPostId !== 'undefined') ? window._psOpenPostId : null;
+  if(pid != null && typeof dcAddComment === 'function'){
+    var tgt = document.getElementById('dcCmtInp-' + pid);
+    if(tgt){ tgt.value = inp.value; inp.value = ''; dcAddComment(pid); return; }
+  }
+  if(typeof toast === 'function') toast('게시글을 열고 댓글을 남겨주세요.');
 }
 window.submitComment = submitComment;
 
