@@ -7965,6 +7965,22 @@ function _htlShiftFrom(fromIdx, sec){
     nd.arrTime = ('0'+_h).slice(-2) + ':' + ('0'+_m).slice(-2);
     if(nd.el){ var lbl = nd.el.querySelector('.htl-time-lbl'); if(lbl) lbl.textContent = nd.arrTime; }
   });
+  // ★ 안전장치: 어떤 경로로 들어오든 표시 시각이 역행하지 않도록 단조 증가를 보장한다.
+  (function(){
+    var prev = null;
+    _transitNodeData.forEach(function(nd){
+      if(nd._schedMin == null) return;
+      if(prev != null && nd._schedMin < prev){
+        nd._schedMin = prev;                       // 앞 역보다 이른 값은 앞 역에 맞춘다
+        var t2 = ((nd._schedMin % 1440) + 1440) % 1440;
+        var h2 = Math.floor(t2/60), m2 = Math.round(t2%60);
+        if(m2 >= 60){ m2 -= 60; h2 = (h2+1)%24; }
+        nd.arrTime = ('0'+h2).slice(-2) + ':' + ('0'+m2).slice(-2);
+        if(nd.el){ var l2 = nd.el.querySelector('.htl-time-lbl'); if(l2) l2.textContent = nd.arrTime; }
+      }
+      prev = nd._schedMin;
+    });
+  })();
   window._htlDelaySec = (window._htlDelaySec || 0) + sec;
   // 1분 단위로 넘어갈 때만 1회 안내 (반복 토스트 방지)
   try{
@@ -8058,7 +8074,12 @@ function _htlEarlyTrack(){
     if(window._htlEarlyAt && now2 - window._htlEarlyAt < 15000) return;   // 반복 반영 방지
     window._htlEarlyAt = now2;
 
-    _htlShiftFrom(gi, -earlySec);   // 그 역이 '지금'이 되도록 이후 시각 전체를 앞당김
+    // ★ 앵커 이후만 당기면 안 된다 — 앞 역이 옛 시각(늦은 값)으로 남아 순서가 뒤집힌다.
+    //   (실제로 '굴현 22:44 → 계양 22:35'처럼 뒤로 가는 화면이 나왔다)
+    //   지연(뒤로 밀기)은 뒤쪽만 밀어도 순서가 안 깨지지만, 단축(앞으로 당기기)은
+    //   경로 전체를 같은 폭으로 당겨야 일관된다. _recalcArrivalsFrom이 앵커 기준으로
+    //   앞·뒤를 모두 재계산하는 것과 같은 이유다.
+    _htlShiftFrom(0, -earlySec);   // 앵커 역이 '지금'이 되도록 경로 전체를 앞당김
   }catch(e){}
 }
 window._htlEarlyTrack = _htlEarlyTrack;
