@@ -5997,34 +5997,23 @@ window._htlResyncBoard = _htlResyncBoard;
 //   ② GPS가 신선(5분 이내)하고 승차역에서 200m 이상 떨어짐 → 고정 (아직 가는 중)
 //   그 외(GPS가 오래됨 + 예정 시각 지남)에는 탑승했다고 보고 기존 시간 기반 진행을 허용
 //   → GPS를 못 쓰는 기기에서도 마커가 멈춰버리지 않는다.
+// 승차 전 마커 고정 여부.
+//   ★ 이 함수는 호출부에서 이미 _htlNotDeparted()로 '출발 미확정'을 확인한 뒤에만 불린다.
+//     그러므로 여기서 할 일은 하나뿐이다 — 고정한다.
+//   예전에는 아래 두 가지로 고정을 풀었는데, 둘 다 '출발했다'는 근거가 못 된다:
+//     ① 승차역 200m 이내에 있음 → 집·사무실이 정류장 근처면 출발 전에도 풀렸다.
+//        (30분 전에 경로만 잡아두고 가만히 있는데 마커가 시간 따라 끝까지 흘러간 사례)
+//     ② 승차역에 도착한 기록(_htlWait.arrived) → 승강장에 서 있는 것과 탑승은 다르다.
+//     ③ GPS가 오래되어 판단 불가 → 오히려 이때야말로 고정해야 안전하다.
+//   출발 확정은 오직 _htlNotDeparted()가 보는 근거(GPS 진행 _gpsMaxIdx, 통과 기록
+//   _nodePassMs, 승차 확인 _htlBoarded)로만 이뤄진다.
 function _htlShouldPin(lat, lng, validGps, nowMin){
   var res = { pin:false, boardIdx:-1 };
   try{
     var bi = _htlBoardIdx();
     if(bi < 0) return res;
     res.boardIdx = bi;
-    // ★ 승차역에 도착한 적이 있으면 더는 고정하지 않는다(탑승 후 정상 진행)
-    if(typeof _htlWait !== 'undefined' && _htlWait.arrived) return res;
-
-    var dep = _htlBoardDepMin();
-    if(dep != null){
-      var diff = dep - nowMin;
-      if(diff < -720) diff += 1440;
-      if(diff > 720)  diff -= 1440;
-      if(diff > 0){ res.pin = true; return res; }        // ① 아직 출발 전
-    }
-
-    // ② GPS 신선도 확인
-    var fx = (typeof S!=='undefined' && S.lastGPSFix) ? S.lastGPSFix : null;
-    var fresh = validGps || (fx && fx.ts && (Date.now() - fx.ts) < 300000);
-    if(!fresh) return res;
-
-    var la = (validGps && lat != null) ? lat : (fx ? fx.lat : null);
-    var ln = (validGps && lng != null) ? lng : (fx ? fx.lng : null);
-    var bNd = _transitNodeData[bi];
-    if(la == null || ln == null || !bNd || bNd.lat == null || typeof haversineM !== 'function') return res;
-
-    if(haversineM(la, ln, bNd.lat, bNd.lng) > 200) res.pin = true;   // 아직 역에 못 감
+    res.pin = true;
     return res;
   }catch(e){ return res; }
 }
@@ -6675,6 +6664,10 @@ function fmapDoRoute() {
         return;
       }
 
+      // ★ 후보들의 '지금 이 정류장에 그 노선이 몇 분 뒤 오는지'를 먼저 채운 뒤 순위를 정한다.
+      //   조회가 늦으면(3.5초) 채워진 만큼만 반영하고 진행한다.
+      _applyRealtimeWaits(allPaths, function(){
+      if(_routeStale()) return;
       // 통합 데이터로 옵션 파싱
       var combinedData = { result: { path: allPaths } };
       window._favSearchStart = start;          // ★ 즐겨찾기 정류장 반경 판정 기준 출발지
@@ -6703,6 +6696,7 @@ function fmapDoRoute() {
         window._lockedRouteType = null;
         _doSelectRouteOption('fast');
       }
+      });   // _applyRealtimeWaits 콜백 끝
     })
     .catch(function(e){
       if(loading) loading.style.display = 'none';
@@ -6717,6 +6711,89 @@ function fmapDoRoute() {
 var _allRouteResults = null;  // { fast, less, bus } 세 가지 경로
 
 // ODsay 응답에서 최단/최소환승/버스우선 경로 분리
+// ── 실시간 버스 대기시간을 경로 순위에 반영 ──────────────────────────
+//   문제: 순위가 엔진이 준 totalTime(차내 이동 기준)만 보고 정해져서,
+//   "지금 이 정류장에 어떤 차가 먼저 오는지"가 빠져 있었다.
+//   집 근처에 정류장이 여럿이면 같은 목적지라도 그때그때 최선이 달라지는데
+//   앱은 항상 같은 노선을 추천했다(75번 추천 → 실제로는 77번이 10분 빨랐던 사례).
+//   해결: 각 후보의 '첫 버스 승차 정류장 + 노선번호'로 실제 도착정보를 조회해
+//   대기시간을 구하고, 순위 비용에 더한다.
+var _RT_WAIT_MAX_PATHS = 5;      // 조회할 후보 수 (호출량 제한)
+var _RT_WAIT_TIMEOUT   = 3500;   // 이 안에 안 오면 기존 순위로 진행
+// ★ route-v2의 버스 구간 sectionTime에는 '배차/2'로 가정한 승차 대기가 이미 들어 있다.
+//   (워커: routeWait[route_key] = busProfile(route_type).hw / 2, 버스 leg의 sec이 이 값에서 시작)
+//   그래서 실제 대기를 그냥 더하면 이중 계산이 된다. 가정치를 빼고 '차이'만 반영한다.
+//   워커의 배차 가정: 간선 9분·마을 8·지선 12·광역 15·직행좌석 20 → /2 하면 4~10분.
+//   노선유형을 앱이 모르므로 기본값(BUS_WAIT 240초=4분)에 가까운 4.5분을 가정치로 쓴다.
+//   ※ 워커가 leg별 waitSec을 내보내주면 이 상수 없이 정확히 상쇄할 수 있다(개선 예정).
+var _RT_ASSUMED_WAIT_MIN = 4.5;
+
+// 후보의 첫 버스 구간 (없으면 null)
+function _firstBusSub(p){
+  var subs = (p && p.subPath) || [];
+  for(var i=0;i<subs.length;i++){
+    if(subs[i].trafficType === 2) return subs[i];
+  }
+  return null;
+}
+// 그 정류장에서 그 노선이 몇 초 뒤에 오는가 (모르면 null)
+function _rtWaitSecForSub(sp, cb){
+  try{
+    var lat = sp.startY, lng = sp.startX;
+    var lane = (sp.lane || [])[0] || {};
+    var busNo = String(lane.busNo || lane.busID || '').trim();
+    if(lat == null || lng == null || !busNo || typeof _fetchNearStops !== 'function'){ cb(null); return; }
+
+    _fetchNearStops(lat, lng, function(err, stops){
+      if(err || !stops || !stops.length){ cb(null); return; }
+      // 이름이 같은 정류장을 우선, 없으면 가장 가까운 것
+      var want = String(sp.startName || '').replace(/\s/g,'');
+      var target = null;
+      for(var i=0;i<stops.length;i++){
+        if(want && String(stops[i].nodenm||'').replace(/\s/g,'') === want){ target = stops[i]; break; }
+      }
+      if(!target) target = stops[0];
+
+      var cc = (typeof _tagoCityCode==='function') ? _tagoCityCode(target) : '';
+      if(typeof _busArrFetchMerged !== 'function'){ cb(null); return; }
+      _busArrFetchMerged(cc, target).then(function(rows){
+        var best = null;
+        (rows||[]).forEach(function(r){
+          if(String(r.routeno||'').trim() !== busNo) return;
+          var t = parseInt(r.arrtime, 10);
+          if(isFinite(t) && t > 0 && (best === null || t < best)) best = t;
+        });
+        cb(best);
+      }, function(){ cb(null); });
+    });
+  }catch(e){ cb(null); }
+}
+
+// 후보들에 _rtWaitMin을 채운 뒤 cb() — 타임아웃이면 채워진 만큼만 반영
+function _applyRealtimeWaits(paths, cb){
+  try{
+    if(!paths || !paths.length){ cb(); return; }
+    var targets = paths.slice(0, _RT_WAIT_MAX_PATHS).filter(function(p){ return !!_firstBusSub(p); });
+    if(!targets.length){ cb(); return; }
+
+    var done = false, pending = targets.length;
+    var finish = function(){ if(!done){ done = true; cb(); } };
+    var timer = setTimeout(finish, _RT_WAIT_TIMEOUT);
+
+    targets.forEach(function(p){
+      _rtWaitSecForSub(_firstBusSub(p), function(sec){
+        if(sec != null){
+          p._rtWaitMin  = Math.round(sec / 60);                       // 표시용: 실제 대기(분)
+          // 순위 보정치 = 실제 대기 − 엔진이 이미 반영한 가정 대기
+          p._rtWaitDelta = (sec / 60) - _RT_ASSUMED_WAIT_MIN;
+        }
+        if(--pending <= 0){ clearTimeout(timer); finish(); }
+      });
+    });
+  }catch(e){ cb(); }
+}
+window._applyRealtimeWaits = _applyRealtimeWaits;
+
 function _parseODsayAllOptions(odsayData) {
   var paths = (odsayData.result || {}).path || [];
   if(!paths.length) return null;
@@ -6730,9 +6807,12 @@ function _parseODsayAllOptions(odsayData) {
   });
 
   // ★ Cost = 실제 소요시간 - 즐겨찾기 정류장 승차 감면(5~10분)
-  var _cost = (typeof _favCost==='function')
+  //   ★ 실시간 대기시간(_rtWaitMin)을 더한다. 아직 조회되지 않은 후보는 0으로 둬서
+  //     불이익 없이 기존 순서를 유지한다(있는 정보로만 비교).
+  var _baseCost = (typeof _favCost==='function')
     ? _favCost
     : function(p){ return ((p.info||{}).totalTime||999); };
+  var _cost = function(p){ return _baseCost(p) + (p._rtWaitDelta || 0); };
 
   // 최단시간: Cost 가장 작은 것(즐겨찾기 승차 경로에 가중치 적용)
   var sorted = paths.slice().sort(function(a,b){
@@ -8084,6 +8164,92 @@ function _htlEarlyTrack(){
 }
 window._htlEarlyTrack = _htlEarlyTrack;
 
+// ── 경로 이탈 감지 ────────────────────────────────────────────────
+//   상황: 계획은 75번인데 먼저 온 77번을 타버렸다. 두 노선은 몇 정거장 뒤부터
+//   길이 갈리는데, 앱은 계속 75번 경로를 안내한다(내릴 곳·환승·도착시각이 전부 틀림).
+//   해결: 실제 GPS가 '계획 경로선'에서 일정 거리 이상, 일정 횟수 연속으로 벗어나면
+//   다른 차를 탄 것으로 보고 현재 위치 기준으로 경로를 다시 찾는다.
+//   ★ 정류장 하나하나와의 거리가 아니라 '노드를 잇는 선분과의 거리'로 재야 한다.
+//     정류장 간격이 넓으면 정상 주행 중에도 가장 가까운 정류장이 수백 m가 되기 때문.
+var _OFF_ROUTE_M    = 350;   // 경로선에서 이만큼 벗어나면 이탈 후보
+var _OFF_ROUTE_HITS = 3;     // 연속 이만큼(약 30초) 이어져야 확정 — 순간 오차 무시
+var _OFF_ROUTE_COOL = 180000;// 재탐색 후 3분간은 다시 판정하지 않음
+
+// 점 → 선분 최단거리(m)
+function _distToSegM(pLat, pLng, aLat, aLng, bLat, bLng){
+  var kx = 88000, ky = 111000;                    // 위경도 → m 근사(한국 위도대)
+  var px = pLng*kx, py = pLat*ky;
+  var ax = aLng*kx, ay = aLat*ky;
+  var bx = bLng*kx, by = bLat*ky;
+  var dx = bx-ax, dy = by-ay;
+  var len2 = dx*dx + dy*dy;
+  var t = len2 ? (((px-ax)*dx + (py-ay)*dy) / len2) : 0;
+  t = Math.max(0, Math.min(1, t));
+  var qx = ax + dx*t, qy = ay + dy*t;
+  return Math.sqrt((px-qx)*(px-qx) + (py-qy)*(py-qy));
+}
+// 현재 좌표와 계획 경로선의 최단거리(m). 좌표가 있는 노드들만 이어서 잰다.
+function _distToPlannedPath(lat, lng){
+  try{
+    if(typeof _transitNodeData === 'undefined' || !_transitNodeData.length) return null;
+    var pts = [];
+    for(var i=0;i<_transitNodeData.length;i++){
+      var n = _transitNodeData[i];
+      if(n && n.lat != null && n.lng != null) pts.push(n);
+    }
+    if(pts.length < 2) return null;
+    var best = Infinity;
+    for(var j=0;j<pts.length-1;j++){
+      var d = _distToSegM(lat, lng, pts[j].lat, pts[j].lng, pts[j+1].lat, pts[j+1].lng);
+      if(d < best) best = d;
+    }
+    return best;
+  }catch(e){ return null; }
+}
+window._distToPlannedPath = _distToPlannedPath;
+
+// GPS 틱마다 호출. 이탈이 확정되면 true.
+function _checkOffRoute(lat, lng, validGps){
+  try{
+    if(!validGps || lat == null || lng == null) return false;
+    if(typeof _baseTimeMs!=='undefined' && _baseTimeMs != null) return false;  // 예상 시각 모드
+    if(window._metroRouteMode === true) return false;
+    if(typeof _isManualStart==='function' && _isManualStart()) return false;
+    // 아직 출발 전이면 판정하지 않는다(정류장까지 걸어가는 동선은 경로선과 무관)
+    if(typeof _htlNotDeparted==='function' && _htlNotDeparted()){ window._offRouteHits = 0; return false; }
+    var now = Date.now();
+    if(window._offRouteUntil && now < window._offRouteUntil) return false;      // 재탐색 쿨다운
+
+    var d = _distToPlannedPath(lat, lng);
+    if(d == null) return false;
+    if(d < _OFF_ROUTE_M){ window._offRouteHits = 0; return false; }
+
+    window._offRouteHits = (window._offRouteHits || 0) + 1;
+    if(window._offRouteHits < _OFF_ROUTE_HITS) return false;
+
+    // 확정 — 상태를 초기화하고 현재 위치 기준으로 다시 찾는다
+    window._offRouteHits = 0;
+    window._offRouteUntil = now + _OFF_ROUTE_COOL;
+    return true;
+  }catch(e){ return false; }
+}
+window._checkOffRoute = _checkOffRoute;
+
+// 이탈 확정 시 실제 처리
+function _handleOffRoute(){
+  try{
+    if(typeof toast==='function') toast('\uACC4\uD68D\uACFC \uB2E4\uB978 \uAE38\uB85C \uAC00\uACE0 \uC788\uC5B4\uC694. \uD604\uC7AC \uC704\uCE58\uB85C \uACBD\uB85C\uB97C \uB2E4\uC2DC \uCC3E\uC744\uAC8C\uC694');
+    // 진행 상태를 모두 리셋해야 새 경로에서 마커가 엉뚱한 곳부터 시작하지 않는다
+    window._gpsMaxIdx = -1; window._gpsConfirmIdx = -1; window._timeMaxIdx = -1;
+    window._gpsWaitIdx = null; window._gpsWaitRatio = 0;
+    window._nodePassMs = {}; window._markerMaxProg = null;
+    window._htlBoarded = false; window._htlDelaySec = 0; window._htlEarlyAt = 0;
+    if(window._routeLocked){ window._relockAfterReroute = window._lockedRouteType || 'fast'; }
+    if(typeof fmapDoRoute==='function') setTimeout(fmapDoRoute, 200);
+  }catch(e){}
+}
+window._handleOffRoute = _handleOffRoute;
+
 // ═══════════════════════════════════════════════════════════════════
 // ★ 실시간 열차위치 보정 (서울 열린데이터광장 공공데이터) — GPS 대체/우선
 //   지하철 탑승 시 그 편성(trainNo)을 실시간 열차위치 API로 추적하고,
@@ -9044,7 +9210,12 @@ function _updateTransitGps() {
                   var _f2=_transitNodeData[_tp2.fromIdx], _t2=_transitNodeData[_tp2.toIdx]||_f2;
                   if(_f2){ _useFrom=_f2; _useTo=_t2; _useRatio=_tp2.ratio||0;
                     window._gpsWaitIdx=_tp2.fromIdx; window._gpsWaitRatio=Math.min(0.9,_tp2.ratio||0);
-                    window._gpsMaxIdx=Math.max((window._gpsMaxIdx==null?-1:window._gpsMaxIdx), _tp2.fromIdx); }
+                    // ★ 시각표 추정으로 _gpsMaxIdx를 올리면 안 된다.
+                    //   _htlNotDeparted()가 이 값을 보고 '출발했다'고 판단하므로,
+                    //   승차 전에는 시각만 흘러도 출발로 오인해 마커 고정이 풀린다.
+                    if(!(typeof _htlNotDeparted==='function' && _htlNotDeparted())){
+                      window._gpsMaxIdx=Math.max((window._gpsMaxIdx==null?-1:window._gpsMaxIdx), _tp2.fromIdx);
+                    } }
                 } else if(_tp2.fromIdx === _wIdx && (_tp2.ratio||0) > _useRatio){
                   _useRatio = Math.min(0.9, _tp2.ratio||0);   // 같은 구간이면 더 앞선 쪽
                   window._gpsWaitRatio = _useRatio;
@@ -9133,6 +9304,8 @@ function _updateTransitGps() {
   if(typeof _checkTransitAlerts==='function') _checkTransitAlerts(window._gpsMaxIdx);
 
   if(_validGps) { try { _maybeRecordPass(bestIdx, bestDist); } catch(e){} }
+  // ★ 경로 이탈 감지: 계획과 다른 차를 탄 경우 현재 위치로 재탐색
+  try { if(_checkOffRoute(lat, lng, _validGps)){ _handleOffRoute(); return; } } catch(e){}
   // ★ 연착 반영: 다음 역 예정 시각이 지났는데 아직 현재 역 근처면 그만큼 전체 시각을 밀어줌
   try { _htlDelayTrack(bestIdx, bestDist, _validGps); } catch(e){}
   // ★ 조기 도착 반영: 계획보다 앞서 진행 중이면 그만큼 전체 시각을 당겨줌
@@ -25157,7 +25330,10 @@ function _onForegroundResume(){
             _placeGpsMarkerSmooth(_fn, _tn, _tp.ratio||0);
             // 진행 인덱스도 시각표 위치까지 끌어올림 (백스텝 방지 기준 갱신)
             var _passedIdx = (_tp.ratio>=0.999) ? _tp.toIdx : _tp.fromIdx;
-            window._gpsMaxIdx = Math.max((window._gpsMaxIdx==null?-1:window._gpsMaxIdx), _passedIdx);
+            // ★ 승차 전이면 시각표 추정으로 진행도를 올리지 않는다(위와 같은 이유)
+            if(!(typeof _htlNotDeparted==='function' && _htlNotDeparted())){
+              window._gpsMaxIdx = Math.max((window._gpsMaxIdx==null?-1:window._gpsMaxIdx), _passedIdx);
+            }
             // 시각표 대기 진행률도 현재 구간에 맞춰 세팅 (이후 미감지 전진이 여기서 이어짐)
             window._gpsWaitIdx = _tp.fromIdx;
             window._gpsWaitRatio = Math.max(0, Math.min(0.9, _tp.ratio||0));
