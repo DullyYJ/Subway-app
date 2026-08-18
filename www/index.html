@@ -6211,6 +6211,7 @@ function _htlBoardWatch(){
       var bi2 = _htlBoardIdx();
       if(bi2 >= 0){
         window._gpsMaxIdx = Math.max(window._gpsMaxIdx == null ? -1 : window._gpsMaxIdx, bi2);
+        window._gpsConfirmIdx = Math.max(window._gpsConfirmIdx == null ? -1 : window._gpsConfirmIdx, bi2);
         window._nodePassMs = window._nodePassMs || {};
         if(window._nodePassMs[bi2] == null) window._nodePassMs[bi2] = Date.now();
         console.log('[대기모드] 승차 확정 — 승차역에서 ' + Math.round(d0) + 'm 이동');
@@ -7586,6 +7587,7 @@ function _startTransitGpsTracking(nodes) {
   if(!_sameRoute){
     window._nodePassMs = {};
     window._gpsMaxIdx = -1;   // GPS로 확인된 최대 진행 역 인덱스
+    window._gpsConfirmIdx = -1;   // 그중 '순수 GPS'로만 확인된 인덱스 (시각 보정 기준)
     window._timeMaxIdx = -1;  // 시간으로 soft-확인된 최대 진행 역 인덱스
     window._markerMaxProg = null;   // 경로좌표 진행도 리셋 (새 경로)
     window._gpsWaitIdx = null; window._gpsWaitRatio = 0; window._gpsWaitLastMs = 0;
@@ -8012,10 +8014,54 @@ function _htlDelayTrack(curIdx, curDist, validGps){
       return;
     }
 
-    // 반대로 예정보다 빨리 다음 역에 닿은 경우는 _maybeRecordPass(통과 기록)가 처리
+    // 반대로 예정보다 빨리 온 경우는 _htlEarlyTrack이 처리
   }catch(e){}
 }
 window._htlDelayTrack = _htlDelayTrack;
+
+// ★ 예정보다 이르게 진행 중일 때의 시각 보정
+//   기존에는 '늦은 경우'만 _htlDelayTrack이 밀어주고, 빠른 경우는 _maybeRecordPass의
+//   통과 기록(GPS 70~160m 접근→이탈 패턴)에만 맡겨 두었다. 그런데 지하 구간에서는
+//   그 패턴이 잘 안 잡혀서, 이미 동춘을 지나 원인재로 가는데도 표시는 계획 시각
+//   (동춘 22:06)에 멈춰 있는 상태가 됐다. → GPS로 도달이 확인된 역의 예정 시각이
+//   아직 미래면, 그 차이만큼 이후 시각 전체를 앞당긴다.
+var _HTL_EARLY_MIN_SEC = 60;        // 1분 이상 어긋나야 반영
+var _HTL_EARLY_MAX_SEC = 60*60;     // 한 번에 반영할 최대치
+function _htlEarlyTrack(){
+  try{
+    if(typeof _baseTimeMs!=='undefined' && _baseTimeMs != null) return;   // 예상 시각 모드 제외
+    if(window._metroRouteMode === true) return;
+    if(typeof _isManualStart==='function' && _isManualStart()) return;
+    if(typeof _htlNotDeparted==='function' && _htlNotDeparted()) return;  // 출발 전은 대상 아님
+
+    var gi = (window._gpsConfirmIdx == null ? -1 : window._gpsConfirmIdx);
+    if(gi < 0) return;
+
+    // 탑승역은 앵커로 쓰지 않는다 — 역에 서 있다고 출발한 것이 아니므로
+    var firstIdx = -1;
+    for(var i=0;i<_transitNodeData.length;i++){
+      var n0 = _transitNodeData[i];
+      if(!n0.isOrigin && !n0.isWalk && (n0.isBus || n0.isSub)){ firstIdx = i; break; }
+    }
+    if(firstIdx < 0 || gi <= firstIdx) return;
+
+    var nd = _transitNodeData[gi];
+    if(!nd || nd.isOrigin || nd.isWalk || nd._schedMin == null) return;
+
+    var ms = _htlNodeMs(nd);
+    if(ms == null) return;
+    var earlySec = (ms - Date.now()) / 1000;    // 양수 = 예정보다 이르게 도달
+    if(earlySec < _HTL_EARLY_MIN_SEC) return;
+    if(earlySec > _HTL_EARLY_MAX_SEC) earlySec = _HTL_EARLY_MAX_SEC;
+
+    var now2 = Date.now();
+    if(window._htlEarlyAt && now2 - window._htlEarlyAt < 15000) return;   // 반복 반영 방지
+    window._htlEarlyAt = now2;
+
+    _htlShiftFrom(gi, -earlySec);   // 그 역이 '지금'이 되도록 이후 시각 전체를 앞당김
+  }catch(e){}
+}
+window._htlEarlyTrack = _htlEarlyTrack;
 
 // ═══════════════════════════════════════════════════════════════════
 // ★ 실시간 열차위치 보정 (서울 열린데이터광장 공공데이터) — GPS 대체/우선
@@ -9041,6 +9087,10 @@ function _updateTransitGps() {
         bestDist = (best.lat!=null && typeof haversineM==='function') ? haversineM(lat,lng,best.lat,best.lng) : bestDist; }
     }
     window._gpsMaxIdx = Math.max(_pMax, bestIdx);
+    // ★ 시각표 추정이 섞이지 않은 '순수 GPS 확인' 진행도 — 시각 보정의 기준으로만 쓴다.
+    //   (_gpsMaxIdx는 포그라운드 복귀·시간 soft 전진 때도 올라가므로 그대로 쓰면
+    //    시각표가 시각표를 보정하는 순환이 된다.)
+    window._gpsConfirmIdx = Math.max((window._gpsConfirmIdx==null?-1:window._gpsConfirmIdx), bestIdx);
 
     // ★ GPS 반박: 시간표 soft 전진(_timeMaxIdx)이 GPS 확인 위치보다 앞서 있는데
     //   실제 GPS는 뒤쪽 역 근처(150m)에 확실히 있으면 → 못 탄 것. 시간 전진 취소 (마커 왕복 방지)
@@ -9058,6 +9108,8 @@ function _updateTransitGps() {
   if(_validGps) { try { _maybeRecordPass(bestIdx, bestDist); } catch(e){} }
   // ★ 연착 반영: 다음 역 예정 시각이 지났는데 아직 현재 역 근처면 그만큼 전체 시각을 밀어줌
   try { _htlDelayTrack(bestIdx, bestDist, _validGps); } catch(e){}
+  // ★ 조기 도착 반영: 계획보다 앞서 진행 중이면 그만큼 전체 시각을 당겨줌
+  try { _htlEarlyTrack(); } catch(e){}
 
   // ★ 미탑승 감지: 예정 출발시각이 지났는데 아직 첫 정류장/역 근처면 다음 시간표로 재설정
   //   - 미확정 경로: 전체 재탐색 (기존 동작)
