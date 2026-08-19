@@ -11342,7 +11342,10 @@ function _fetchNearStopsSeoul(lat, lng, callback){
     items.forEach(function(ch){
       var ars = _xmlVal(ch, 'arsId');
       var nm  = _xmlVal(ch, 'stationNm');
-      if(!ars || !nm) return;
+      // ★ 2026-08-19 실측: '퇴계로2가교차로(미정차)'처럼 arsId가 '0'인 항목이 섞여 온다.
+      //   문자열 '0'은 truthy라 기존 검사(!ars)를 통과해 목록에 들어갔는데,
+      //   이 ID로는 도착정보를 못 받아 '도착정보 없음' 카드만 생긴다 → 걸러낸다.
+      if(!ars || !nm || String(ars).replace(/^0+/, '') === '') return;
       var gx = parseFloat(_xmlVal(ch, 'gpsX')), gy = parseFloat(_xmlVal(ch, 'gpsY'));
       var d  = parseFloat(_xmlVal(ch, 'dist'));
       if(isNaN(gx) || isNaN(gy)){ gx = lng; gy = lat; }
@@ -11402,8 +11405,15 @@ function _seoulArrivals(stop, cb){
       };
       var s1 = (isFinite(t1) && t1 > 0) ? t1 : fromMsg(m1);
       var s2 = (isFinite(t2) && t2 > 0) ? t2 : fromMsg(m2);
-      if(s1 > 0) rows.push({ routeno: rt, routeid: rid, arrtime: s1, arrprevstationcnt: prev(m1), _src:'topis' });
-      if(s2 > 0) rows.push({ routeno: rt, routeid: rid, arrtime: s2, arrprevstationcnt: prev(m2), _src:'topis' });
+      // ★ 실측으로 확인된 부가 정보 — GBIS 쪽 행과 필드명을 맞춰 화면이 동일하게 쓰게 한다.
+      //   busType: 0 일반 / 1 저상 / 2 굴절,  congestion: 0 정보없음 ~ 4 매우혼잡
+      //   ※ 철자 주의 — 정류소정보조회는 'congestion', 버스위치조회는 'congetion'(오타)이다.
+      var lowOf = function(k){ return parseInt(_xmlVal(ch, k), 10) === 1 ? '저상버스' : ''; };
+      var conOf = function(k){ var v = parseInt(_xmlVal(ch, k), 10); return (isFinite(v) && v > 0) ? v : null; };
+      if(s1 > 0) rows.push({ routeno: rt, routeid: rid, arrtime: s1, arrprevstationcnt: prev(m1),
+                             vehicletp: lowOf('busType1'), crowded: conOf('congestion1'), _src:'topis' });
+      if(s2 > 0) rows.push({ routeno: rt, routeid: rid, arrtime: s2, arrprevstationcnt: prev(m2),
+                             vehicletp: lowOf('busType2'), crowded: conOf('congestion2'), _src:'topis' });
     });
     cb(rows);
   });
