@@ -7,6 +7,7 @@
     "@capacitor/android": "6.1.2",
     "@capacitor/app": "6.0.2",
     "@capacitor/browser": "^6.0.2",
+    "@capacitor/app-launcher": "6.0.2",
     "@capacitor/core": "6.1.2",
     "@capacitor/local-notifications": "6.1.2",
     "@capacitor-community/background-geolocation": "1.2.24"
