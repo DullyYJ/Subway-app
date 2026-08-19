@@ -12261,6 +12261,7 @@ window._bgDiag = async function(){
   add('플러그인 LocalNotifications: ' + (P.LocalNotifications ? 'O' : 'X'));
   add('플러그인 BackgroundGeolocation: ' + (P.BackgroundGeolocation ? 'O' : 'X ← 없으면 백그라운드 불가'));
   add('플러그인 Browser: ' + (P.Browser ? 'O (뉴스 원문이 인앱으로 열림)' : 'X ← 없으면 외부 브라우저로 나감'));
+  add('플러그인 AppLauncher: ' + (P.AppLauncher ? 'O (쿠팡 검색이 쿠팡 앱으로 열림)' : 'X ← 없으면 웹으로 열림'));
   add('마지막 뉴스 열기 방식: ' + (window._newsOpenMode || '아직 없음'));
   // 알림 권한
   try {
@@ -13174,12 +13175,11 @@ window.addEventListener('unhandledrejection', function(e) {
 </div>
 
 <!-- SHOP TAB -->
-<div class="tab-body" id="tab-shop">
-  <!-- ★ 고지문구 + 검색배너 + 카테고리를 한 덩어리로 상단 고정.
-       스크롤하면 이 아래(상품 그리드)만 움직인다.
-       .tab-body의 좌우·상단 padding(14px)을 음수 마진으로 덮어야 상품이 옆으로 비쳐 지나가지 않는다. -->
-  <div class="shop-sticky-hdr" style="position:sticky;top:0;z-index:20;background:var(--bg);
-       margin:-14px -14px 0;padding:14px 14px 4px;">
+<!-- ★ 상단(고지문구+검색+카테고리)은 고정, 상품 그리드만 스크롤.
+     position:sticky 대신 버스·맛집 탭과 같은 no-pad 구조를 쓴다 —
+     sticky는 부모 flex/패딩 조합에 따라 상단에 내용이 비쳐 보이는 경우가 있었다. -->
+<div class="tab-body no-pad" id="tab-shop" style="flex-direction:column;overflow:hidden;">
+  <div class="shop-fixed-hdr" style="flex-shrink:0;background:var(--bg);padding:14px 14px 4px;">
     <!-- 공정위 추천·보증 심사지침: 대가성 문구는 소비자가 쉽게 인식할 수 있는 위치에 표시 -->
     <div style="background:rgba(255,149,0,.12);border:1px solid rgba(255,149,0,.35);border-radius:10px;padding:8px 12px;margin-bottom:8px;">
       <p style="font-size:11.5px;line-height:1.5;color:var(--text);margin:0;">
@@ -13216,6 +13216,8 @@ window.addEventListener('unhandledrejection', function(e) {
     <div class="prod-cats" id="shopCats" style="display:flex;gap:6px;overflow-x:auto;align-items:center;min-height:40px;padding:4px 0 4px;-webkit-overflow-scrolling:touch;"></div>
   </div>
 
+  <!-- 스크롤되는 영역 -->
+  <div class="shop-scroll" id="shopScrollView" style="flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding:0 14px 14px;">
   <div class="prod-grid" id="shopGrid"></div>
 
   <p style="font-size:10px;color:var(--sub);margin:10px 2px 0;line-height:1.5;opacity:.8;">이 페이지의 상품 링크는 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다.</p>
@@ -13224,6 +13226,7 @@ window.addEventListener('unhandledrejection', function(e) {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
     지금 바로 새로고침
   </div>
+  </div><!-- /shop-scroll -->
 </div>
 
 <!-- SETTINGS SHEET -->
@@ -23923,9 +23926,12 @@ var _COUPANG_PARTNER_URL = 'https://coupa.ng/coRT4D';   // 파트너스 추적 �
 var _COUPANG_APP_PKG     = 'com.coupang.mobile';
 
 // 검색어를 넣어 쿠팡 앱(없으면 웹)의 검색 결과를 연다.
-//   안드로이드 intent:// 스킴을 쓰면 앱이 설치돼 있을 때 앱으로 바로 열리고,
-//   없으면 browser_fallback_url로 웹이 열린다. 스킴을 못 여는 환경 대비로
-//   1.2초 뒤에도 화면이 그대로면 웹 URL로 한 번 더 시도한다.
+//   ★ 왜 이렇게 복잡한가 —
+//     ① intent:// 스킴은 Capacitor 웹뷰가 처리하지 않아 아무 일도 일어나지 않았다(실측).
+//     ② 그냥 https 링크를 열면 Capacitor가 '기본 브라우저'를 직접 지정해 띄우기 때문에
+//        안드로이드 App Links 라우팅이 생략되고 쿠팡 앱 대신 브라우저가 뜬다(실측).
+//     → OS에게 판단을 맡기려면 AppLauncher 플러그인이 필요하다. 있으면 그걸 쓰고,
+//       없으면 intent:// → 웹 순으로 최선을 다한다.
 function _openCoupangQuery(q){
   var web = 'https://www.coupang.com/np/search?q=' + encodeURIComponent(q);
   var opened = false;
@@ -23934,6 +23940,18 @@ function _openCoupangQuery(q){
     if(typeof _newsOpenInApp === 'function'){ _newsOpenInApp(web, '쿠팡'); return; }
     try{ window.open(web, '_blank'); }catch(e){ location.href = web; }
   };
+
+  // ① AppLauncher — OS가 App Links로 판단해 쿠팡 앱이 있으면 앱으로 보낸다 (정석)
+  try{
+    var P = window.Capacitor && window.Capacitor.Plugins;
+    if(P && P.AppLauncher && typeof P.AppLauncher.openUrl === 'function'){
+      opened = true;
+      P.AppLauncher.openUrl({ url: web }).catch(function(){ opened = false; goWeb(); });
+      return;
+    }
+  }catch(e){}
+
+  // ② intent:// (일부 웹뷰에서만 동작)
   var isAndroid = /Android/i.test(navigator.userAgent || '');
   if(isAndroid){
     try{
@@ -23950,7 +23968,7 @@ function _openCoupangQuery(q){
       return;
     }catch(e){}
   }
-  goWeb();
+  goWeb();   // ③ 웹
 }
 
 // 쇼핑탭 상단 검색 실행
