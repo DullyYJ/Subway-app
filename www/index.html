@@ -13187,13 +13187,29 @@ window.addEventListener('unhandledrejection', function(e) {
         이에 따른 <b>일정액의 수수료를 제공받습니다.</b>
       </p>
     </div>
-    <!-- 쿠팡 검색 배너 (기존 '출퇴근 추천 쇼핑' 히어로 자리) -->
+    <!-- 쿠팡 검색 (기존 '출퇴근 추천 쇼핑' 히어로 자리)
+         ★ 검색 위젯 iframe은 앱 웹뷰 origin을 거부해 'Access Denied'가 떴다 → 직접 만든다.
+           · 검색어 입력 후 실행 → 쿠팡 앱(없으면 웹)의 검색 결과로 이동
+           · 검색어 없이 실행 → 파트너스 추적 링크로 이동 (이 경로는 수수료가 잡힌다)
+           ※ 검색 결과 URL은 파트너스 추적이 없어 수수료가 인식되지 않는다.
+             추후 파트너스 오픈API(딥링크) 자격이 되면 _openCoupangSearch에서
+             워커로 검색 URL을 보내 추적 링크를 받아오는 방식으로 바꾸면 된다. -->
     <div style="display:flex;justify-content:center;margin-bottom:4px;">
-      <div style="width:100%;max-width:340px;">
-        <iframe src="https://coupa.ng/coRT4D" width="100%" height="36" frameborder="0"
-                scrolling="no" referrerpolicy="unsafe-url" browsingtopics
-                title="쿠팡에서 검색"
-                style="display:block;border:0;"></iframe>
+      <div style="width:100%;max-width:340px;display:flex;align-items:center;gap:8px;
+                  padding:6px 8px 6px 14px;border-radius:999px;border:1px solid var(--border);
+                  background:var(--card);">
+        <span style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:#e63329;color:#fff;
+                     font-size:12px;font-weight:900;display:flex;align-items:center;justify-content:center;">C</span>
+        <input id="coupangQ" type="search" inputmode="search" enterkeyhint="search" maxlength="60"
+               placeholder="쿠팡에서 검색"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();_openCoupangSearch();}"
+               style="flex:1;min-width:0;border:none;outline:none;background:transparent;
+                      font-size:13px;color:var(--text);font-family:inherit;padding:4px 0;">
+        <button onclick="_openCoupangSearch()" aria-label="쿠팡에서 검색"
+                style="flex-shrink:0;width:30px;height:30px;border:none;border-radius:50%;cursor:pointer;
+                       background:#e63329;display:flex;align-items:center;justify-content:center;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="#fff"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+        </button>
       </div>
     </div>
     <!-- 카테고리(시트별) 탭 -->
@@ -23901,6 +23917,57 @@ function _newsOpenExternal(url){
   openNewsUrl(url);
 }
 window._newsOpenExternal = _newsOpenExternal;
+
+// ── 쿠팡 검색 ───────────────────────────────────────────────
+var _COUPANG_PARTNER_URL = 'https://coupa.ng/coRT4D';   // 파트너스 추적 링크(수수료 인식됨)
+var _COUPANG_APP_PKG     = 'com.coupang.mobile';
+
+// 검색어를 넣어 쿠팡 앱(없으면 웹)의 검색 결과를 연다.
+//   안드로이드 intent:// 스킴을 쓰면 앱이 설치돼 있을 때 앱으로 바로 열리고,
+//   없으면 browser_fallback_url로 웹이 열린다. 스킴을 못 여는 환경 대비로
+//   1.2초 뒤에도 화면이 그대로면 웹 URL로 한 번 더 시도한다.
+function _openCoupangQuery(q){
+  var web = 'https://www.coupang.com/np/search?q=' + encodeURIComponent(q);
+  var opened = false;
+  var goWeb = function(){
+    if(opened) return; opened = true;
+    if(typeof _newsOpenInApp === 'function'){ _newsOpenInApp(web, '쿠팡'); return; }
+    try{ window.open(web, '_blank'); }catch(e){ location.href = web; }
+  };
+  var isAndroid = /Android/i.test(navigator.userAgent || '');
+  if(isAndroid){
+    try{
+      var intentUrl = 'intent://www.coupang.com/np/search?q=' + encodeURIComponent(q)
+        + '#Intent;scheme=https;package=' + _COUPANG_APP_PKG
+        + ';S.browser_fallback_url=' + encodeURIComponent(web) + ';end';
+      var hidden = false;
+      document.addEventListener('visibilitychange', function onVis(){
+        if(document.hidden){ hidden = true; opened = true; }   // 앱으로 전환됨
+        document.removeEventListener('visibilitychange', onVis);
+      });
+      location.href = intentUrl;
+      setTimeout(function(){ if(!hidden) goWeb(); }, 1200);
+      return;
+    }catch(e){}
+  }
+  goWeb();
+}
+
+// 쇼핑탭 상단 검색 실행
+//   검색어가 있으면 검색 결과로, 없으면 파트너스 추적 링크로 보낸다.
+//   (검색 결과 URL에는 파트너스 추적이 없어 수수료가 인식되지 않으므로,
+//    그냥 눌렀을 때만이라도 추적 경로를 유지한다.)
+function _openCoupangSearch(){
+  var el = document.getElementById('coupangQ');
+  var q = el ? String(el.value || '').trim() : '';
+  if(q){ _openCoupangQuery(q); return; }
+  try{
+    if(typeof _newsOpenInApp === 'function'){ _newsOpenInApp(_COUPANG_PARTNER_URL, '쿠팡'); return; }
+  }catch(e){}
+  try{ window.open(_COUPANG_PARTNER_URL, '_blank'); }catch(e){ location.href = _COUPANG_PARTNER_URL; }
+}
+window._openCoupangSearch = _openCoupangSearch;
+window._openCoupangQuery  = _openCoupangQuery;
 window._newsOpenInApp = _newsOpenInApp;
 
 // 뉴스 상세 팝업 (제목 + 카테고리·시간 + 언론사 요약 + 원문 링크)
