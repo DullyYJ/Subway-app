@@ -9845,6 +9845,8 @@ function _busReorderExit(){
     Array.prototype.forEach.call(listEl.querySelectorAll('.map-bus-stop-card'), function(c){ c.style.transform=''; c.style.transition=''; c.classList.remove('bus-dragging'); });
   }
   var bar = document.getElementById('busReorderBar'); if(bar) bar.remove();
+  // 자동 스크롤 루프가 돌고 있으면 멈춘다 (완료 버튼으로 나가는 경로)
+  if(_busDrag && _busDrag.raf){ try{ cancelAnimationFrame(_busDrag.raf); }catch(e){} }
   _busDrag = null;
 }
 window._busReorderExit = _busReorderExit;
@@ -9861,6 +9863,42 @@ function _busPersistDomOrder(){
   }
 }
 
+// 카드가 실제로 담겨 스크롤되는 조상 요소를 찾는다
+function _bdScroller(el){
+  var n = el && el.parentNode;
+  while(n && n.nodeType === 1){
+    try{
+      var st = window.getComputedStyle(n);
+      if(/(auto|scroll)/.test(st.overflowY) && n.scrollHeight > n.clientHeight + 4) return n;
+    }catch(e){}
+    n = n.parentNode;
+  }
+  return document.scrollingElement || document.documentElement;
+}
+// ★ 손가락이 목록 위/아래 가장자리에 닿으면 목록을 따라 스크롤한다.
+//   (예전엔 화면에 보이는 범위 안에서만 순서를 바꿀 수 있어서, 맨 아래 카드를
+//    맨 위로 올리려면 드래그를 여러 번 끊어서 해야 했다)
+var _BD_EDGE = 90;    // 가장자리 감지 폭(px)
+var _BD_MAXV = 18;    // 프레임당 최대 스크롤(px)
+function _bdAutoScrollTick(){
+  var d = _busDrag;
+  if(!d){ return; }
+  var sc = d.scroller, y = d.lastY;
+  var isDoc = (sc === document.scrollingElement || sc === document.documentElement || sc === document.body);
+  var top, bot;
+  if(isDoc){ top = 0; bot = window.innerHeight; }
+  else { var r = sc.getBoundingClientRect(); top = r.top; bot = r.bottom; }
+  var v = 0;
+  if(y < top + _BD_EDGE)      v = -_BD_MAXV * Math.min(1, (top + _BD_EDGE - y) / _BD_EDGE);
+  else if(y > bot - _BD_EDGE) v =  _BD_MAXV * Math.min(1, (y - (bot - _BD_EDGE)) / _BD_EDGE);
+  if(v){
+    var before = sc.scrollTop;
+    sc.scrollTop = before + v;
+    if(sc.scrollTop !== before) _bdMove(y);   // 스크롤한 만큼 위치·순서 다시 계산
+  }
+  d.raf = requestAnimationFrame(_bdAutoScrollTick);
+}
+
 function _bdBeginDrag(card, t){
   var listEl = document.getElementById('mapBusStopList');
   var cards = Array.prototype.slice.call(listEl.querySelectorAll('.map-bus-stop-card'));
@@ -9870,13 +9908,23 @@ function _bdBeginDrag(card, t){
   listEl.classList.add('bus-drag-active');
   card.classList.add('bus-dragging');
   cards.forEach(function(c){ if(c!==card){ c.style.transform=''; c.style.transition='transform .18s ease'; } });
-  _busDrag = { el:card, listEl:listEl, cards:cards, rects:rects, origIndex:origIndex, targetIndex:origIndex, startY:t.clientY, h:rects[origIndex].h };
+  var sc = _bdScroller(listEl);
+  _busDrag = { el:card, listEl:listEl, cards:cards, rects:rects, origIndex:origIndex, targetIndex:origIndex,
+               startY:t.clientY, h:rects[origIndex].h,
+               scroller:sc, scrollTop0:sc.scrollTop, lastY:t.clientY, raf:null };
+  // 드래그 중 남아 있는 텍스트 선택 해제 (롱프레스로 선택이 잡혀 있을 수 있다)
+  try{ var sel = window.getSelection(); if(sel && sel.removeAllRanges) sel.removeAllRanges(); }catch(e){}
+  _busDrag.raf = requestAnimationFrame(_bdAutoScrollTick);
 }
 function _bdMove(clientY){
   var d = _busDrag; if(!d) return;
+  d.lastY = clientY;
+  // 시작 시점에 잰 좌표(rects)는 화면 기준이라, 그 사이 목록이 스크롤됐으면 어긋난다.
+  // 스크롤한 양을 더해 보정하면 카드가 손가락 아래에 계속 붙어 있는다.
+  var scrolled = d.scroller ? (d.scroller.scrollTop - d.scrollTop0) : 0;
   var dy = clientY - d.startY;
-  d.el.style.transform = 'translateY(' + dy + 'px) scale(1.03)';
-  var draggedCenter = d.rects[d.origIndex].center + dy;
+  d.el.style.transform = 'translateY(' + (dy + scrolled) + 'px) scale(1.03)';
+  var draggedCenter = d.rects[d.origIndex].center + dy + scrolled;
   var ti = 0;
   for(var i=0;i<d.rects.length;i++){ if(i===d.origIndex) continue; if(d.rects[i].center < draggedCenter) ti++; }
   d.targetIndex = ti;
@@ -9891,6 +9939,7 @@ function _bdMove(clientY){
 }
 function _bdEnd(){
   var d = _busDrag; if(!d) return;
+  if(d.raf){ try{ cancelAnimationFrame(d.raf); }catch(e){} d.raf = null; }
   var listEl = d.listEl, el = d.el;
   listEl.classList.remove('bus-drag-active');
   d.cards.forEach(function(c){ c.style.transition=''; c.style.transform=''; });
@@ -9911,6 +9960,13 @@ function _busDragInit(){
   if(!listEl) return;
   Array.prototype.forEach.call(listEl.querySelectorAll('.map-bus-stop-card'), function(card){
     if(card._bdBound) return; card._bdBound = true;
+    // 길게눌러 나오는 선택/컨텍스트 메뉴 차단 (CSS만으로 안 막히는 브라우저 대비)
+    card.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+    card.addEventListener('selectstart', function(e){
+      var tg = e.target;
+      if(tg && (tg.tagName === 'INPUT' || tg.tagName === 'TEXTAREA')) return;
+      e.preventDefault();
+    });
     var lp=null, sx=0, sy=0, moved=false;
     card.addEventListener('touchstart', function(e){
       if(e.touches.length>1) return;
@@ -9918,7 +9974,12 @@ function _busDragInit(){
       if(listEl.classList.contains('bus-reorder-mode')){
         _bdBeginDrag(card, t);           // 편집모드: 바로 드래그
       } else {
-        lp = setTimeout(function(){ if(!moved){ _busReorderEnter(); _bdBeginDrag(card, {clientX:sx, clientY:sy}); } }, 420);  // 꾹 누르기
+        lp = setTimeout(function(){
+          if(moved) return;
+          try{ var sl = window.getSelection(); if(sl && sl.removeAllRanges) sl.removeAllRanges(); }catch(e){}
+          _busReorderEnter();
+          _bdBeginDrag(card, {clientX:sx, clientY:sy});
+        }, 420);  // 꾹 누르기
       }
     }, {passive:true});
     card.addEventListener('touchmove', function(e){
@@ -10402,11 +10463,17 @@ function _renderMapBusCard(stop, idx, mode, total) {
     ? _ltEsc(alias) + ' <span style="font-size:11px;font-weight:600;color:var(--sub);">' + _ltEsc(name) + '</span>'
     : _ltEsc(name);
   card.innerHTML =
-    '<div class="map-bus-stop-name">' + nameHtml +
-      ' <span class="bus-lm" style="font-size:11px;font-weight:700;color:var(--gold);white-space:nowrap;">' +
-        (function(){ var c = (typeof _busLmCached === 'function') ? _busLmCached(nodeId) : undefined; return c ? '(' + _ltEsc(c) + ' 방향)' : ''; })() + '</span>' +
-      '<button class="bus-alias-edit" title="이름 설정" style="background:none;border:none;cursor:pointer;font-size:12px;padding:0 3px;line-height:1;opacity:.55;">✏️</button>' +
-      '<button class="bus-map-btn" title="정류장 위치 지도" style="background:none;border:none;cursor:pointer;font-size:13px;padding:0 3px;line-height:1;opacity:.7;">🗺️</button>' +
+    // ★ 이름과 방향 라벨은 하나의 신축 래퍼로 묶는다.
+    //   예전엔 이름이 flex 컨테이너의 맨 텍스트 노드라, 옆의 버튼·거리배지에 밀려
+    //   최소 너비까지 찌그러지면서 '남대문경찰서.서울역10번출구'가 한 글자씩 세로로
+    //   쪼개졌다. 래퍼에 flex:1·min-width:0을 주고 나머지는 shrink 금지로 고정한다.
+    '<div class="map-bus-stop-name">' +
+      '<span class="map-bus-nm-wrap">' + nameHtml +
+        ' <span class="bus-lm" style="font-size:11px;font-weight:700;color:var(--gold);">' +
+          (function(){ var c = (typeof _busLmCached === 'function') ? _busLmCached(nodeId) : undefined; return c ? '(' + _ltEsc(c) + ' 방향)' : ''; })() + '</span>' +
+      '</span>' +
+      '<button class="bus-alias-edit" title="이름 설정" style="flex:0 0 auto;background:none;border:none;cursor:pointer;font-size:12px;padding:0 3px;line-height:1;opacity:.55;">✏️</button>' +
+      '<button class="bus-map-btn" title="정류장 위치 지도" style="flex:0 0 auto;background:none;border:none;cursor:pointer;font-size:13px;padding:0 3px;line-height:1;opacity:.7;">🗺️</button>' +
       rightBtn + '</div>' +
     (dir ? '<div class="map-bus-stop-sub">' + _ltEsc(dir) + ' 방면</div>' : '') +
     '<div class="map-bus-row" style="color:var(--sub);font-size:13px;">도착 정보 불러오는 중...</div>';
@@ -12193,6 +12260,8 @@ window._bgDiag = async function(){
   add('플러그인 App: ' + (P.App ? 'O' : 'X'));
   add('플러그인 LocalNotifications: ' + (P.LocalNotifications ? 'O' : 'X'));
   add('플러그인 BackgroundGeolocation: ' + (P.BackgroundGeolocation ? 'O' : 'X ← 없으면 백그라운드 불가'));
+  add('플러그인 Browser: ' + (P.Browser ? 'O (뉴스 원문이 인앱으로 열림)' : 'X ← 없으면 외부 브라우저로 나감'));
+  add('마지막 뉴스 열기 방식: ' + (window._newsOpenMode || '아직 없음'));
   // 알림 권한
   try {
     if(P.LocalNotifications && P.LocalNotifications.checkPermissions){
@@ -13106,25 +13175,31 @@ window.addEventListener('unhandledrejection', function(e) {
 
 <!-- SHOP TAB -->
 <div class="tab-body" id="tab-shop">
-  <!-- ★ 공정위 추천·보증 심사지침: 대가성 문구는 소비자가 쉽게 인식할 수 있는 위치에 표시 -->
-  <div style="background:rgba(255,149,0,.12);border:1px solid rgba(255,149,0,.35);border-radius:10px;padding:10px 12px;margin-bottom:10px;">
-    <p style="font-size:11.5px;line-height:1.55;color:var(--text);margin:0;">
-      이 페이지의 상품 링크는 <b>쿠팡 파트너스 활동</b>의 일환으로,
-      이에 따른 <b>일정액의 수수료를 제공받습니다.</b>
-    </p>
-  </div>
-  <div class="shop-hero">
-    <div><h2>출퇴근 추천 쇼핑</h2><p>지금 시간·요일·날씨 맞춤 추천 100선 🛍</p></div>
-    <span style="font-size:26px;">🛒</span>
+  <!-- ★ 고지문구 + 검색배너 + 카테고리를 한 덩어리로 상단 고정.
+       스크롤하면 이 아래(상품 그리드)만 움직인다.
+       .tab-body의 좌우·상단 padding(14px)을 음수 마진으로 덮어야 상품이 옆으로 비쳐 지나가지 않는다. -->
+  <div class="shop-sticky-hdr" style="position:sticky;top:0;z-index:20;background:var(--bg);
+       margin:-14px -14px 0;padding:14px 14px 4px;">
+    <!-- 공정위 추천·보증 심사지침: 대가성 문구는 소비자가 쉽게 인식할 수 있는 위치에 표시 -->
+    <div style="background:rgba(255,149,0,.12);border:1px solid rgba(255,149,0,.35);border-radius:10px;padding:8px 12px;margin-bottom:8px;">
+      <p style="font-size:11.5px;line-height:1.5;color:var(--text);margin:0;">
+        이 페이지의 상품 링크는 <b>쿠팡 파트너스 활동</b>의 일환으로,
+        이에 따른 <b>일정액의 수수료를 제공받습니다.</b>
+      </p>
+    </div>
+    <!-- 쿠팡 검색 배너 (기존 '출퇴근 추천 쇼핑' 히어로 자리) -->
+    <div style="display:flex;justify-content:center;margin-bottom:4px;">
+      <div style="width:100%;max-width:340px;">
+        <iframe src="https://coupa.ng/coRT4D" width="100%" height="36" frameborder="0"
+                scrolling="no" referrerpolicy="unsafe-url" browsingtopics
+                title="쿠팡에서 검색"
+                style="display:block;border:0;"></iframe>
+      </div>
+    </div>
+    <!-- 카테고리(시트별) 탭 -->
+    <div class="prod-cats" id="shopCats" style="display:flex;gap:6px;overflow-x:auto;align-items:center;min-height:40px;padding:4px 0 4px;-webkit-overflow-scrolling:touch;"></div>
   </div>
 
-  <!-- 카테고리(시트별) 탭 -->
-  <div class="prod-cats" id="shopCats" style="display:flex;gap:6px;overflow-x:auto;align-items:center;min-height:40px;padding:4px 0 8px;margin-bottom:4px;-webkit-overflow-scrolling:touch;"></div>
-
-  <div class="shop-sec">
-    <span id="shopCatLabel">지금 추천 아이템</span>
-    <span id="shopTimeLabel"></span>
-  </div>
   <div class="prod-grid" id="shopGrid"></div>
 
   <p style="font-size:10px;color:var(--sub);margin:10px 2px 0;line-height:1.5;opacity:.8;">이 페이지의 상품 링크는 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다.</p>
@@ -23523,7 +23598,9 @@ var _NEWS_CATS = ['전체','증시','경제','사회','정치','연예','스포�
 
 // 분류 규칙 — 위에서부터 먼저 맞는 것 채택 (순서가 우선순위)
 var _NEWS_RULES = [
-  { cat:'증시', re:/(코스피|코스닥|증시|주가|주식|상한가|하한가|급등주|급락주|시가총액|공모주|IPO\b|상장폐지|기관\s*순매수|외국인\s*순매(수|도)|배당금|ETF|나스닥|다우\s*지수|S&P|니케이|증권가|공매도|장중|종가|개장|폐장|매수세|매도세|테마주|우선주|반등장|약세장|강세장|지분\s*(인수|매각|취득))/ },
+  // ★ 미국 증시 용어를 대폭 보강 — '뉴욕증시·월가·서학개미' 같은 기사가 경제로 새어나갔다.
+  //   이 규칙이 목록 맨 앞이라 경제 규칙보다 먼저 잡힌다.
+  { cat:'증시', re:/(코스피|코스닥|증시|주가|주식|상한가|하한가|급등주|급락주|시가총액|공모주|IPO\b|상장폐지|기관\s*순매수|외국인\s*순매(수|도)|배당금|ETF|나스닥|다우\s*(지수|존스)|S&P\s*5?00?|니케이|증권가|공매도|장중|종가|개장|폐장|매수세|매도세|테마주|우선주|반등장|약세장|강세장|지분\s*(인수|매각|취득)|뉴욕\s*증시|미국\s*증시|월가|서학\s*개미|동학\s*개미|필라델피아\s*반도체|VIX|러셀\s*2000|블루칩|사이드카|서킷브레이커|어닝\s*(서프라이즈|쇼크)|실적\s*발표|목표주가|증권사\s*(리포트|전망)|애널리스트|상장\s*첫날|따상|장\s*마감|프리마켓|시간외\s*거래)/ },
   { cat:'스포츠', re:/(프로야구|KBO|메이저리그|MLB|축구|K리그|프리미어리그|EPL|손흥민|이강인|김민재|농구|KBL|NBA|배구|V리그|골프|LPGA|PGA|올림픽|월드컵|아시안게임|국가대표|선발\s*투수|홈런|타율|승점|연승|연패|전적|리그\s*순위|중간순위|우승\s*후보|이적|FA\s*계약|구단|감독\s*(선임|경질)|[A-Z]{1,3}FC\b|FC\b|유나이티드|(오늘|내일|어제)의\s*경기|경기\s*결과|0-[0-9]|[0-9]-[0-9]\s*(승|패|무)|석패|완승|완봉|선두\s*경쟁|결승타|끝내기|역전승|무득점|타점|도루|삼진|안타|투구|출루|두산|기아|KIA|한화|롯데|삼성\s*라이온즈|LG\s*트윈스|키움|SSG|NC\s*다이노스|kt\s*위즈)/ },
   { cat:'연예', re:/(아이돌|가수|배우|드라마|영화|예능|방송인|콘서트|앨범|컴백|데뷔|음원|빌보드|K-?팝|아이유|BTS|방탄|블랙핑크|뉴진스|세븐틴|넷플릭스|디즈니\+|시청률|박스오피스|열애|결혼\s*발표|이혼\s*발표|소속사|팬미팅|무대\s*인사|캐스팅|OST|예능\s*출연)/ },
   { cat:'정치', re:/(대통령|국회|여당|야당|정당|의원|장관|총리|청와대|대통령실|선거|대선|총선|공천|탄핵|특검|국정감사|개각|외교부|정상회담|북한|미사일\s*발사|국방부|한미|한일|한중\s*정상|예산안|시정연설|국정\s*과제)/ },
@@ -23570,12 +23647,22 @@ window._newsApplyCats = _newsApplyCats;
 
 // ── 증시 뉴스 보강: 구글뉴스 RSS(증시/코스피/코스닥)에서 직접 수집 ──
 var _newsStockAt = 0;
-function _fetchStockNews(cb){
-  if(_newsStockAt && Date.now() - _newsStockAt < 10*60*1000){ if(cb) cb(); return; }
+// force=true면 캐시(10분)를 무시하고 다시 모은다 (증시 탭을 열었는데 기사가 없을 때)
+function _fetchStockNews(cb, force){
+  if(!force && _newsStockAt && Date.now() - _newsStockAt < 10*60*1000){ if(cb) cb(); return; }
   if(typeof _PROXY_LIST === 'undefined' || typeof _parseNewsRSS !== 'function'){ if(cb) cb(); return; }
   _newsStockAt = Date.now();
+  // ★ 국내 2 + 미국 2 + 경제 토픽 1.
+  //   미국 증시는 한글 기사가 따로 검색돼야 잡힌다(영문 매체는 제외됨).
   var feeds = [
-    'https://news.google.com/rss/search?q=%EC%BD%94%EC%8A%A4%ED%94%BC+%EC%BD%94%EC%8A%A4%EB%8B%A5+%EC%A6%9D%EC%8B%9C+when:2d&hl=ko&gl=KR&ceid=KR:ko',
+    // 국내 — 지수
+    'https://news.google.com/rss/search?q=%EC%BD%94%EC%8A%A4%ED%94%BC%20%EC%BD%94%EC%8A%A4%EB%8B%A5%20%EC%A6%9D%EC%8B%9C+when:2d&hl=ko&gl=KR&ceid=KR:ko',
+    // 국내 — 수급·공모주
+    'https://news.google.com/rss/search?q=%EC%A3%BC%EC%8B%9D%EC%8B%9C%EC%9E%A5%20%EC%99%B8%EA%B5%AD%EC%9D%B8%20%EC%88%9C%EB%A7%A4%EC%88%98%20%EA%B3%B5%EB%AA%A8%EC%A3%BC%20%EC%83%81%EC%9E%A5+when:2d&hl=ko&gl=KR&ceid=KR:ko',
+    // 미국 — 지수
+    'https://news.google.com/rss/search?q=%EB%89%B4%EC%9A%95%EC%A6%9D%EC%8B%9C%20%EB%82%98%EC%8A%A4%EB%8B%A5%20%EB%8B%A4%EC%9A%B0%EC%A7%80%EC%88%98+when:2d&hl=ko&gl=KR&ceid=KR:ko',
+    // 미국 — 시장 전반
+    'https://news.google.com/rss/search?q=%EB%AF%B8%EA%B5%AD%EC%A6%9D%EC%8B%9C%20%EC%9B%94%EA%B0%80%20S%26P500+when:2d&hl=ko&gl=KR&ceid=KR:ko',
     'https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=ko&gl=KR&ceid=KR:ko'
   ];
   var pending = feeds.length;
@@ -23589,20 +23676,29 @@ function _fetchStockNews(cb){
           var arr = _parseNewsRSS(xml) || [];
           if(!arr.length){ tryP(i+1); return; }
           var have = {};
-          (_NEWSFEED.items || []).forEach(function(x){ if(x && x.title) have[x.title.replace(/\s/g,'')] = 1; });
+          (_NEWSFEED.items || []).forEach(function(x){
+            if(!x) return;
+            if(x.title) have[x.title.replace(/\s/g,'')] = 1;
+            if(x.link)  have['L:' + x.link] = 1;      // 제목이 조금 달라도 같은 기사면 걸러낸다
+          });
           var add = [];
           arr.forEach(function(n){
             if(!n.title) return;
             var k = n.title.replace(/\s/g,'');
-            if(have[k]) return;
+            if(have[k] || (n.link && have['L:' + n.link])) return;
             have[k] = 1;
+            if(n.link) have['L:' + n.link] = 1;
             var ts = 0;
             try{ ts = n.pubDate ? new Date(n.pubDate).getTime() : 0; }catch(e){}
             if(!ts) ts = Date.now();
             var item = { title:n.title, link:n.link, ts:ts, desc:'', source:n.source, cat:'증시' };
             item.cat = _newsClassify(item);
             // 검색 피드 결과는 증시 우선 배정 (경제로 빠지는 것 방지)
-            if(item.cat === '경제' && /(코스피|코스닥|증시|주가|주식|상장|공모주|나스닥)/.test(n.title)) item.cat = '증시';
+            // 검색 피드는 증시 목적이므로, 경제/IT로 분류된 것도 증시 신호가 있으면 증시로 돌린다
+            if((item.cat === '경제' || item.cat === 'IT')
+               && /(코스피|코스닥|증시|주가|주식|상장|공모주|나스닥|다우|S&P|월가|뉴욕|지수|종목|매수|매도|배당|상한가|하한가|시총)/.test(n.title)){
+              item.cat = '증시';
+            }
             item._catFixed = 1;
             add.push(item);
           });
@@ -23641,9 +23737,10 @@ function _renderNewsTab(list){
     if(it.ts && it.ts < cut) return false;
     return _newsCatSel === '전체' || it.cat === _newsCatSel;
   }).slice(0, 60);
-  // 증시 탭인데 기사가 없으면 즉시 수집 후 재렌더
-  if(_newsCatSel === '증시' && !items.length && typeof _fetchStockNews === 'function'){
-    _fetchStockNews(function(){ _renderNewsTab(list); });
+  // 증시 탭인데 기사가 적으면(5건 미만) 캐시를 무시하고 즉시 더 모은 뒤 재렌더
+  if(_newsCatSel === '증시' && items.length < 5 && typeof _fetchStockNews === 'function' && !window._newsStockRefetching){
+    window._newsStockRefetching = 1;
+    _fetchStockNews(function(){ window._newsStockRefetching = 0; _renderNewsTab(list); }, true);
   }
   var esc = function(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
   window._NEWS_SHOWN = items;   // 상세 팝업 참조용
@@ -23659,7 +23756,12 @@ function _renderNewsTab(list){
       + '</div>';
   }).join('');
   list.innerHTML =
-    '<div style="display:flex;gap:6px;overflow-x:auto;padding:4px 2px 10px;-webkit-overflow-scrolling:touch;">' + chips + '</div>'
+    // ★ 목록을 내려도 카테고리 칩은 위에 붙어 있게 (position:sticky)
+    //   배경을 깔지 않으면 기사 글자가 칩 뒤로 비쳐 보인다.
+    '<div class="news-cat-bar" style="position:sticky;top:0;z-index:6;display:flex;gap:6px;overflow-x:auto;'
+      // 좌우 음수 마진으로 컨테이너 패딩(14px)까지 덮어야 기사 글자가 옆으로 비쳐 지나가지 않는다
+      + 'margin:-12px -14px 0;padding:12px 14px 10px;background:var(--bg);'
+      + '-webkit-overflow-scrolling:touch;">' + chips + '</div>'
     + (items.length ? rows
         : '<div style="text-align:center;padding:40px;color:var(--sub);">📰 '
           + (_newsCatSel === '전체' ? '뉴스 불러오는 중...' : _newsCatSel + ' 뉴스를 불러오는 중...')
@@ -23760,6 +23862,9 @@ window._newsSourceLabel = _newsSourceLabel;
 //   1) Capacitor Browser 플러그인(권장) — 시스템 커스텀탭이 앱 위에 뜸
 //   2) Median inAppBrowser
 //   3) 마지막 폴백: 외부 브라우저
+// ★ 어떤 경로로 열렸는지 기록 — 설정 진단에서 확인용
+//   ('capacitor' = 인앱 브라우저(닫기 버튼으로 앱 복귀) / 'median' = 인앱 / 'external' = 외부 브라우저)
+window._newsOpenMode = null;
 function _newsOpenInApp(url, sourceLabel){
   if(!url || typeof url !== 'string') return;
   try{ new URL(url); }catch(e){ return; }
@@ -23767,21 +23872,35 @@ function _newsOpenInApp(url, sourceLabel){
     var P = window.Capacitor && window.Capacitor.Plugins;
     if(P && P.Browser && typeof P.Browser.open === 'function'){
       if(typeof toast === 'function' && sourceLabel) toast('📰 ' + sourceLabel + ' 원문을 여는 중');
+      window._newsOpenMode = 'capacitor';
       P.Browser.open({
         url: url,
         presentationStyle: 'popover',
         toolbarColor: '#0a84ff'
-      }).catch(function(){ openNewsUrl(url); });
+      }).catch(function(){ _newsOpenExternal(url); });
       return;
     }
   }catch(e){}
   try{
     if(typeof median !== 'undefined' && median.open && median.open.inAppBrowser){
+      window._newsOpenMode = 'median';
       median.open.inAppBrowser(url); return;
     }
   }catch(e){}
-  openNewsUrl(url);   // 외부 브라우저 폴백
+  _newsOpenExternal(url);   // 외부 브라우저 폴백
 }
+// 외부 브라우저로 나갈 때는 돌아오는 방법을 알려준다.
+//   ※ 외부 브라우저 화면 위에 우리 버튼을 띄우는 건 웹뷰 앱에선 불가능하다
+//     (안드로이드 '다른 앱 위에 표시' 시스템 오버레이 권한이 필요한 네이티브 기능).
+//     그래서 인앱 브라우저(@capacitor/browser)로 여는 게 정답이고, 이건 그게 없을 때의 안내.
+function _newsOpenExternal(url){
+  window._newsOpenMode = 'external';
+  try{
+    if(typeof toast === 'function') toast('브라우저에서 뒤로가기를 누르면 길동무로 돌아와요');
+  }catch(e){}
+  openNewsUrl(url);
+}
+window._newsOpenExternal = _newsOpenExternal;
 window._newsOpenInApp = _newsOpenInApp;
 
 // 뉴스 상세 팝업 (제목 + 카테고리·시간 + 언론사 요약 + 원문 링크)
@@ -36538,7 +36657,8 @@ document.addEventListener('DOMContentLoaded', function() {
 .bus-stop-hdr{padding:16px 16px 12px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;}
 .bus-stop-icon{display:none;}
 .bus-stop-titlewrap{flex:1;min-width:0;}
-.bus-stop-name{font-size:17px;font-weight:800;color:var(--text);line-height:1.3;}
+.bus-stop-name{font-size:17px;font-weight:800;color:var(--text);line-height:1.3;
+  word-break:keep-all;overflow-wrap:anywhere;}
 .bus-stop-sub{font-size:12px;color:var(--sub);margin-top:3px;}
 .bus-stop-dist{font-size:11px;color:var(--sub);background:var(--bg);
   padding:3px 9px;border-radius:11px;flex-shrink:0;align-self:center;}
@@ -36701,15 +36821,29 @@ document.addEventListener('DOMContentLoaded', function() {
   border-radius:18px;margin:12px;overflow:hidden;}
 /* ★ 롱프레스 드래그 정렬: 편집모드 흔들림 + 드래그 카드 강조 */
 @keyframes busJiggle{ 0%,100%{transform:rotate(-0.8deg);} 50%{transform:rotate(0.8deg);} }
+/* ★ 카드를 꾹 누르면 OS 텍스트 선택(복사·번역 툴바)이 먼저 잡혀 드래그가 안 되던 문제.
+   목록 카드는 읽기용이라 선택이 필요 없으므로 선택·길게눌러 메뉴를 모두 막는다. */
+.map-bus-stop-card, .bus-stop-card{
+  -webkit-user-select:none; -moz-user-select:none; -ms-user-select:none; user-select:none;
+  -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent; }
+/* 입력칸은 예외 — 별명 편집 등에서 선택이 필요하다 */
+.map-bus-stop-card input, .map-bus-stop-card textarea,
+.bus-stop-card input, .bus-stop-card textarea{
+  -webkit-user-select:text; user-select:text; }
 .bus-reorder-mode .map-bus-stop-card{ animation:busJiggle .24s ease-in-out infinite; }
 .bus-reorder-mode.bus-drag-active .map-bus-stop-card{ animation:none; }
 .map-bus-stop-card.bus-dragging{ animation:none!important; z-index:50; position:relative;
   box-shadow:0 10px 26px rgba(0,0,0,.28); opacity:.97; }
 .bus-drag-active .map-bus-stop-card{ touch-action:none; }
 .map-bus-stop-name{padding:16px 16px 12px;font-size:17px;font-weight:800;color:var(--text);
-  display:flex;align-items:center;gap:8px;}
+  display:flex;align-items:flex-start;gap:8px;}
+/* 이름 래퍼: 남는 폭을 다 쓰되(min-width:0 이 있어야 flex 안에서 실제로 줄어듦),
+   한글은 단어 단위로 끊고(keep-all), 정말 안 들어갈 때만 중간에서 끊는다(anywhere). */
+.map-bus-nm-wrap{flex:1 1 auto;min-width:0;word-break:keep-all;overflow-wrap:anywhere;}
+.map-bus-stop-name .bus-fav-toggle{flex:0 0 auto;}
 .map-bus-stop-sub{font-size:12px;color:var(--sub);padding:0 16px 6px;margin-top:-4px;}
-.map-bus-dist{margin-left:auto;font-size:11px;color:var(--sub);background:var(--bg);padding:3px 9px;border-radius:11px;white-space:nowrap;}
+.map-bus-dist{flex:0 0 auto;margin-left:auto;font-size:11px;color:var(--sub);background:var(--bg);padding:3px 9px;border-radius:11px;white-space:nowrap;
+  align-self:center;}
 .map-bus-loading{text-align:center;padding:40px;color:var(--sub);}
 .map-bus-row{display:flex;align-items:center;gap:12px;padding:14px 16px;
   border-top:1px solid var(--border);}
