@@ -4404,36 +4404,74 @@ function _loadBusRouteData(cityCode, routeId, src){
     var _m = document.getElementById('busRouteModal');
     src = (_m && _m.dataset) ? (_m.dataset.src || '') : '';
   }
+  var _reqSeq = (window._brSeq = (window._brSeq || 0) + 1);   // 늦게 온 응답이 새 노선을 덮지 않게
+  var _stale  = function(){ return window._brSeq !== _reqSeq; };
+
+  // ★ 버스 위치는 정류장과 '동시에' 요청한다(직렬 → 병렬).
+  //   예전엔 정류장을 다 받은 뒤에야 위치를 요청해서 두 왕복을 기다려야 했다.
+  var _busesReady = false, _busesVal = [], _pendingStations = null, _pendingViaGG = null;
+  var _busSrcGG = null;   // 버스 위치를 어느 출처로 요청했는지 (폴백 시 재요청 판단)
+  var _paint = function(stations, buses){
+    if(_stale()) return;
+    _renderBusRoute(stations, buses || []);
+  };
+  var _startBuses = function(viaGG){
+    if(_busSrcGG === viaGG) return;        // 같은 출처로 이미 요청함
+    _busSrcGG = viaGG;
+    _busesReady = false; _busesVal = [];
+    var handle = function(e, list){
+      if(_busSrcGG !== viaGG) return;      // 그 사이 출처가 바뀌었으면 이 응답은 버린다
+      if(_stale()) return;
+      _busesReady = true; _busesVal = list || [];
+      // 정류장이 이미 그려졌으면 버스 위치만 얹어 다시 그린다
+      if(_pendingStations) _paint(_pendingStations, _busesVal);
+    };
+    if(viaGG && typeof _fetchBusLocationsGG === 'function'){ _fetchBusLocationsGG(routeId, handle); return; }
+    if(cityCode) _fetchBusLocations(cityCode, routeId, handle);
+    else handle(null, []);
+  };
 
   var done = function(stations, viaGG){
-    // 정류장을 어디서 받았는지에 맞춰 버스 위치도 같은 출처에서 가져온다.
-    //   (TAGO는 cityCode가 필수라 경기 노선에서는 애초에 조회가 안 된다)
-    if(viaGG && typeof _fetchBusLocationsGG === 'function'){
-      _fetchBusLocationsGG(routeId, function(e4, buses){
-        _renderBusRoute(stations, buses || []);
-      });
-      return;
-    }
-    _fetchBusLocations(cityCode, routeId, function(err2, buses){
-      _renderBusRoute(stations, buses || []);
-    });
+    if(_stale()) return;
+    _pendingStations = stations; _pendingViaGG = viaGG;
+    // ★ 정류장이 준비되면 버스 위치를 기다리지 않고 먼저 그린다(체감 속도).
+    //   위치가 도착하면 위에서 다시 그려 아이콘이 얹힌다.
+    _paint(stations, _busesReady ? _busesVal : []);
   };
   var fail = function(){
     body.innerHTML = '<div style="padding:40px;text-align:center;color:var(--sub);font-size:13px;">노선 정류장 정보를 불러올 수 없어요.<br>(API 응답 없음)</div>';
   };
   var tago = function(){
+    // ★ GBIS로 시작했다가 TAGO로 넘어온 경우, 버스 위치도 TAGO로 다시 받아야 한다
+    //   (정류장은 TAGO 순번인데 위치는 GBIS 순번이면 아이콘이 엉뚱한 칸에 찍힌다)
+    _startBuses(false);
     _fetchRouteStations(cityCode, routeId, function(err, stations){
+      if(_stale()) return;
       if(err || !stations.length){ fail(); return; }
-      done(stations);
+      _brCacheSave(cityCode, routeId, false, stations);
+      done(stations, false);
     });
   };
 
   // ★ 경기(GBIS) 노선이거나 cityCode를 못 정한 경우 GBIS를 먼저 본다.
   //   TAGO는 cityCode 없이는 조회 자체가 안 되고, 경기 노선은 TAGO에 없는 경우가 많다.
   var tryGG = (src === 'gbis') || !cityCode;
+
+  // ★ 7일 캐시에 이미 있으면 네트워크를 기다리지 않고 즉시 그린다.
+  //   (같은 노선을 다시 열 때 '노선 정보 불러오는 중…'이 아예 안 보인다)
+  var cachedStns = (typeof _busRouteStnsPeek === 'function')
+    ? _busRouteStnsPeek(cityCode, routeId, tryGG) : null;
+  if(cachedStns && cachedStns.length){
+    _startBuses(tryGG);          // 위치는 병렬로 받아 나중에 얹는다
+    done(cachedStns, tryGG);
+    return;
+  }
+
+  _startBuses(tryGG);            // 정류장 조회와 동시에 시작
   if(tryGG && typeof _fetchRouteStationsGG === 'function'){
     _fetchRouteStationsGG(routeId, function(e3, s3){
-      if(!e3 && s3 && s3.length){ done(s3, true); return; }
+      if(_stale()) return;
+      if(!e3 && s3 && s3.length){ _brCacheSave(cityCode, routeId, true, s3); done(s3, true); return; }
       console.log('[노선] GBIS 실패/0건 → TAGO 시도');
       if(!cityCode){ fail(); return; }   // cityCode가 없으면 TAGO는 시도할 수 없다
       tago();
@@ -4441,6 +4479,26 @@ function _loadBusRouteData(cityCode, routeId, src){
     return;
   }
   tago();
+}
+
+// 노선도에서 받은 경유정류소도 공용 캐시에 넣어 둔다(다음 열람 즉시 표시 + 방면·방향 라벨 공유)
+function _brCacheSave(cityCode, rid, ggHint, stations){
+  try{
+    if(!stations || !stations.length) return;
+    var key = 'busRt_' + (ggHint ? 'gg' : '') + cityCode + '_' + rid;
+    var slim = stations.map(function(s){
+      return {
+        nodeid:   String(s.nodeid || s.nodeId || ''),
+        nodenm:   String(s.nodenm || s.nodeNm || ''),
+        nodeno:   (s.nodeno == null ? '' : String(s.nodeno)),
+        nodeord:  (s.nodeord == null ? null : s.nodeord),
+        gpslati:  (s.gpslati == null ? null : s.gpslati),
+        gpslong:  (s.gpslong == null ? null : s.gpslong),
+        updowncd: (s.updowncd == null ? null : s.updowncd)
+      };
+    });
+    localStorage.setItem(key, JSON.stringify({ t: Date.now(), s: slim }));
+  }catch(e){}
 }
 
 // 현재 위치 새로고침 (버스만 다시 조회)
@@ -5980,6 +6038,13 @@ function _htlResyncBoard(force){
     if(window._metroRouteMode === true) return;
     if(typeof _isManualStart==='function' && _isManualStart()) return;
     if(!_htlNotDeparted()) return;                                           // 이미 출발함
+    // ★ 승차역에 도착해 있었다면, 예정 출발시각 전후 _HTL_BOARD_HOLD_MIN 동안은
+    //   다음 열차로 밀지 않는다. 지금 그 열차를 타고 있는 중일 수 있기 때문.
+    //   (탑승 판정은 _htlBoardWatch가 곧 내린다 — 그 사이 시각표가 흔들리면 안 된다)
+    if(typeof _htlWait !== 'undefined' && _htlWait.arrived){
+      var past0 = _htlMinPastDeparture();
+      if(past0 != null && past0 >= -0.5 && past0 <= _HTL_BOARD_HOLD_MIN) return;
+    }
     // 승차역 근처(250m)에 있을 때만 '앞당김'까지 허용
     var near = (window._htlBoardNear === true);
     var now = Date.now();
@@ -6031,6 +6096,36 @@ var _HTL_ARRIVE_M = 160;      // 이 안에 들면 '승차역 도착'으로 판�
 var _HTL_LEAVE_M  = 260;      // 대기 모드 진입 기준(이보다 멀면 아직 못 감)
 
 var _HTL_DEPART_M = 400;   // 승차역에서 이만큼 멀어지면 '탑승 후 이동 중'으로 확정
+// ★ 지하역 대응 —
+//   승차 확정을 'GPS로 역에서 멀어짐'으로만 판정하면, 지하역에서는 타는 순간 GPS가
+//   끊겨 영영 확정되지 않는다. 그동안 재동기화가 계속 '다음 열차'로 밀어버렸다
+//   (캠퍼스타운 17:40 열차를 탔는데 17:46으로 밀린 사례).
+//   → GPS가 최근 것이 아니면(지하 진입) 예정 출발시각 경과만으로도 승차로 본다.
+var _HTL_FIX_STALE_MS   = 60000;  // 위치가 이보다 오래됐으면 '현재 위치 모름'으로 취급
+var _HTL_BOARD_GRACE_MIN = 0.75;  // 예정 출발시각 + 45초 → 승차 확정
+var _HTL_BOARD_HOLD_MIN  = 2;     // 승차역 도착 후 출발시각 ±이 시간 안에는 다음 열차로 밀지 않음
+
+// 마지막 위치 정보가 얼마나 오래됐나 (모르면 Infinity)
+function _htlFixAgeMs(){
+  try{
+    var fx = (typeof S !== 'undefined' && S.lastGPSFix) ? S.lastGPSFix : null;
+    if(fx && fx.ts) return Date.now() - fx.ts;
+  }catch(e){}
+  return Infinity;
+}
+// 예정 출발시각으로부터 몇 분 지났나 (자정 넘김 보정, 모르면 null)
+function _htlMinPastDeparture(){
+  try{
+    var dep = _htlBoardDepMin();
+    if(dep == null) return null;
+    var n = new Date();
+    var nowMin = n.getHours()*60 + n.getMinutes() + n.getSeconds()/60;
+    var d = nowMin - dep;
+    if(d < -720) d += 1440;
+    if(d >  720) d -= 1440;
+    return d;
+  }catch(e){ return null; }
+}
 var _htlWait = {
   on: false,        // 대기 중인가
   arrived: false,   // 승차역에 도착한 적 있는가 (재진입 방지)
@@ -6196,14 +6291,24 @@ function _htlBoardWatch(){
     //   (지하 구간은 GPS가 끊겨 _gpsMaxIdx가 안 오르므로 이 신호로 확정한다.
     //    예전엔 이 처리가 없어 열차가 출발해 역에서 멀어지는 순간
     //    '대기 모드'로 다시 진입해 버렸다 — 군포역 탑승 후 대기 표시 문제)
-    if(_htlWait.arrived && d0 != null && d0 > _HTL_DEPART_M){
+    // ★ 확정 조건 두 갈래
+    //   (a) GPS로 승차역에서 충분히 멀어짐 (지상 구간)
+    //   (b) 예정 출발시각이 지났는데 '역 앞에 있다'는 최신 위치가 없음 (지하 구간)
+    //       — 위치가 오래됐거나(_HTL_FIX_STALE_MS) 이미 멀어진 상태
+    var _movedAway = (d0 != null && d0 > _HTL_DEPART_M);
+    var _pastDep   = _htlMinPastDeparture();
+    var _noFreshNear = (_htlFixAgeMs() > _HTL_FIX_STALE_MS) || _movedAway;
+    var _boardedByTime = (_pastDep != null && _pastDep >= _HTL_BOARD_GRACE_MIN && _noFreshNear);
+    if(_htlWait.arrived && (_movedAway || _boardedByTime)){
       var bi2 = _htlBoardIdx();
       if(bi2 >= 0){
         window._gpsMaxIdx = Math.max(window._gpsMaxIdx == null ? -1 : window._gpsMaxIdx, bi2);
         window._gpsConfirmIdx = Math.max(window._gpsConfirmIdx == null ? -1 : window._gpsConfirmIdx, bi2);
         window._nodePassMs = window._nodePassMs || {};
         if(window._nodePassMs[bi2] == null) window._nodePassMs[bi2] = Date.now();
-        console.log('[대기모드] 승차 확정 — 승차역에서 ' + Math.round(d0) + 'm 이동');
+        console.log('[대기모드] 승차 확정 — '
+          + (_movedAway ? ('승차역에서 ' + Math.round(d0) + 'm 이동')
+                        : ('출발시각 ' + Math.round((_pastDep||0)*60) + '초 경과, 최신 위치 없음(지하 추정)')));
       }
       window._htlBoarded = true;      // 이후 마커·시각 보정은 정상 진행 모드로
       _htlWaitStop('승차 확정');
@@ -6491,6 +6596,15 @@ function fmapDoRoute() {
     if(typeof _htlWaitStop === 'function') _htlWaitStop('새 경로 탐색');
     if(typeof _htlWait !== 'undefined'){ _htlWait.arrived = false; _htlWait.boardIdx = -1; _htlWait.dist = null; }
     window._htlBoarded = false;
+    // ★ 지하철 탭 관제 엔진의 잔재도 함께 정리한다.
+    //   S.route는 홈 경로와 별개 상태라, 남아 있으면 추측항법 타이머가 계속 전진하며
+    //   지금 보는 경로와 무관한 역으로 공용 UI(혼잡도 등)를 덮어썼다.
+    if(typeof stopTracking === 'function') stopTracking();
+    if(typeof S !== 'undefined'){ S.route = null; S.curIdx = 0; }
+    if(typeof _trackingEngine !== 'undefined' && _trackingEngine){
+      _trackingEngine.deadReckon = false;
+      if(_trackingEngine.drTimer){ clearTimeout(_trackingEngine.drTimer); _trackingEngine.drTimer = null; }
+    }
   }catch(e){}
   // 혼잡도·AI 브리핑도 이전 경로 내용이 남지 않도록 대기 상태로 되돌린다
   try{ if(typeof _resetCongToWaiting === 'function') _resetCongToWaiting(); }catch(e){}
@@ -10334,6 +10448,17 @@ function _routeStationsFor(cityCode, routeId, ggHint, cb){
 }
 window._routeStationsFor = _routeStationsFor;
 
+// 캐시에 이미 있으면 즉시 반환 (네트워크 접근 없음). 없으면 null.
+function _busRouteStnsPeek(cityCode, rid, ggHint){
+  try{
+    var key = 'busRt_' + (ggHint ? 'gg' : '') + cityCode + '_' + rid;
+    var e = JSON.parse(localStorage.getItem(key) || 'null');
+    if(e && Date.now() - e.t < 7 * 24 * 3600 * 1000 && e.s && e.s.length) return e.s;
+  }catch(err){}
+  return null;
+}
+window._busRouteStnsPeek = _busRouteStnsPeek;
+
 function _busRouteStnsCached(cityCode, rid, cb, ggHint){
   var key = 'busRt_' + (ggHint ? 'gg' : '') + cityCode + '_' + rid;
   try {
@@ -10346,10 +10471,17 @@ function _busRouteStnsCached(cityCode, rid, cb, ggHint){
         // ★ updowncd를 반드시 함께 저장한다.
         //   예전에는 nodeid/nodenm만 캐시해서, 캐시가 살아있는 동안 방면 판정이
         //   회차 지점을 넘어 반대 방향 역('아라역'인데 '완정역')을 집었다.
+        // ★ 노선도(_renderBusRoute)도 이 캐시를 재사용한다 → 좌표·순번·정류소번호까지 담는다.
+        //   예전엔 nodeid/nodenm만 담아서, 노선도를 열 때마다 같은 경유정류소를
+        //   처음부터 다시 받아오느라 '노선 정보 불러오는 중…'이 길었다.
         var slim = stations.map(function(s){
           return {
             nodeid:   String(s.nodeid || s.nodeId || ''),
             nodenm:   String(s.nodenm || s.nodeNm || ''),
+            nodeno:   (s.nodeno == null ? '' : String(s.nodeno)),
+            nodeord:  (s.nodeord == null ? null : s.nodeord),
+            gpslati:  (s.gpslati == null ? null : s.gpslati),
+            gpslong:  (s.gpslong == null ? null : s.gpslong),
             updowncd: (s.updowncd == null ? null : s.updowncd)
           };
         });
@@ -10662,7 +10794,9 @@ window._busShowMap=_busShowMap;
 //   공공 API/프록시가 막히면서 '불러오기 실패'가 났다. 동시 2건으로 제한하고
 //   타임아웃·짧은 캐시를 둔다.
 // ══════════════════════════════════════════════════════════════════
-var _BUS_ARR_MAXCONC = 3;      // 동시 요청 수
+// 동시 요청 수. 프록시는 Cloudflare Worker라 6개 정도는 여유롭고,
+// 정류장 6개의 도착정보를 사실상 한 번에 받아올 수 있어 체감이 크게 달라진다.
+var _BUS_ARR_MAXCONC = 6;
 var _busArrRunning = 0;
 var _busArrQueue = [];         // 도착정보(우선)
 var _busLowQueue = [];         // 노선 정류장·차량위치 등 부가 조회(후순위)
@@ -10678,7 +10812,7 @@ function _busArrNext(){
   var job = _busArrQueue.shift() || _busLowQueue.shift();
   if(!job) return;
   _busArrRunning++;
-  var release = function(){ _busArrRunning--; setTimeout(_busArrNext, 80); };
+  var release = function(){ _busArrRunning--; setTimeout(_busArrNext, 25); };
   var p;
   try { p = job(); } catch(e){ release(); return; }   // 동기 예외로 큐가 멈추지 않게
   if(!p || typeof p.then !== 'function'){ release(); return; }
@@ -11436,10 +11570,16 @@ function _fetchNearStopsSeoul(lat, lng, callback){
 window._fetchNearStopsSeoul = _fetchNearStopsSeoul;
 
 // 서울 정류장 도착정보 → TAGO 형식으로 변환
+// 서울 도착정보 20초 캐시 — GBIS(_ggArrCache)와 같은 감각.
+//   탭 전환·재렌더 때마다 같은 정류장을 다시 조회하던 것을 막는다.
+var _seoulArrCache = {};
+var _SEOUL_ARR_FRESH = 20000;
 function _seoulArrivals(stop, cb){
   var ars = stop.arsId || (String(stop.nodeid || '').indexOf('SEOUL:') === 0
             ? String(stop.nodeid).slice(6) : '');
   if(!ars){ cb([]); return; }
+  var _c = _seoulArrCache[ars];
+  if(_c && (Date.now() - _c.ts) < _SEOUL_ARR_FRESH){ cb(_c.rows); return; }
   // ※ 공식 가이드 확인: 버스도착정보조회 서비스에는 getArrInfoByUid가 없다.
   //   정류소 하나의 전체 노선 도착정보는 정류소정보조회 서비스의 getStationByUid(arsId)로 받는다.
   //   키 파라미터는 워커가 대문자 ServiceKey로 주입하므로 여기서는 붙이지 않는다.
@@ -11477,11 +11617,18 @@ function _seoulArrivals(stop, cb){
       //   ※ 철자 주의 — 정류소정보조회는 'congestion', 버스위치조회는 'congetion'(오타)이다.
       var lowOf = function(k){ return parseInt(_xmlVal(ch, k), 10) === 1 ? '저상버스' : ''; };
       var conOf = function(k){ var v = parseInt(_xmlVal(ch, k), 10); return (isFinite(v) && v > 0) ? v : null; };
+      // ★ 방면(adirection)·다음 정류소(nxtStn)가 응답에 이미 들어 있다.
+      //   이걸 쓰면 행마다 '노선 경유정류소'를 따로 조회하지 않아도 된다(로딩 대폭 단축).
+      var dirNm = String(_xmlVal(ch, 'adirection') || '').trim()
+               || String(_xmlVal(ch, 'nxtStn') || '').trim();
       if(s1 > 0) rows.push({ routeno: rt, routeid: rid, arrtime: s1, arrprevstationcnt: prev(m1),
-                             vehicletp: lowOf('busType1'), crowded: conOf('congestion1'), _src:'topis' });
+                             vehicletp: lowOf('busType1'), crowded: conOf('congestion1'),
+                             dirName: dirNm, _src:'topis' });
       if(s2 > 0) rows.push({ routeno: rt, routeid: rid, arrtime: s2, arrprevstationcnt: prev(m2),
-                             vehicletp: lowOf('busType2'), crowded: conOf('congestion2'), _src:'topis' });
+                             vehicletp: lowOf('busType2'), crowded: conOf('congestion2'),
+                             dirName: dirNm, _src:'topis' });
     });
+    if(rows.length) _seoulArrCache[ars] = { ts: Date.now(), rows: rows };
     cb(rows);
   });
 }
@@ -11691,6 +11838,8 @@ function _ggArrivals(stop, cb){
           crowded:            (parseInt(it.crowded1, 10) > 0) ? parseInt(it.crowded1, 10) : null,
           staOrder:           it.staOrder,
           routeDestName:      it.routeDestName || '',
+          // 행선지가 곧 방면 — 노선 경유정류소를 따로 조회하지 않아도 된다
+          dirName:            String(it.routeDestName || '').trim(),
           _src:               'gbis'
         });
       });
@@ -12047,14 +12196,22 @@ function _loadMapBusArrival(stop, cardIdx, _try) {
           }
           card.appendChild(row);
 
-          (function(_cc, _rid, _nid, _did){
-            if(!_rid){ var e0=document.getElementById(_did); if(e0) e0.textContent=''; return; }
+          // ★ 방향 라벨 — 도착정보 응답에 이미 방면이 있으면 그대로 쓴다(추가 호출 0).
+          //   서울(TOPIS)은 adirection/nxtStn, 경기(GBIS)는 routeDestName을 준다.
+          //   예전에는 행마다 '노선 경유정류소'를 조회해서, 정류장 6개 × 노선 8개면
+          //   최대 48번의 큰 응답을 동시 3개 제한으로 받아오느라 로딩이 길었다.
+          //   TAGO만 이 정보를 주지 않으므로 그때만 기존 조회로 폴백한다.
+          (function(_cc, _rid, _nid, _did, _dir){
+            var el0 = document.getElementById(_did);
+            if(_dir){ if(el0) el0.textContent = '→ ' + _dir + '방향'; return; }
+            if(!_rid){ if(el0) el0.textContent = ''; return; }
             _fetchBusNextStop(_cc, _rid, _nid, function(next){
               var el = document.getElementById(_did);
               if(!el) return;
               el.textContent = next ? ('→ ' + next + '방향') : '';
             });
-          })(cityCode, routeId, nodeId, 'busdir_' + cardIdx + '_' + i);
+          })(cityCode, routeId, nodeId, 'busdir_' + cardIdx + '_' + i,
+             String((a && a.dirName) || '').trim());
         });
       }
     })
@@ -31128,6 +31285,8 @@ function _enterDeadReckoning() {
 function _scheduleDeadReckonStep() {
   if(_trackingEngine.drTimer) clearTimeout(_trackingEngine.drTimer);
   if(!_trackingEngine.deadReckon || !S?.route?.path) return;
+  // 홈 경로와 어긋난 상태면 가상 주행을 예약하지 않는다(엉뚱한 역으로 행진 방지)
+  if(typeof _trackingSyncToHome === 'function' && _trackingSyncToHome()) return;
   if(S.curIdx >= S.route.path.length - 1) { _exitDeadReckoning(); return; }
   // 다음 역까지 백데이터 소요시간(초) — tp 배열 우선, 없으면 기본 120초
   var nextIdx = S.curIdx + 1;
@@ -31344,7 +31503,47 @@ window._showDelayEffect = _showDelayEffect;
 
 
 // ── onStationArrival: 다음 역 도착 이벤트 ──────────────────
+// ── 관제 엔진 ↔ 홈 경로 동기화 ─────────────────────────────────────
+//   관제 엔진은 '지하철 탭'에서 만든 S.route를 따라 전진하는데,
+//   홈 탭은 route-v2가 만든 _transitNodeData를 별도로 쓴다. 두 상태가 어긋난 채
+//   추측항법(_scheduleDeadReckonStep)이 타이머로 전진하면, 홈 경로가 인천1호선인데
+//   관제는 경의중앙선 역(양원)으로 행진하며 공용 UI(혼잡도 등)를 덮어썼다.
+//   → 홈 경로가 화면에 있으면 '홈이 주인'이다. 관제 route가 그 경로와 맞지 않으면
+//     엔진을 세우고 잔재를 비운다.
+function _trackingMatchesHome(){
+  try{
+    var card = document.getElementById('transitResultCard');
+    if(!card || card.style.display === 'none') return true;                // 홈 경로 없음 → 관제가 주인
+    if(typeof _transitNodeData === 'undefined' || !_transitNodeData.length) return true;
+    var subs = _transitNodeData.filter(function(nd){ return nd && nd.isSub && nd.name; });
+    if(!subs.length) return false;                                         // 홈은 버스 경로 → 지하철 관제는 무관
+    if(!S || !S.route || !S.route.path || !S.route.path.length) return false;
+    var key = function(v){ return String(v || '').replace(/\s/g,'').replace(/역$/,''); };
+    var home = {};
+    subs.forEach(function(nd){ home[key(nd.name)] = 1; });
+    for(var i=0;i<S.route.path.length;i++){ if(home[key(S.route.path[i])]) return true; }
+    return false;                                                          // 겹치는 역이 하나도 없음
+  }catch(e){ return true; }
+}
+// 홈이 주인인데 관제 route가 다르면 엔진을 세우고 잔재를 지운다
+function _trackingSyncToHome(){
+  try{
+    if(_trackingMatchesHome()) return false;
+    console.log('[관제] 홈 경로와 불일치 → 엔진 정지 및 상태 초기화');
+    if(typeof stopTracking === 'function') stopTracking();
+    if(typeof S !== 'undefined'){ S.route = null; S.curIdx = 0; }
+    if(_trackingEngine){
+      _trackingEngine.deadReckon = false;
+      if(_trackingEngine.drTimer){ clearTimeout(_trackingEngine.drTimer); _trackingEngine.drTimer = null; }
+    }
+    return true;
+  }catch(e){ return false; }
+}
+window._trackingMatchesHome = _trackingMatchesHome;
+window._trackingSyncToHome  = _trackingSyncToHome;
+
 function onStationArrival(skipGpsCheck) {
+  if(_trackingSyncToHome()) return;          // 홈 경로와 다른 관제는 전진시키지 않는다
   if(!S?.route || S.curIdx >= S.route.path.length - 1) {
     stopTracking();
     return;
@@ -32403,11 +32602,43 @@ function renderCarGrid(stnName, lineName) {
 window.renderCarGrid = renderCarGrid;
 
 // updateCong — 혼잡도 UI 전체 갱신 (기존 함수 대체)
+// 지금 보고 있는 경로에 속한 지하철역인지 확인하고, 아니면 경로의 역으로 바로잡는다.
+//   ★ 왜 필요한가 —
+//     관제 엔진의 추측항법(_scheduleDeadReckonStep)이 GPS 확인 없이 타이머로
+//     S.curIdx를 전진시키며 updateCong(S.route.path[curIdx])를 부른다.
+//     S.route가 지금 화면의 경로와 다르면(이전 탐색 잔재 등) 캠퍼스타운→아라를
+//     보고 있는데 '지하철 양원'·'춘천'처럼 전혀 다른 노선의 역이 표시됐다.
+//     출발지가 '내 위치'일 때 그 이름이 그대로 들어오던 경우도 같이 걸러진다.
+function _congFixStation(stn){
+  try{
+    var card = document.getElementById('transitResultCard');
+    if(!card || card.style.display === 'none') return stn;              // 경로 카드가 없으면 판단 근거 없음
+    if(typeof _transitNodeData === 'undefined' || !_transitNodeData.length) return stn;
+    var subs = _transitNodeData.filter(function(nd){ return nd && nd.isSub && nd.name; });
+    if(!subs.length) return stn;                                        // 버스만 있는 경로
+    var key = function(v){ return String(v || '').replace(/\s/g,'').replace(/역$/,''); };
+    var want = key(stn.name);
+    for(var i=0;i<subs.length;i++){ if(key(subs[i].name) === want) return stn; }   // 경로 안의 역 → 그대로
+    // 경로 밖 역 → 현재 진행 위치에 해당하는 역으로 바로잡는다
+    var gi = (window._gpsMaxIdx == null ? -1 : window._gpsMaxIdx);
+    var pick = null;
+    for(var j=0;j<subs.length;j++){
+      var idx = _transitNodeData.indexOf(subs[j]);
+      if(idx <= gi) pick = subs[j];        // 지나온 것 중 가장 마지막
+    }
+    if(!pick) pick = subs[0];
+    console.log('[혼잡도] 경로 밖 역 무시:', stn.name, '→', pick.name);
+    return { name: pick.name, line: pick.lineName || '' };
+  }catch(e){ return stn; }
+}
+
 function updateCong(stn) {
   if(!stn || !stn.name) return;
   // 🚌 버스 혼잡도가 현재 표시 중이면 지하철로 덮어쓰지 않음
   // (버스 탭/버스 구간에서 updateCong가 호출되어도 무시)
   if(window._congMode === 'bus') return;
+  stn = _congFixStation(stn);
+  if(!stn || !stn.name) return;
   window._congMode = 'subway';
   var pct  = getCongPct(stn.name, stn.line);
   var col  = pct<30?'#34c759':pct<60?'#ff9f0a':pct<80?'#ff6b35':'#ff3b30';
