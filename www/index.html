@@ -6746,8 +6746,14 @@ function fmapDoRoute() {
       + '&EX=' + dest.lng  + '&EY=' + dest.lat;
     console.log('[route-v2-req]', _coordQs, '|', start.name+'('+start.type+') → '+dest.name+'('+dest.type+')');
 
+    // ★ 출발지 주변 실시간 버스 대기를 먼저 모아 엔진에 넘긴다(rtw).
+    //   못 모으거나 늦으면 빈 값으로 진행 — 기존 동작 그대로다.
+    _collectRTW(start.lat, start.lng, function(rtw){
+    if(_routeStale()) return;
+    if(rtw) console.log('[route-v2-rtw]', rtw);
+
     // 자체 경로엔진(route-v2): 1회 호출로 3모드(minTime/minTransfer/minWalk) 반환
-    var urls = [ _routeV2Url(_coordQs) ];
+    var urls = [ _routeV2Url(_coordQs + (rtw ? ('&rtw=' + encodeURIComponent(rtw)) : '')) ];
 
     Promise.all(urls.map(function(url) {
       return fetch(url).then(function(r){ return r.json(); }).catch(function(){ return null; });
@@ -6816,6 +6822,7 @@ function fmapDoRoute() {
       if(loading) loading.style.display = 'none';
       toast('네트워크 오류: ' + (e.message || ''));
     });
+    });   // _collectRTW 콜백 끝
   }
 
   _resolve(qS, _fmapStart, function(r){ _done.start = r; _done.s = true; _run(); });
@@ -6895,11 +6902,22 @@ function _applyRealtimeWaits(paths, cb){
     var timer = setTimeout(finish, _RT_WAIT_TIMEOUT);
 
     targets.forEach(function(p){
-      _rtWaitSecForSub(_firstBusSub(p), function(sec){
+      var sub = _firstBusSub(p);
+      // ★ 엔진이 이 노선에 실시간 대기를 이미 반영했으면(waitReal) 보정할 게 없다.
+      if(sub && sub.waitReal){
+        p._rtWaitMin   = Math.round((sub.waitSec || 0) / 60);
+        p._rtWaitDelta = 0;
+        if(--pending <= 0){ clearTimeout(timer); finish(); }
+        return;
+      }
+      _rtWaitSecForSub(sub, function(sec){
         if(sec != null){
           p._rtWaitMin  = Math.round(sec / 60);                       // 표시용: 실제 대기(분)
           // 순위 보정치 = 실제 대기 − 엔진이 이미 반영한 가정 대기
-          p._rtWaitDelta = (sec / 60) - _RT_ASSUMED_WAIT_MIN;
+          //   엔진이 leg별 waitSec을 내려주면 그 값으로 정확히 상쇄하고,
+          //   없으면(구버전 워커) 예전처럼 평균 가정치를 쓴다.
+          var assumed = (sub && sub.waitSec != null) ? (sub.waitSec / 60) : _RT_ASSUMED_WAIT_MIN;
+          p._rtWaitDelta = (sec / 60) - assumed;
         }
         if(--pending <= 0){ clearTimeout(timer); finish(); }
       });
@@ -6907,6 +6925,54 @@ function _applyRealtimeWaits(paths, cb){
   }catch(e){ cb(); }
 }
 window._applyRealtimeWaits = _applyRealtimeWaits;
+
+// ── 출발지 주변 실시간 버스 대기 → 경로엔진(rtw)으로 전달 ──────────────
+//   엔진은 원래 '배차 평균(busHW/2)'으로 대기를 가정해서, 지금 어떤 차가 먼저 오는지와
+//   무관하게 늘 같은 노선을 골랐다. 출발지 주변 정류장의 실제 도착정보를 넘기면
+//   엔진이 그 값으로 탐색하므로 '순위 보정'이 아니라 최적 경로 자체가 달라진다.
+var _RTW_STOPS   = 3;      // 출발지에서 가까운 정류장 이 개수만 조회
+var _RTW_MAX     = 25;     // URL 길이 보호 — 노선 수 상한
+var _RTW_TIMEOUT = 2500;   // 이 안에 못 모으면 모은 만큼만 보내고 진행
+function _collectRTW(lat, lng, cb){
+  var done = false;
+  var finish = function(str){ if(done) return; done = true; cb(str || ''); };
+  var timer = setTimeout(function(){ finish(_rtwBuild(bag)); }, _RTW_TIMEOUT);
+  var bag = {};   // 노선번호 → 가장 빠른 도착(초)
+
+  try{
+    if(lat == null || lng == null || typeof _fetchNearStops !== 'function'){ clearTimeout(timer); finish(''); return; }
+    _fetchNearStops(lat, lng, function(err, stops){
+      if(err || !stops || !stops.length){ clearTimeout(timer); finish(''); return; }
+      var list = stops.slice(0, _RTW_STOPS);
+      var pending = list.length;
+      if(!pending){ clearTimeout(timer); finish(''); return; }
+      list.forEach(function(st){
+        var cc = (typeof _tagoCityCode === 'function') ? _tagoCityCode(st) : '';
+        var after = function(){ if(--pending <= 0){ clearTimeout(timer); finish(_rtwBuild(bag)); } };
+        if(typeof _busArrFetchMerged !== 'function'){ after(); return; }
+        _busArrFetchMerged(cc, st).then(function(rows){
+          (rows || []).forEach(function(r){
+            var no = String(r.routeno || '').trim();
+            var t  = parseInt(r.arrtime, 10);
+            if(!no || !isFinite(t) || t < 0 || t > 3600) return;
+            if(bag[no] == null || t < bag[no]) bag[no] = t;
+          });
+          after();
+        }, after);
+      });
+    });
+  }catch(e){ clearTimeout(timer); finish(''); }
+}
+function _rtwBuild(bag){
+  try{
+    var keys = Object.keys(bag || {});
+    if(!keys.length) return '';
+    keys.sort(function(a,b){ return bag[a] - bag[b]; });      // 빨리 오는 순
+    return keys.slice(0, _RTW_MAX).map(function(k){ return k + ':' + Math.round(bag[k]); }).join(',');
+  }catch(e){ return ''; }
+}
+window._collectRTW = _collectRTW;
+window._rtwBuild   = _rtwBuild;
 
 function _parseODsayAllOptions(odsayData) {
   var paths = (odsayData.result || {}).path || [];
@@ -8750,10 +8816,199 @@ async function _rtLock(leg){
 }
 
 // 실시간 위치를 앵커로 타임라인 보정(GPS 통과와 동일 메커니즘, 더 자주·정확)
+// ══════════════════════════════════════════════════════════════
+// 📶 기지국(Cell ID) 보조 측위 — 지하 구간용
+//   GPS가 끊기는 지하에서 '지금 몇 번째 역인지'를 보완한다.
+//   원리: 터널 중계기는 역·구간 단위로 깔려 있어 이동하면 셀이 바뀐다.
+//   ★ 다만 '어느 셀이 어느 역인지' 알려주는 공개 DB가 없다 → 스스로 학습한다.
+//     GPS나 실시간 열차위치로 역이 확정된 순간의 셀을 저장해 두고,
+//     다음부터 같은 셀이 보이면 그 역으로 추정한다.
+//   ★ 플러그인(CellInfo)이 없으면 이 기능 전체가 조용히 꺼진다 — 기존 동작 그대로.
+var _CELL_MIN_HITS   = 2;      // 이만큼 반복 관측된 셀만 신뢰 (일회성 잡음 배제)
+var _CELL_MAX_ENTRIES= 3000;   // 저장 상한 (넘으면 오래된 것부터 버림)
+var _CELL_TTL_MS     = 180 * 24 * 3600 * 1000;   // 6개월
+var _CELL_POLL_MS    = 8000;   // 지하에서 이 간격으로 셀 확인
+var _cellLast = null;          // 최근 관측 { key, ts }
+var _cellMapMem = null;        // 메모리 캐시
+
+function _cellPluginReady(){
+  try{
+    var P = window.Capacitor && window.Capacitor.Plugins;
+    return !!(P && P.CellInfo && typeof P.CellInfo.getCurrent === 'function');
+  }catch(e){ return false; }
+}
+window._cellPluginReady = _cellPluginReady;
+
+// 셀 하나를 고유 문자열로 (통신사·지역·셀 조합)
+function _cellKey(c){
+  if(!c) return '';
+  var cid = (c.cid != null && c.cid !== -1) ? c.cid : (c.pci != null ? ('p' + c.pci) : null);
+  if(cid == null || cid === '') return '';
+  return [c.mcc == null ? '' : c.mcc, c.mnc == null ? '' : c.mnc,
+          c.tac == null ? '' : c.tac, cid].join('-');
+}
+// 여러 셀 중 '지금 붙어 있는' 것을 고른다 (등록된 셀 > 신호 센 것)
+function _cellPick(cells){
+  try{
+    var list = (cells || []).filter(function(c){ return _cellKey(c); });
+    if(!list.length) return null;
+    var reg = list.filter(function(c){ return c.registered; });
+    var pool = reg.length ? reg : list;
+    pool.sort(function(a,b){ return (b.dbm == null ? -999 : b.dbm) - (a.dbm == null ? -999 : a.dbm); });
+    return pool[0];
+  }catch(e){ return null; }
+}
+// 현재 셀 조회 (플러그인 없으면 null)
+function _cellNow(cb){
+  if(!_cellPluginReady()){ cb(null); return; }
+  try{
+    var done = false;
+    var t = setTimeout(function(){ if(!done){ done = true; cb(null); } }, 3000);
+    window.Capacitor.Plugins.CellInfo.getCurrent().then(function(r){
+      if(done) return; done = true; clearTimeout(t);
+      var c = _cellPick(r && r.cells);
+      if(c){
+        var k = _cellKey(c);
+        _cellLast = { key: k, ts: Date.now() };
+        _cellNoteObservation(k);        // 이동/정지 판정용 변화 추적
+      }
+      cb(c);
+    }).catch(function(){ if(!done){ done = true; clearTimeout(t); cb(null); } });
+  }catch(e){ cb(null); }
+}
+window._cellNow = _cellNow;
+
+// ── 학습 저장소 ──
+function _cellMap(){
+  if(_cellMapMem) return _cellMapMem;
+  var m = {};
+  try{ m = JSON.parse(localStorage.getItem('cellStnMap') || '{}') || {}; }catch(e){ m = {}; }
+  var now = Date.now(), ch = false;
+  for(var k in m){ if(!m[k] || !m[k].t || now - m[k].t > _CELL_TTL_MS){ delete m[k]; ch = true; } }
+  _cellMapMem = m;
+  if(ch) _cellMapSave();
+  return m;
+}
+function _cellMapSave(){
+  try{
+    var m = _cellMapMem || {};
+    var keys = Object.keys(m);
+    if(keys.length > _CELL_MAX_ENTRIES){
+      keys.sort(function(a,b){ return (m[a].t || 0) - (m[b].t || 0); });   // 오래된 것부터
+      keys.slice(0, keys.length - _CELL_MAX_ENTRIES).forEach(function(k){ delete m[k]; });
+    }
+    localStorage.setItem('cellStnMap', JSON.stringify(m));
+  }catch(e){}
+}
+// 역이 확정된 순간 호출 — 그때 붙어 있던 셀을 그 역으로 기록
+function _cellLearn(stationName, lineName){
+  try{
+    if(!stationName || !_cellPluginReady()) return;
+    _cellNow(function(c){
+      var key = _cellKey(c);
+      if(!key) return;
+      var m = _cellMap();
+      var e = m[key];
+      if(e && e.s === stationName){ e.n = (e.n || 1) + 1; e.t = Date.now(); }
+      else if(e && e.n > 1){ e.n--; e.t = Date.now(); }        // 다른 역이면 신뢰도만 깎는다
+      else { m[key] = { s: stationName, l: lineName || '', n: 1, t: Date.now() }; }
+      _cellMapSave();
+    });
+  }catch(e){}
+}
+window._cellLearn = _cellLearn;
+
+// 현재 셀로 역을 추정 — 충분히 반복 관측된 것만, 그리고 현재 경로 안의 역만
+function _cellGuessStation(cb){
+  if(!_cellPluginReady()){ cb(null); return; }
+  _cellNow(function(c){
+    try{
+      var key = _cellKey(c);
+      if(!key){ cb(null); return; }
+      var e = _cellMap()[key];
+      if(!e || (e.n || 0) < _CELL_MIN_HITS){ cb(null); return; }
+      cb({ name: e.s, line: e.l, hits: e.n });
+    }catch(err){ cb(null); }
+  });
+}
+window._cellGuessStation = _cellGuessStation;
+
+// 추정된 역이 현재 경로의 몇 번째 노드인지 (없으면 -1)
+function _cellRouteIdx(name){
+  try{
+    if(!name || typeof _transitNodeData === 'undefined') return -1;
+    var key = function(v){ return String(v || '').replace(/\s/g,'').replace(/역$/,''); };
+    var want = key(name);
+    for(var i=0;i<_transitNodeData.length;i++){
+      var nd = _transitNodeData[i];
+      if(nd && nd.isSub && key(nd.name) === want) return i;
+    }
+  }catch(e){}
+  return -1;
+}
+window._cellRouteIdx = _cellRouteIdx;
+
+// ── 기지국 변화 = '움직이는 중' 증거 (학습 불필요) ──────────────
+//   셀이 '어느 역'인지는 학습이 있어야 알지만, 셀이 바뀐다는 사실 자체는
+//   학습 없이도 확실한 이동 신호다. 반대로 셀이 한동안 그대로면 열차가
+//   서 있거나 지연되는 중일 가능성이 크다.
+//   ※ 셀 변경 횟수로 역을 '세지는' 않는다 — 한 셀이 여러 역을 덮기도 하고
+//     한 구간에서 여러 번 핸드오버가 일어나기도 해서 카운트는 누적 오차가 난다.
+var _CELL_MOVE_WINDOW_MS = 150000;   // 최근 2.5분 안에 셀이 바뀌었으면 '이동 중'
+var _CELL_STILL_MS       = 180000;   // 3분 넘게 그대로면 '정지 중'으로 본다
+var _cellSeen = null;                // { key, since, lastChange }
+
+function _cellNoteObservation(key){
+  var now = Date.now();
+  if(!key) return;
+  if(!_cellSeen){ _cellSeen = { key: key, since: now, lastChange: now }; return; }
+  if(_cellSeen.key !== key){
+    _cellSeen = { key: key, since: now, lastChange: now };
+  }else{
+    _cellSeen.since = now;              // 같은 셀을 계속 보고 있음
+  }
+}
+// 반환: true=이동 중 / false=정지로 보임 / null=판단 불가(플러그인 없음·관측 부족)
+function _cellMovingState(){
+  try{
+    if(!_cellPluginReady()) return null;
+    if(!_cellSeen || !_cellSeen.lastChange) return null;
+    var idle = Date.now() - _cellSeen.lastChange;
+    if(idle <= _CELL_MOVE_WINDOW_MS) return true;
+    if(idle >= _CELL_STILL_MS) return false;
+    return null;                        // 애매한 구간은 판단하지 않는다
+  }catch(e){ return null; }
+}
+window._cellMovingState = _cellMovingState;
+
+// GPS가 없을 때 기지국으로 진행도를 보완한다.
+//   ★ GPS와 같은 취급을 하되, 뒤로 가지는 않는다(진행도는 단조 증가).
+//   ★ 학습이 없으면(신규 사용자·새 노선) 아무 일도 하지 않는다.
+function _cellAssist(){
+  if(!_cellPluginReady()) return;
+  var now = Date.now();
+  if(window._cellAssistAt && now - window._cellAssistAt < _CELL_POLL_MS) return;
+  window._cellAssistAt = now;
+  _cellGuessStation(function(g){
+    if(!g || !g.name) return;
+    var idx = _cellRouteIdx(g.name);
+    if(idx < 0) return;                                  // 이 경로의 역이 아니면 무시
+    var cur = (window._gpsConfirmIdx == null ? -1 : window._gpsConfirmIdx);
+    if(idx <= cur) return;                               // 뒤로 가지 않는다
+    console.log('[기지국] ' + g.name + ' 추정 (관측 ' + g.hits + '회) → 진행도 ' + cur + '→' + idx);
+    window._gpsConfirmIdx = idx;
+    window._gpsMaxIdx = Math.max((window._gpsMaxIdx == null ? -1 : window._gpsMaxIdx), idx);
+    try{ if(typeof _htlEarlyTrack === 'function'){ window._htlEarlyAt = 0; _htlEarlyTrack(); } }catch(e){}
+  });
+}
+window._cellAssist = _cellAssist;
+
 function _rtApplyAnchor(nodeIdx, sttus){
   var nd=_transitNodeData[nodeIdx]; if(!nd || nd._schedMin==null) return;
   window._nodePassMs=window._nodePassMs||{};
   window._nodePassMs[nodeIdx]=Date.now();
+  // 📶 이 순간 붙어 있던 기지국을 이 역으로 학습 (지하 보조측위용)
+  try{ if(typeof _cellLearn==='function' && nd) _cellLearn(nd.name, nd.lineName||''); }catch(e){}
   window._gpsMaxIdx=Math.max((window._gpsMaxIdx==null?-1:window._gpsMaxIdx), nodeIdx);
   window._timeMaxIdx=Math.max((window._timeMaxIdx==null?-1:window._timeMaxIdx), nodeIdx);
   window._hadValidTransitFix=true;
@@ -9304,7 +9559,13 @@ function _updateTransitGps() {
             window._gpsWaitLastMs = _nowMs;   // 대기 시작 시각 기록 (5초 뒤 첫 전진)
           } else {
             // ★ 5초마다 남은 거리의 1/3씩 전진 (0.9 상한, 다음역 완전 도착은 GPS로만)
-            if(_nowMs - (window._gpsWaitLastMs||0) >= 5000){
+            //   📶 단, 기지국이 '정지 중'이라고 알려주면 전진하지 않는다.
+            //     셀이 3분 넘게 그대로면 열차가 서 있거나 지연되는 중이다.
+            //     (학습 불필요 — 셀이 바뀐다는 사실 자체만 쓴다. 판단 불가면 종전대로 전진)
+            var _cmv = (typeof _cellMovingState === 'function') ? _cellMovingState() : null;
+            if(_cmv === false){
+              window._markerTransMsOverride = null;   // 정지 — 마커를 붙잡는다
+            } else if(_nowMs - (window._gpsWaitLastMs||0) >= 5000){
               var _r = window._gpsWaitRatio || 0;
               _r = Math.min(0.9, _r + (1 - _r) / 3);
               window._gpsWaitRatio = _r;
@@ -9319,7 +9580,10 @@ function _updateTransitGps() {
             if(typeof _estimateTimelinePos==='function'){
               var _tp2 = _estimateTimelinePos();
               if(_tp2){
-                if(_tp2.fromIdx > _wIdx && _tp2.fromIdx <= ((window._gpsMaxIdx==null?-1:window._gpsMaxIdx) + 1)){
+                var _cmv2 = (typeof _cellMovingState === 'function') ? _cellMovingState() : null;
+                if(_cmv2 === false){
+                  // 📶 기지국이 정지를 가리키면 시각표만으로 다음 구간에 넘어가지 않는다
+                } else if(_tp2.fromIdx > _wIdx && _tp2.fromIdx <= ((window._gpsMaxIdx==null?-1:window._gpsMaxIdx) + 1)){
                   // 시각표상 이미 앞 구간 → 그 구간으로 이동 (전진)
                   var _f2=_transitNodeData[_tp2.fromIdx], _t2=_transitNodeData[_tp2.toIdx]||_f2;
                   if(_f2){ _useFrom=_f2; _useTo=_t2; _useRatio=_tp2.ratio||0;
@@ -9340,6 +9604,9 @@ function _updateTransitGps() {
           _placeGpsMarkerSmooth(_useFrom, _useTo, _useRatio);
         }
       } catch(e){}
+      // 📶 지하로 추정되는 상황 — 기지국으로 현재 역을 보완한다.
+      //   학습된 셀이 현재 경로의 역을 가리키면 GPS와 동등하게 진행도를 올린다.
+      try{ _cellAssist(); }catch(e){}
       return;   // 조용히 대기 (다음 확인 때 또 1/3 전진)
     }
     // 최초 fix 전: 상태바만 조용히 표시
@@ -9403,6 +9670,13 @@ function _updateTransitGps() {
     //   (_gpsMaxIdx는 포그라운드 복귀·시간 soft 전진 때도 올라가므로 그대로 쓰면
     //    시각표가 시각표를 보정하는 순환이 된다.)
     window._gpsConfirmIdx = Math.max((window._gpsConfirmIdx==null?-1:window._gpsConfirmIdx), bestIdx);
+    // 📶 GPS가 역을 확정한 순간의 기지국을 학습해 둔다 (다음에 지하에서 쓰려고)
+    try{
+      if(typeof _cellLearn==='function' && bestDist < 120){
+        var _lnd = _transitNodeData[bestIdx];
+        if(_lnd && _lnd.isSub) _cellLearn(_lnd.name, _lnd.lineName || '');
+      }
+    }catch(e){}
 
     // ★ GPS 반박: 시간표 soft 전진(_timeMaxIdx)이 GPS 확인 위치보다 앞서 있는데
     //   실제 GPS는 뒤쪽 역 근처(150m)에 확실히 있으면 → 못 탄 것. 시간 전진 취소 (마커 왕복 방지)
@@ -12419,6 +12693,13 @@ window._bgDiag = async function(){
   add('플러그인 BackgroundGeolocation: ' + (P.BackgroundGeolocation ? 'O' : 'X ← 없으면 백그라운드 불가'));
   add('플러그인 Browser: ' + (P.Browser ? 'O (뉴스 원문이 인앱으로 열림)' : 'X ← 없으면 외부 브라우저로 나감'));
   add('플러그인 AppLauncher: ' + (P.AppLauncher ? 'O (쿠팡 검색이 쿠팡 앱으로 열림)' : 'X ← 없으면 웹으로 열림'));
+  add('플러그인 CellInfo: ' + (P.CellInfo ? 'O (지하 기지국 보조측위 동작)' : 'X ← 없으면 기능 꺼짐'));
+  try{
+    var _cm = (typeof _cellMap === 'function') ? _cellMap() : {};
+    var _ck = Object.keys(_cm), _cr = _ck.filter(function(k){ return (_cm[k].n||0) >= _CELL_MIN_HITS; });
+    add('학습된 기지국: ' + _ck.length + '개 (신뢰 ' + _cr.length + '개)');
+    if(_cellLast) add('최근 관측 셀: ' + _cellLast.key);
+  }catch(e){}
   add('마지막 뉴스 열기 방식: ' + (window._newsOpenMode || '아직 없음'));
   // 알림 권한
   try {
