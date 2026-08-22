@@ -6240,6 +6240,10 @@ function _htlWaitTick(force){
     if(!navigator.geolocation){ handle(); return; }
     navigator.geolocation.getCurrentPosition(
       function(p){
+        // 📍 상태 머신에 먼저 투입 — 튐(건물 숲)으로 판정되면 이 fix는 버린다
+        var _ok = (typeof locOnGps === 'function')
+          ? locOnGps(p.coords.latitude, p.coords.longitude, p.coords.accuracy, p.coords.speed) : true;
+        if(!_ok) return;
         if(typeof S !== 'undefined') S.lastGPSFix = { lat:p.coords.latitude, lng:p.coords.longitude, ts:Date.now(), acc:p.coords.accuracy };
         window._lastGPSLat = p.coords.latitude; window._lastGPSLng = p.coords.longitude;
         handle();
@@ -8909,9 +8913,15 @@ function _cellLearn(stationName, lineName){
       if(!key) return;
       var m = _cellMap();
       var e = m[key];
-      if(e && e.s === stationName){ e.n = (e.n || 1) + 1; e.t = Date.now(); }
+      var _lat = null, _lng = null;
+      try{ var fx = (typeof S!=='undefined' && S.lastGPSFix) ? S.lastGPSFix : null;
+           if(fx){ _lat = fx.lat; _lng = fx.lng; } }catch(e2){}
+      if(e && e.s === stationName){
+        e.n = (e.n || 1) + 1; e.t = Date.now();
+        if(e.lat == null && _lat != null){ e.lat = _lat; e.lng = _lng; }   // 초동 위치용 좌표
+      }
       else if(e && e.n > 1){ e.n--; e.t = Date.now(); }        // 다른 역이면 신뢰도만 깎는다
-      else { m[key] = { s: stationName, l: lineName || '', n: 1, t: Date.now() }; }
+      else { m[key] = { s: stationName, l: lineName || '', n: 1, t: Date.now(), lat: _lat, lng: _lng }; }
       _cellMapSave();
     });
   }catch(e){}
@@ -8947,6 +8957,177 @@ function _cellRouteIdx(name){
   return -1;
 }
 window._cellRouteIdx = _cellRouteIdx;
+
+// ══════════════════════════════════════════════════════════════
+// 📍 위치 상태 머신 (GPS + Cell ID 융합)
+//
+//   INIT ──첫 GPS──► GROUND ──GPS약화+셀변화──► TRANSITION ──지속──► UNDERGROUND
+//     │                 ▲                            │                    │
+//     └─셀 룩업(즉시)───┘◄──────── 양호한 GPS ───────┴────────────────────┘
+//
+//   · GROUND      : GPS가 주인. 셀은 보조.
+//   · TRANSITION  : GPS가 나빠지고 셀이 바뀌는 중 = 지하 진입 의심 (아직 판단 보류)
+//   · UNDERGROUND : GPS 없음. 셀 변화로 '이동/정지'만 판단.
+//
+//   예외 처리
+//   · 지하 진입 GPS 끊김 → age 초과를 상태 전이로 흡수 (마지막 fix를 계속 쓰지 않음)
+//   · GPS 튐(건물 숲)    → 정확도 대비 이동량이 물리적으로 불가능하면 그 fix를 버림
+//   · 플러그인/DB 없음   → 전 구간 null 반환. 기존 로직이 그대로 돌아간다.
+// ══════════════════════════════════════════════════════════════
+var LOCFSM = {
+  state: 'INIT',
+  since: 0,          // 현재 상태 진입 시각
+  fix:   null,       // 마지막으로 채택된 GPS { lat, lng, acc, ts, spd }
+  anchor:null,       // 현재 최선의 위치 { lat, lng, acc, src }
+  rejected: 0        // 튐으로 버린 fix 수 (진단용)
+};
+
+var LOC_GOOD_ACC   = 60;      // 이 이하면 좋은 GPS (m)
+var LOC_BAD_ACC    = 150;     // 이 이상이면 나쁜 GPS (m)
+var LOC_FRESH_MS   = 15000;   // 이 안이면 최신 fix
+var LOC_STALE_MS   = 25000;   // 이 넘으면 GPS 끊긴 것으로 본다
+var LOC_TRANS_MS   = 20000;   // TRANSITION 이 이만큼 지속되면 UNDERGROUND 확정
+var LOC_MAX_MPS    = 45;      // 지상 이동 상한(약 160km/h) — 넘는 점프는 튐
+
+function _locNow(){ return Date.now(); }
+function _locSet(st){
+  if(LOCFSM.state === st) return;
+  console.log('[위치FSM] ' + LOCFSM.state + ' → ' + st);
+  LOCFSM.state = st;
+  LOCFSM.since = _locNow();
+}
+
+// GPS 한 건을 받아 채택 여부를 판단한다. 반환 true=채택
+function locOnGps(lat, lng, acc, spd){
+  try{
+    if(lat == null || lng == null) return false;
+    var now = _locNow();
+    acc = (acc == null || !isFinite(acc)) ? 9999 : acc;
+
+    // ── 튐 방지: 직전 fix에서 물리적으로 불가능한 거리면 버린다 ──
+    //   단, 정확도가 확실히 좋아졌다면(새 fix가 더 정밀) 받아들인다.
+    var prev = LOCFSM.fix;
+    if(prev && typeof haversineM === 'function'){
+      var dt = Math.max(1, (now - prev.ts) / 1000);
+      var d  = haversineM(prev.lat, prev.lng, lat, lng);
+      var mps = d / dt;
+      var allow = LOC_MAX_MPS + (acc + prev.acc) / dt;   // 오차 반경만큼은 관대하게
+      if(mps > allow && acc > prev.acc){
+        LOCFSM.rejected++;
+        console.log('[위치FSM] 튐 무시: ' + Math.round(d) + 'm/' + Math.round(dt) + 's (정확도 ' + Math.round(acc) + 'm)');
+        return false;
+      }
+    }
+
+    LOCFSM.fix = { lat: lat, lng: lng, acc: acc, ts: now, spd: (spd == null ? null : spd) };
+    if(acc <= LOC_BAD_ACC){
+      LOCFSM.anchor = { lat: lat, lng: lng, acc: acc, src: 'gps' };
+      if(acc <= LOC_GOOD_ACC){ _locSet('GROUND'); locSaveLast(lat, lng, acc); }
+    }
+    return true;
+  }catch(e){ return false; }
+}
+window.locOnGps = locOnGps;
+
+// 주기적으로 호출 — 상태를 갱신한다
+function locTick(){
+  try{
+    var now = _locNow();
+    var f = LOCFSM.fix;
+    var age = f ? (now - f.ts) : Infinity;
+    var moving = (typeof _cellMovingState === 'function') ? _cellMovingState() : null;
+
+    // ① GPS가 최신이고 쓸 만하면 무조건 지상
+    if(age <= LOC_FRESH_MS && f && f.acc <= LOC_GOOD_ACC){ _locSet('GROUND'); return LOCFSM.state; }
+
+    // ② GPS가 끊겼거나 크게 나빠짐
+    var degraded = (age > LOC_STALE_MS) || (f && f.acc >= LOC_BAD_ACC);
+    if(!degraded){ return LOCFSM.state; }                 // 애매하면 상태 유지
+
+    if(LOCFSM.state === 'GROUND' || LOCFSM.state === 'INIT'){
+      // 셀이 바뀌는 중이면 '지하 진입 의심'
+      if(moving === true) _locSet('TRANSITION');
+      else if(age > LOC_STALE_MS * 3) _locSet('TRANSITION');   // 셀 정보가 없어도 오래 끊기면 전이
+      return LOCFSM.state;
+    }
+    if(LOCFSM.state === 'TRANSITION'){
+      if(now - LOCFSM.since >= LOC_TRANS_MS) _locSet('UNDERGROUND');
+      return LOCFSM.state;
+    }
+    return LOCFSM.state;
+  }catch(e){ return LOCFSM.state; }
+}
+window.locTick = locTick;
+
+// 지하철을 타고 이동 중인가 — 셀 변화만으로는 부족하다는 점을 반영
+//   조건: 지하 상태 + 승차 확정 + 셀이 바뀌는 중
+//   (역 안을 걸어다녀도 셀은 바뀌므로 '승차 확정'을 반드시 함께 본다)
+function locRidingUnderground(){
+  try{
+    if(LOCFSM.state !== 'UNDERGROUND' && LOCFSM.state !== 'TRANSITION') return false;
+    if(typeof _htlNotDeparted === 'function' && _htlNotDeparted()) return false;   // 아직 안 탐
+    return _cellMovingState() === true;
+  }catch(e){ return false; }
+}
+window.locRidingUnderground = locRidingUnderground;
+
+// ── TTFF(첫 GPS 대기) 동안 쓸 초동 위치 ─────────────────────────
+//   빠른 것부터: ①마지막 알던 위치(0ms) ②학습된 셀 좌표 ③OpenCelliD(선택)
+//   ※ OpenCelliD 는 오차가 보통 수백 m~1km라 '주변 정류장 찾기'에는 쓰기 어렵다.
+//     키를 넣어야 켜지고, 앞의 둘이 모두 실패했을 때만 쓴다.
+var LOC_LAST_TTL = 12 * 3600 * 1000;   // 마지막 위치는 12시간까지 유효
+var OPENCELLID_KEY = '';               // 값을 넣으면 ③이 켜진다
+
+function locSaveLast(lat, lng, acc){
+  try{ localStorage.setItem('locLastFix', JSON.stringify({ lat:lat, lng:lng, acc:acc||100, ts:Date.now() })); }catch(e){}
+}
+function locLoadLast(){
+  try{
+    var e = JSON.parse(localStorage.getItem('locLastFix') || 'null');
+    if(!e || !e.ts || Date.now() - e.ts > LOC_LAST_TTL) return null;
+    // 오래될수록 신뢰도를 낮춘다 (시간당 +200m)
+    var aged = (e.acc || 100) + Math.round((Date.now() - e.ts) / 3600000) * 200;
+    return { lat: e.lat, lng: e.lng, acc: Math.min(aged, 3000), src: 'last' };
+  }catch(e){ return null; }
+}
+window.locSaveLast = locSaveLast;
+window.locLoadLast = locLoadLast;
+
+function locInitialAnchor(cb){
+  try{
+    if(LOCFSM.anchor){ cb(LOCFSM.anchor); return; }
+
+    // ① 마지막 알던 위치 — 즉시
+    var last = locLoadLast();
+    if(last){ LOCFSM.anchor = last; cb(last); }      // 먼저 돌려주고, 더 나은 게 있으면 아래에서 갱신
+
+    if(typeof _cellNow !== 'function'){ if(!last) cb(null); return; }
+    _cellNow(function(c){
+      var key = (typeof _cellKey === 'function') ? _cellKey(c) : '';
+      var e = key ? _cellMap()[key] : null;
+
+      // ② 학습된 셀 좌표 — 실제 그 역에서 잡은 GPS라 정확도가 높다
+      if(e && e.lat != null && e.lng != null){
+        LOCFSM.anchor = { lat: e.lat, lng: e.lng, acc: 300, src: 'cell' };
+        cb(LOCFSM.anchor); return;
+      }
+
+      // ③ OpenCelliD — 키가 있을 때만. 오차가 커서 최후 수단이다.
+      if(!OPENCELLID_KEY || !c){ if(!last) cb(null); return; }
+      try{
+        var u = 'https://opencellid.org/cell/get?key=' + encodeURIComponent(OPENCELLID_KEY)
+              + '&mcc=' + c.mcc + '&mnc=' + c.mnc + '&lac=' + c.tac + '&cellid=' + c.cid + '&format=json';
+        fetch(u).then(function(r){ return r.json(); }).then(function(j){
+          if(j && j.lat && j.lon){
+            LOCFSM.anchor = { lat: +j.lat, lng: +j.lon, acc: Math.max(500, +j.range || 1000), src: 'opencellid' };
+            cb(LOCFSM.anchor);
+          }else if(!last) cb(null);
+        }).catch(function(){ if(!last) cb(null); });
+      }catch(e2){ if(!last) cb(null); }
+    });
+  }catch(e){ cb(null); }
+}
+window.locInitialAnchor = locInitialAnchor;
 
 // ── 기지국 변화 = '움직이는 중' 증거 (학습 불필요) ──────────────
 //   셀이 '어느 역'인지는 학습이 있어야 알지만, 셀이 바뀐다는 사실 자체는
@@ -9446,6 +9627,7 @@ window._startTransitWatch=_startTransitWatch;
 window._stopTransitWatch=_stopTransitWatch;
 
 function _updateTransitGps() {
+  try{ if(typeof locTick === 'function') locTick(); }catch(e){}
   var card = document.getElementById('transitResultCard');
   if(!card || card.style.display==='none') { clearInterval(_transitGpsTimer); return; }
   // ★ 예상 남은시간(시간 기반) 갱신 → 경로카드 헤더 + AI 승무원 반영
@@ -9562,7 +9744,11 @@ function _updateTransitGps() {
             //   📶 단, 기지국이 '정지 중'이라고 알려주면 전진하지 않는다.
             //     셀이 3분 넘게 그대로면 열차가 서 있거나 지연되는 중이다.
             //     (학습 불필요 — 셀이 바뀐다는 사실 자체만 쓴다. 판단 불가면 종전대로 전진)
-            var _cmv = (typeof _cellMovingState === 'function') ? _cellMovingState() : null;
+            // 📍 지하에서 '탑승 중'이 확인되면 전진 허용, '정지'면 차단.
+            //   역 안을 걸어다녀도 셀은 바뀌므로 승차 확정(_htlNotDeparted)을 함께 본다.
+            var _cmv = (typeof locRidingUnderground === 'function' && locRidingUnderground())
+                        ? true
+                        : ((typeof _cellMovingState === 'function') ? _cellMovingState() : null);
             if(_cmv === false){
               window._markerTransMsOverride = null;   // 정지 — 마커를 붙잡는다
             } else if(_nowMs - (window._gpsWaitLastMs||0) >= 5000){
@@ -9588,10 +9774,16 @@ function _updateTransitGps() {
                   var _f2=_transitNodeData[_tp2.fromIdx], _t2=_transitNodeData[_tp2.toIdx]||_f2;
                   if(_f2){ _useFrom=_f2; _useTo=_t2; _useRatio=_tp2.ratio||0;
                     window._gpsWaitIdx=_tp2.fromIdx; window._gpsWaitRatio=Math.min(0.9,_tp2.ratio||0);
-                    // ★ 시각표 추정으로 _gpsMaxIdx를 올리면 안 된다.
-                    //   _htlNotDeparted()가 이 값을 보고 '출발했다'고 판단하므로,
-                    //   승차 전에는 시각만 흘러도 출발로 오인해 마커 고정이 풀린다.
-                    if(!(typeof _htlNotDeparted==='function' && _htlNotDeparted())){
+                    // ★ 시각표 추정으로 진행도(_gpsMaxIdx)를 올리면 안 되는 두 경우
+                    //   ① 승차 전 — _htlNotDeparted()가 이 값을 보므로, 시각만 흘러도
+                    //      출발로 오인해 마커 고정이 풀린다.
+                    //   ② 지하 구간 — 진행도가 시각표만으로 계속 올라가면 마커가
+                    //      다음역·다다음역까지 미리 가버린다. 지하에서는 실제 근거
+                    //      (GPS·기지국·실시간 열차위치·통과 기록)로만 올린다.
+                    //      _gpsMaxIdx가 묶이면 마커는 '확정역 → 다음역' 구간을 못 벗어난다.
+                    var _underg = (typeof LOCFSM !== 'undefined')
+                                  && (LOCFSM.state === 'UNDERGROUND' || LOCFSM.state === 'TRANSITION');
+                    if(!(typeof _htlNotDeparted==='function' && _htlNotDeparted()) && !_underg){
                       window._gpsMaxIdx=Math.max((window._gpsMaxIdx==null?-1:window._gpsMaxIdx), _tp2.fromIdx);
                     } }
                 } else if(_tp2.fromIdx === _wIdx && (_tp2.ratio||0) > _useRatio){
@@ -12699,6 +12891,10 @@ window._bgDiag = async function(){
     var _ck = Object.keys(_cm), _cr = _ck.filter(function(k){ return (_cm[k].n||0) >= _CELL_MIN_HITS; });
     add('학습된 기지국: ' + _ck.length + '개 (신뢰 ' + _cr.length + '개)');
     if(_cellLast) add('최근 관측 셀: ' + _cellLast.key);
+    if(typeof LOCFSM !== 'undefined'){
+      add('위치 상태: ' + LOCFSM.state + (LOCFSM.anchor ? (' (' + LOCFSM.anchor.src + ')') : ''));
+      add('튐으로 버린 GPS: ' + LOCFSM.rejected + '건');
+    }
   }catch(e){}
   add('마지막 뉴스 열기 방식: ' + (window._newsOpenMode || '아직 없음'));
   // 알림 권한
@@ -25982,8 +26178,11 @@ function _onForegroundResume(){
             _placeGpsMarkerSmooth(_fn, _tn, _tp.ratio||0);
             // 진행 인덱스도 시각표 위치까지 끌어올림 (백스텝 방지 기준 갱신)
             var _passedIdx = (_tp.ratio>=0.999) ? _tp.toIdx : _tp.fromIdx;
-            // ★ 승차 전이면 시각표 추정으로 진행도를 올리지 않는다(위와 같은 이유)
-            if(!(typeof _htlNotDeparted==='function' && _htlNotDeparted())){
+            // ★ 승차 전이거나 지하 구간이면 시각표 추정으로 진행도를 올리지 않는다
+            //   (백그라운드에 오래 있다 돌아왔을 때 한꺼번에 앞서 가는 것도 이걸로 막힌다)
+            var _ug2 = (typeof LOCFSM !== 'undefined')
+                       && (LOCFSM.state === 'UNDERGROUND' || LOCFSM.state === 'TRANSITION');
+            if(!(typeof _htlNotDeparted==='function' && _htlNotDeparted()) && !_ug2){
               window._gpsMaxIdx = Math.max((window._gpsMaxIdx==null?-1:window._gpsMaxIdx), _passedIdx);
             }
             // 시각표 대기 진행률도 현재 구간에 맞춰 세팅 (이후 미감지 전진이 여기서 이어짐)
