@@ -55,6 +55,44 @@ jobs:
       - name: Sync Capacitor
         run: npx cap sync android
         
+      - name: Install CellInfo plugin (기지국 보조측위)
+        run: |
+          python3 - << 'PYEOF'
+          import os, shutil
+
+          PKG = "com.dullyyj.subway"
+          PKGDIR = os.path.join("android/app/src/main/java", *PKG.split("."))
+          os.makedirs(PKGDIR, exist_ok=True)
+
+          # 1) 플러그인 소스 복사
+          src = "native/CellInfoPlugin.java"
+          if not os.path.exists(src):
+              raise SystemExit("native/CellInfoPlugin.java 가 없습니다 — 저장소에 올렸는지 확인하세요")
+          shutil.copy(src, os.path.join(PKGDIR, "CellInfoPlugin.java"))
+
+          # 2) MainActivity 재작성 (cap add android 가 매번 새로 만들므로 통째로 덮어씀)
+          main = os.path.join(PKGDIR, "MainActivity.java")
+          with open(main, "w", encoding="utf-8") as f:
+              f.write(
+                  "package " + PKG + ";\n\n"
+                  "import android.os.Bundle;\n"
+                  "import com.getcapacitor.BridgeActivity;\n\n"
+                  "public class MainActivity extends BridgeActivity {\n"
+                  "    @Override\n"
+                  "    public void onCreate(Bundle savedInstanceState) {\n"
+                  "        registerPlugin(CellInfoPlugin.class);\n"
+                  "        super.onCreate(savedInstanceState);\n"
+                  "    }\n"
+                  "}\n"
+              )
+
+          print("=== MainActivity.java ===")
+          print(open(main, encoding="utf-8").read())
+          print("=== 설치된 파일 ===")
+          for n in sorted(os.listdir(PKGDIR)):
+              print(" ", n)
+          PYEOF
+
       - name: Generate launcher icons & splash
         run: |
           npm install --no-save @capacitor/assets@3 --legacy-peer-deps
