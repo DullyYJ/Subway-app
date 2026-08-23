@@ -2255,7 +2255,9 @@ function _foodShowMap(card, p){
         var pts=[[dLat,dLng]];
         var hasStn=_foodStnCoord && (sLat!==dLat||sLng!==dLng);
         if(hasStn){ _foodEndMarker(map,sLat,sLng,'출발','#2b7cff').bindPopup((stnNm||'출발')+'역'); pts.push([sLat,sLng]); }
-        if(pts.length>1){ map.fitBounds(pts,{padding:[40,40]}); } else { map.setView([dLat,dLng],17); }
+        // ★ 두 지점이 아주 가까우면(39m 등) 화면이 과하게 확대돼 주변 건물·상호가
+        //   안 보인다. 최대 줌을 18로 묶어 주변 맥락이 함께 보이게 한다.
+        if(pts.length>1){ map.fitBounds(pts,{padding:[46,46],maxZoom:18}); } else { map.setView([dLat,dLng],17); }
         var inval=function(){ try{map.invalidateSize();}catch(e){} };
         inval(); setTimeout(inval,150); setTimeout(inval,400); setTimeout(inval,800);
         if(hasStn){
@@ -2264,7 +2266,7 @@ function _foodShowMap(card, p){
             if(_foodMapObj!==map || !cs || cs.length<2) return;
             try{ map.removeLayer(line); }catch(e){}
             var rl=_foodDrawRoute(map,cs);
-            try{ map.fitBounds(rl.getBounds(),{padding:[46,46]}); }catch(e){}
+            try{ map.fitBounds(rl.getBounds(),{padding:[46,46],maxZoom:18}); }catch(e){}
             var foot=panel.querySelector('.food-map-foot');
             if(foot&&distM){ foot.innerHTML+=' · 약 '+Math.round(distM)+'m'; }
           });
@@ -9066,8 +9068,11 @@ window._foodEndMarker = _foodEndMarker;
 //   ※ OpenFreeMap Positron 은 벡터 타일이라 MapLibre 가 필요하다.
 //     지금은 Leaflet(래스터)이므로 같은 디자인의 래스터판인 CARTO 를 쓴다.
 //   ※ 타일 서버가 죽거나 막히면 지도가 통째로 비므로 OSM 폴백을 둔다.
-var _TILE_CARTO_LIGHT = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
-var _TILE_CARTO_DARK  = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+//   Positron(light_all)은 너무 밋밋해 길 찾기에 필요한 정보가 부족했다.
+//   Voyager 는 같은 CARTO 계열이면서 건물·도로명·상점 POI가 색으로 구분돼
+//   배경은 깔끔하되 주변을 알아볼 수 있다.
+var _TILE_CARTO_LIGHT = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+var _TILE_CARTO_DARK  = 'https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png';
 var _TILE_OSM         = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 var _TILE_ATTR_CARTO  = '© OpenStreetMap · © CARTO';
 var _TILE_ATTR_OSM    = '© OpenStreetMap';
