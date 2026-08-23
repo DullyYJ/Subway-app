@@ -1329,7 +1329,9 @@ header h1 em{color:var(--gold);font-style:normal;}
 /* 커뮤니티 고정 상단 영역 (스크롤 안됨) */
 .comm-fixed-top{flex-shrink:0;padding:12px 14px 4px;background:var(--bg);border-bottom:1px solid var(--border);}
 /* 커뮤니티 게시글 스크롤 영역 (독립 스크롤) */
-.comm-scroll{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding:12px 14px;min-height:0;}
+/* 하단 여백 72px: '제보 글쓰기' 버튼(.fab, bottom:16px + 높이 약 40px)이
+   마지막 기사 위에 겹쳐 글자를 가리던 문제를 막는다. */
+.comm-scroll{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding:12px 14px 72px;min-height:0;}
 .comm-scroll::-webkit-scrollbar{width:0;}
 
 /* ── 디씨인사이드 스타일 게시글 ── */
@@ -2248,7 +2250,7 @@ function _foodShowMap(card, p){
       try{
         var sLat=_foodStnCoord?_foodStnCoord.lat:dLat, sLng=_foodStnCoord?_foodStnCoord.lng:dLng;
         var map=L.map(el,{zoomControl:true}); _foodMapObj=map;
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+        _addBaseTiles(map);
         L.circleMarker([dLat,dLng],{radius:9,color:'#fff',weight:2,fillColor:'#e8482e',fillOpacity:1}).addTo(map).bindPopup(p.place_name);
         var pts=[[dLat,dLng]];
         var hasStn=_foodStnCoord && (sLat!==dLat||sLng!==dLng);
@@ -6618,7 +6620,10 @@ function fmapDoRoute() {
   }catch(e){}
 
   // 탐색 후에도 결과가 안 뜨면 1회만 자동 재시도 (앱 시작 직후 첫 탐색 실패 대비)
-  setTimeout(function(){
+  //   ★ 준비 단계(실시간 대기 수집 등)가 앞에 붙으면 6초를 넘겨 재시도가 잘못 걸린다.
+  //     그래서 '요청이 실제로 나간 시점'에 _routeSentAt을 찍고, 그때부터 6초를 다시 센다.
+  window._routeSentAt = 0;
+  var _watchdog = function(){
     try{
       if((window._routeResultReady || 0) >= _reqToken) return;      // 이미 결과 나옴
       if(window._routeReqToken !== _reqToken) return;               // 그 사이 새 탐색 시작
@@ -6629,10 +6634,17 @@ function fmapDoRoute() {
       if(shown || errOn) return;
       if(window._routeRetried === _reqToken) return;                // 재시도는 1회만
       window._routeRetried = _reqToken;
+      // 요청이 나간 지 6초가 안 됐으면 그때부터 다시 센다
+      var sent = window._routeSentAt || 0;
+      if(sent && Date.now() - sent < 6000){
+        setTimeout(_watchdog, 6000 - (Date.now() - sent) + 200);
+        return;
+      }
       console.log('[경로] 결과 없음 → 자동 재시도');
       if(typeof fmapDoRoute === 'function') fmapDoRoute();
     }catch(err){}
-  }, 6000);
+  };
+  setTimeout(_watchdog, 6000);
 
   // 로딩 즉시 표시
   var box     = document.getElementById('transitResultBox');
@@ -6754,6 +6766,7 @@ function fmapDoRoute() {
     //   못 모으거나 늦으면 빈 값으로 진행 — 기존 동작 그대로다.
     _collectRTW(start.lat, start.lng, function(rtw){
     if(_routeStale()) return;
+    window._routeSentAt = Date.now();          // 워치독 기준 시각
     if(rtw) console.log('[route-v2-rtw]', rtw);
 
     // 자체 경로엔진(route-v2): 1회 호출로 3모드(minTime/minTransfer/minWalk) 반환
@@ -6788,9 +6801,14 @@ function fmapDoRoute() {
         return;
       }
 
-      // ★ 후보들의 '지금 이 정류장에 그 노선이 몇 분 뒤 오는지'를 먼저 채운 뒤 순위를 정한다.
-      //   조회가 늦으면(3.5초) 채워진 만큼만 반영하고 진행한다.
-      _applyRealtimeWaits(allPaths, function(){
+      // ★ 엔진이 rtw로 실시간 대기를 이미 반영했으면(rtwApplied > 0) 앱 쪽 재순위는 건너뛴다.
+      //   같은 일을 두 번 하는 셈이고, 도착정보를 다시 받느라 최대 3.5초가 더 걸린다.
+      var _rtwDone = 0;
+      try{ (results || []).forEach(function(r){ if(r && r.rtwApplied) _rtwDone += r.rtwApplied; }); }catch(e){}
+      var _rankStep = _rtwDone > 0
+        ? function(paths, cb){ console.log('[순위] 엔진이 실시간 반영함(' + _rtwDone + '개 노선) → 앱 재순위 생략'); cb(); }
+        : _applyRealtimeWaits;
+      _rankStep(allPaths, function(){
       if(_routeStale()) return;
       // 통합 데이터로 옵션 파싱
       var combinedData = { result: { path: allPaths } };
@@ -6820,7 +6838,7 @@ function fmapDoRoute() {
         window._lockedRouteType = null;
         _doSelectRouteOption('fast');
       }
-      });   // _applyRealtimeWaits 콜백 끝
+      });   // 순위 단계 콜백 끝
     })
     .catch(function(e){
       if(loading) loading.style.display = 'none';
@@ -6936,7 +6954,7 @@ window._applyRealtimeWaits = _applyRealtimeWaits;
 //   엔진이 그 값으로 탐색하므로 '순위 보정'이 아니라 최적 경로 자체가 달라진다.
 var _RTW_STOPS   = 3;      // 출발지에서 가까운 정류장 이 개수만 조회
 var _RTW_MAX     = 25;     // URL 길이 보호 — 노선 수 상한
-var _RTW_TIMEOUT = 2500;   // 이 안에 못 모으면 모은 만큼만 보내고 진행
+var _RTW_TIMEOUT = 1500;   // 이 안에 못 모으면 모은 만큼만 보내고 진행 (탐색 지연 최소화)
 function _collectRTW(lat, lng, cb){
   var done = false;
   var finish = function(str){ if(done) return; done = true; cb(str || ''); };
@@ -8957,6 +8975,54 @@ function _cellRouteIdx(name){
   return -1;
 }
 window._cellRouteIdx = _cellRouteIdx;
+
+// ── 지도 타일 (Carto Positron) ────────────────────────────────
+//   기존 OSM 기본 타일은 색이 진하고 도로·건물이 빽빽해서, 그 위에 얹는
+//   경로선·정류장 마커가 잘 안 보였다. Positron은 회색 저채도 배경이라
+//   우리가 그리는 요소가 앞으로 나온다.
+//   ※ OpenFreeMap Positron 은 벡터 타일이라 MapLibre 가 필요하다.
+//     지금은 Leaflet(래스터)이므로 같은 디자인의 래스터판인 CARTO 를 쓴다.
+//   ※ 타일 서버가 죽거나 막히면 지도가 통째로 비므로 OSM 폴백을 둔다.
+var _TILE_CARTO_LIGHT = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+var _TILE_CARTO_DARK  = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+var _TILE_OSM         = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+var _TILE_ATTR_CARTO  = '© OpenStreetMap · © CARTO';
+var _TILE_ATTR_OSM    = '© OpenStreetMap';
+var _tileFallback = false;   // 한 번 실패하면 이후 지도는 모두 OSM 으로
+
+function _isDarkTheme(){
+  try{
+    var t = document.documentElement.getAttribute('data-theme') || '';
+    return /dark|night|black/i.test(t);
+  }catch(e){ return false; }
+}
+// 지도에 배경 타일을 얹는다. 실패가 잦으면 자동으로 OSM 으로 되돌린다.
+function _addBaseTiles(map){
+  try{
+    if(_tileFallback){
+      L.tileLayer(_TILE_OSM, { maxZoom:19, attribution:_TILE_ATTR_OSM }).addTo(map);
+      return;
+    }
+    var layer = L.tileLayer(_isDarkTheme() ? _TILE_CARTO_DARK : _TILE_CARTO_LIGHT, {
+      maxZoom: 20,
+      subdomains: 'abcd',
+      detectRetina: true,          // 고해상도 화면에서 {r}=@2x 타일 사용
+      attribution: _TILE_ATTR_CARTO
+    });
+    var errs = 0;
+    layer.on('tileerror', function(){
+      if(++errs < 6 || _tileFallback) return;   // 몇 장 실패는 흔하다 — 계속 실패할 때만 전환
+      _tileFallback = true;
+      console.log('[지도] CARTO 타일 실패 → OSM 으로 전환');
+      try{ map.removeLayer(layer); }catch(e){}
+      L.tileLayer(_TILE_OSM, { maxZoom:19, attribution:_TILE_ATTR_OSM }).addTo(map);
+    });
+    layer.addTo(map);
+  }catch(e){
+    try{ L.tileLayer(_TILE_OSM, { maxZoom:19, attribution:_TILE_ATTR_OSM }).addTo(map); }catch(e2){}
+  }
+}
+window._addBaseTiles = _addBaseTiles;
 
 // ══════════════════════════════════════════════════════════════
 // 📍 위치 상태 머신 (GPS + Cell ID 융합)
@@ -11239,7 +11305,7 @@ function _busShowMap(card, stop){
       var el=document.getElementById(cid); if(!el) return;
       try{
         var map=L.map(el,{zoomControl:true}); _busMapObj=map;
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+        _addBaseTiles(map);
         L.circleMarker([la,lo],{radius:9,color:'#fff',weight:2,fillColor:'#2b7cff',fillOpacity:1}).addTo(map).bindPopup(nm);
         var pts=[[la,lo]];
         var myLat=(typeof _busGpsLat!=='undefined'&&_busGpsLat)||(typeof S!=='undefined'&&S.lastGPSFix&&S.lastGPSFix.lat);
@@ -13492,6 +13558,11 @@ window.addEventListener('unhandledrejection', function(e) {
       <div class="chip" onclick="filterCat(this,'뉴스')">📰뉴스</div>
       <div class="chip" onclick="showSettingsTab(this)">⚙️설정</div>
     </div>
+
+    <!-- 뉴스 카테고리 바 — 스크롤 영역 '바깥'의 고정 헤더에 둔다.
+         예전엔 목록 안에 position:sticky 로 넣었는데, 기사 제목이 칩 뒤로
+         비쳐 보이는 문제가 있었다(쇼핑탭과 같은 증상). 아예 스크롤 밖으로 뺀다. -->
+    <div id="newsCatBar" style="display:none;gap:6px;overflow-x:auto;padding:4px 0 2px;-webkit-overflow-scrolling:touch;"></div>
 
     <!-- 선택된 노선 태그 (선택 시 표시) -->
     <div id="activeLineTag" style="display:none;">
@@ -24299,6 +24370,131 @@ function _newsApplyCats(items){
 window._newsApplyCats = _newsApplyCats;
 
 // ── 증시 뉴스 보강: 구글뉴스 RSS(증시/코스피/코스닥)에서 직접 수집 ──
+// ── 카테고리별 뉴스 수집 ──────────────────────────────────────
+//   서버(/newsfeed)는 종합 피드 하나라 카테고리별로 기사가 크게 모자랐고,
+//   증시 보강만 따로 하다 보니 '전체'가 증시 기사로 뒤덮이는 일이 있었다.
+//   → 카테고리마다 전용 검색 피드를 두어 각각 충분히 채운다.
+var _NEWS_CAT_FEEDS = {
+  '증시': [
+    'https://news.google.com/rss/search?q=%EC%BD%94%EC%8A%A4%ED%94%BC%20%EC%BD%94%EC%8A%A4%EB%8B%A5%20%EC%A6%9D%EC%8B%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%A3%BC%EC%8B%9D%EC%8B%9C%EC%9E%A5%20%EC%99%B8%EA%B5%AD%EC%9D%B8%20%EC%88%9C%EB%A7%A4%EC%88%98%20%EA%B3%B5%EB%AA%A8%EC%A3%BC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%89%B4%EC%9A%95%EC%A6%9D%EC%8B%9C%20%EB%82%98%EC%8A%A4%EB%8B%A5%20%EB%8B%A4%EC%9A%B0%EC%A7%80%EC%88%98+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%AF%B8%EA%B5%AD%EC%A6%9D%EC%8B%9C%20%EC%9B%94%EA%B0%80%20S%26P500+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%A6%9D%EA%B6%8C%EC%82%AC%20%EB%AA%A9%ED%91%9C%EC%A3%BC%EA%B0%80%20%EC%8B%A4%EC%A0%81%EB%B0%9C%ED%91%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+  ],
+  '경제': [
+    'https://news.google.com/rss/search?q=%ED%99%98%EC%9C%A8%20%EC%9B%90%EB%8B%AC%EB%9F%AC%20%EA%B8%B0%EC%A4%80%EA%B8%88%EB%A6%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%AC%BC%EA%B0%80%20%EC%86%8C%EB%B9%84%EC%9E%90%EB%AC%BC%EA%B0%80%20%EC%9D%B8%ED%94%8C%EB%A0%88%EC%9D%B4%EC%85%98+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B6%80%EB%8F%99%EC%82%B0%20%EC%95%84%ED%8C%8C%ED%8A%B8%20%EC%A0%84%EC%84%B8%20%EB%B6%84%EC%96%91+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%88%98%EC%B6%9C%20%EB%AC%B4%EC%97%AD%EC%88%98%EC%A7%80%20%EA%B2%BD%EC%83%81%EC%88%98%EC%A7%80+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B3%A0%EC%9A%A9%20%EC%B7%A8%EC%97%85%EC%9E%90%20%EC%8B%A4%EC%97%85%EB%A5%A0%20%EC%9E%84%EA%B8%88+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+  ],
+  '사회': [
+    'https://news.google.com/rss/search?q=%EC%82%AC%EA%B1%B4%EC%82%AC%EA%B3%A0%20%EA%B2%BD%EC%B0%B0%20%ED%99%94%EC%9E%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B5%90%ED%86%B5%EC%82%AC%EA%B3%A0%20%EC%A7%80%ED%95%98%EC%B2%A0%20%EB%B2%84%EC%8A%A4%20%EC%82%AC%EA%B3%A0+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B2%95%EC%9B%90%20%ED%8C%90%EA%B2%B0%20%EA%B2%80%EC%B0%B0%20%EC%88%98%EC%82%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%82%A0%EC%94%A8%20%EA%B8%B0%EC%83%81%EC%B2%AD%20%ED%83%9C%ED%92%8D%20%ED%8F%AD%EC%97%BC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B5%90%EC%9C%A1%20%ED%95%99%EA%B5%90%20%EB%8C%80%ED%95%99%20%EC%9E%85%EC%8B%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+  ],
+  '정치': [
+    'https://news.google.com/rss/search?q=%EA%B5%AD%ED%9A%8C%20%EB%B3%B8%ED%9A%8C%EC%9D%98%20%EB%B2%95%EC%95%88%20%EC%B2%98%EB%A6%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%8C%80%ED%86%B5%EB%A0%B9%EC%8B%A4%20%EC%A0%95%EB%B6%80%20%EC%A0%95%EC%B1%85%20%EB%B0%9C%ED%91%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%97%AC%EC%95%BC%20%EB%8C%80%ED%91%9C%20%EC%A0%95%EC%B9%98%EA%B6%8C%20%EA%B3%B5%EB%B0%A9+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%84%A0%EA%B1%B0%20%EC%97%AC%EB%A1%A0%EC%A1%B0%EC%82%AC%20%EC%A7%80%EC%A7%80%EC%9C%A8+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%99%B8%EA%B5%90%20%EC%A0%95%EC%83%81%ED%9A%8C%EB%8B%B4%20%ED%95%9C%EB%AF%B8%20%ED%95%9C%EC%9D%BC+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+  ],
+  '연예': [
+    'https://news.google.com/rss/search?q=%EC%95%84%EC%9D%B4%EB%8F%8C%20%EC%BB%B4%EB%B0%B1%20%EC%8B%A0%EA%B3%A1%20%EC%9D%8C%EC%9B%90+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%93%9C%EB%9D%BC%EB%A7%88%20%EC%8B%9C%EC%B2%AD%EB%A5%A0%20%EB%B0%A9%EC%86%A1+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%98%81%ED%99%94%20%EA%B0%9C%EB%B4%89%20%EB%B0%95%EC%8A%A4%EC%98%A4%ED%94%BC%EC%8A%A4+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%98%88%EB%8A%A5%20%EC%B6%9C%EC%97%B0%20%EB%B0%A9%EC%86%A1%EC%9D%B8+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=K%ED%8C%9D%20%ED%95%B4%EC%99%B8%20%EC%BD%98%EC%84%9C%ED%8A%B8%20%ED%88%AC%EC%96%B4+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+  ],
+  '스포츠': [
+    'https://news.google.com/rss/search?q=%ED%94%84%EB%A1%9C%EC%95%BC%EA%B5%AC%20KBO%20%EA%B2%BD%EA%B8%B0%20%EA%B2%B0%EA%B3%BC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%B6%95%EA%B5%AC%20K%EB%A6%AC%EA%B7%B8%20%EA%B5%AD%EA%B0%80%EB%8C%80%ED%91%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%86%90%ED%9D%A5%EB%AF%BC%20%EC%9D%B4%EA%B0%95%EC%9D%B8%20%ED%95%B4%EC%99%B8%EC%B6%95%EA%B5%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%ED%94%84%EB%A1%9C%EB%86%8D%EA%B5%AC%20%EB%B0%B0%EA%B5%AC%20KBL+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%98%AC%EB%A6%BC%ED%94%BD%20%EC%95%84%EC%8B%9C%EC%95%88%EA%B2%8C%EC%9E%84%20%EB%A9%94%EB%8B%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+  ],
+  'IT': [
+    'https://news.google.com/rss/search?q=%EC%9D%B8%EA%B3%B5%EC%A7%80%EB%8A%A5%20AI%20%EC%B1%97GPT+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B0%98%EB%8F%84%EC%B2%B4%20%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90%20SK%ED%95%98%EC%9D%B4%EB%8B%89%EC%8A%A4+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%8A%A4%EB%A7%88%ED%8A%B8%ED%8F%B0%20%EA%B0%A4%EB%9F%AD%EC%8B%9C%20%EC%95%84%EC%9D%B4%ED%8F%B0%20%EC%B6%9C%EC%8B%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%84%A4%EC%9D%B4%EB%B2%84%20%EC%B9%B4%EC%B9%B4%EC%98%A4%20%ED%94%8C%EB%9E%AB%ED%8F%BC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%8A%A4%ED%83%80%ED%8A%B8%EC%97%85%20%ED%88%AC%EC%9E%90%20%EC%9C%A0%EC%B9%98%20IT%EC%97%85%EA%B3%84+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+  ]
+};
+var _NEWS_CAT_TARGET = 100;          // 카테고리당 목표 건수
+var _NEWS_CAT_TTL    = 10*60*1000;   // 같은 카테고리 재수집 간격
+var _newsCatAt = {};                 // 카테고리별 마지막 수집 시각
+
+// 한 카테고리를 채운다. 이미 목표를 넘겼고 최근에 받았으면 건너뛴다.
+function _fetchCatNews(cat, cb, force){
+  try{
+    var feeds = _NEWS_CAT_FEEDS[cat];
+    if(!feeds || typeof _PROXY_LIST === 'undefined' || typeof _parseNewsRSS !== 'function'){ if(cb) cb(); return; }
+    var have = (_NEWSFEED.items || []).filter(function(x){ return x && x.cat === cat; }).length;
+    if(!force && have >= _NEWS_CAT_TARGET) { if(cb) cb(); return; }
+    if(!force && _newsCatAt[cat] && Date.now() - _newsCatAt[cat] < _NEWS_CAT_TTL){ if(cb) cb(); return; }
+    _newsCatAt[cat] = Date.now();
+
+    var pending = feeds.length;
+    var done = function(){ if(--pending <= 0 && cb) cb(); };
+    feeds.forEach(function(rss){
+      // _PROXY_LIST 는 URL을 받아 프록시 주소를 만들어 주는 '함수 배열'이다.
+      // 하나가 실패하면 다음 프록시로 넘어간다 (기존 뉴스 수집과 같은 방식).
+      (function tryP(i){
+        if(i >= _PROXY_LIST.length){ done(); return; }
+        fetch(_PROXY_LIST[i](rss))
+          .then(function(r){ if(!r.ok) throw new Error('http'); return r.text(); })
+          .then(function(xml){
+            var arr = _parseNewsRSS(xml) || [];
+            if(!arr.length){ tryP(i+1); return; }
+            _newsMerge(arr, cat);
+            done();
+          })
+          .catch(function(){ tryP(i+1); });
+      })(0);
+    });
+  }catch(e){ if(cb) cb(); }
+}
+window._fetchCatNews = _fetchCatNews;
+
+// 새 기사를 중복 없이 합친다. 제목과 링크 둘 다로 걸러낸다.
+function _newsMerge(news, hintCat){
+  try{
+    var have = {};
+    (_NEWSFEED.items || []).forEach(function(x){
+      if(!x) return;
+      if(x.title) have[x.title.replace(/\s/g,'')] = 1;
+      if(x.link)  have['L:' + x.link] = 1;
+    });
+    var add = [];
+    news.forEach(function(n){
+      if(!n || !n.title) return;
+      var k = n.title.replace(/\s/g,'');
+      if(have[k] || (n.link && have['L:' + n.link])) return;
+      have[k] = 1; if(n.link) have['L:' + n.link] = 1;
+      var _ts = n.ts || 0;
+      if(!_ts && n.pubDate){ var _p = Date.parse(n.pubDate); if(isFinite(_p)) _ts = _p; }
+      // ★ 분류는 한 번만 한다. 예전 초안은 두 번 불렀는데, 두 번째에 {title}만
+      //   넘겨 desc를 잃어버려 분류가 오히려 약해졌다.
+      var auto = (typeof _newsClassify === 'function') ? _newsClassify(n) : '';
+      var item = {
+        title: n.title, link: n.link || '', desc: n.desc || '',
+        ts: _ts || Date.now(), source: n.source || '',
+        cat: auto || hintCat || '사회'
+      };
+      // 그 카테고리를 노리고 받은 피드이므로, 분류가 '사회'(기본값)로 떨어지면 힌트를 따른다
+      if(hintCat && (!auto || auto === '사회')) item.cat = hintCat;
+      add.push(item);
+    });
+    if(add.length) _NEWSFEED.items = add.concat(_NEWSFEED.items || []);
+  }catch(e){}
+}
+window._newsMerge = _newsMerge;
+
 var _newsStockAt = 0;
 // force=true면 캐시(10분)를 무시하고 다시 모은다 (증시 탭을 열었는데 기사가 없을 때)
 function _fetchStockNews(cb, force){
@@ -24386,14 +24582,39 @@ function _renderNewsTab(list){
   }).join('');
   var cut = Date.now() - 3 * 24 * 3600 * 1000;
   if(typeof _newsApplyCats === 'function') _newsApplyCats(_NEWSFEED.items);
-  var items = (_NEWSFEED.items || []).filter(function(it){
-    if(it.ts && it.ts < cut) return false;
-    return _newsCatSel === '전체' || it.cat === _newsCatSel;
-  }).slice(0, 60);
-  // 증시 탭인데 기사가 적으면(5건 미만) 캐시를 무시하고 즉시 더 모은 뒤 재렌더
-  if(_newsCatSel === '증시' && items.length < 5 && typeof _fetchStockNews === 'function' && !window._newsStockRefetching){
-    window._newsStockRefetching = 1;
-    _fetchStockNews(function(){ window._newsStockRefetching = 0; _renderNewsTab(list); }, true);
+  var fresh = (_NEWSFEED.items || []).filter(function(it){ return !(it.ts && it.ts < cut); });
+
+  var items;
+  if(_newsCatSel === '전체'){
+    // ★ '전체'는 최신순으로만 자르면 그때 많이 들어온 한 카테고리(주로 증시)가
+    //   화면을 통째로 덮는다. 카테고리별로 돌아가며 뽑아 골고루 보이게 한다.
+    var byCat = {};
+    fresh.forEach(function(it){ (byCat[it.cat] = byCat[it.cat] || []).push(it); });
+    Object.keys(byCat).forEach(function(k){
+      byCat[k].sort(function(a,b){ return (b.ts||0) - (a.ts||0); });
+    });
+    var order = _NEWS_CATS.filter(function(c){ return c !== '전체' && byCat[c]; });
+    items = [];
+    for(var r = 0; items.length < 200; r++){
+      var added = false;
+      for(var oi = 0; oi < order.length; oi++){
+        var arr = byCat[order[oi]];
+        if(arr && arr[r]){ items.push(arr[r]); added = true; }
+      }
+      if(!added) break;
+    }
+  }else{
+    items = fresh.filter(function(it){ return it.cat === _newsCatSel; })
+                 .sort(function(a,b){ return (b.ts||0) - (a.ts||0); });
+  }
+
+  // ★ 카테고리별 목표(100건)를 못 채웠으면 그 카테고리 전용 피드를 더 받아온다.
+  if(_newsCatSel !== '전체' && typeof _fetchCatNews === 'function' && !window._newsCatFetching){
+    var haveN = fresh.filter(function(it){ return it.cat === _newsCatSel; }).length;
+    if(haveN < _NEWS_CAT_TARGET){
+      window._newsCatFetching = 1;
+      _fetchCatNews(_newsCatSel, function(){ window._newsCatFetching = 0; _renderNewsTab(list); });
+    }
   }
   var esc = function(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
   window._NEWS_SHOWN = items;   // 상세 팝업 참조용
@@ -24408,19 +24629,19 @@ function _renderNewsTab(list){
       + '<div style="color:var(--sub);font-size:13px;flex-shrink:0;margin-top:3px;">›</div>'
       + '</div>';
   }).join('');
+  // ★ 칩은 스크롤 밖(고정 헤더)에 그린다 — 기사가 칩 뒤로 비치지 않는다
+  var catBar = document.getElementById('newsCatBar');
+  if(catBar){
+    catBar.innerHTML = chips;
+    catBar.style.display = 'flex';
+  }
   list.innerHTML =
-    // ★ 목록을 내려도 카테고리 칩은 위에 붙어 있게 (position:sticky)
-    //   배경을 깔지 않으면 기사 글자가 칩 뒤로 비쳐 보인다.
-    '<div class="news-cat-bar" style="position:sticky;top:0;z-index:6;display:flex;gap:6px;overflow-x:auto;'
-      // 좌우 음수 마진으로 컨테이너 패딩(14px)까지 덮어야 기사 글자가 옆으로 비쳐 지나가지 않는다
-      + 'margin:-12px -14px 0;padding:12px 14px 10px;background:var(--bg);'
-      + '-webkit-overflow-scrolling:touch;">' + chips + '</div>'
-    + (items.length ? rows
+    (items.length ? rows
         : '<div style="text-align:center;padding:40px;color:var(--sub);">📰 '
           + (_newsCatSel === '전체' ? '뉴스 불러오는 중...' : _newsCatSel + ' 뉴스를 불러오는 중...')
           + '</div>');
   // 칩 클릭 → 카테고리 전환
-  list.querySelectorAll('.news-cat-chip').forEach(function(b){
+  (catBar || list).querySelectorAll('.news-cat-chip').forEach(function(b){
     b.addEventListener('click', function(){ _newsCatSel = b.dataset.cat; _renderNewsTab(list); });
   });
 }
@@ -28119,7 +28340,8 @@ function _parseNewsRSS(xml) {
         });
       }
     });
-    return out.slice(0, 15);
+    //   피드당 상한. 카테고리별로 100건 이상 모으려면 15건으로는 턱없이 모자라다.
+    return out.slice(0, 60);
   } catch(e) {
     console.warn('[뉴스 파싱 오류]', e.message);
     return [];
@@ -34456,6 +34678,8 @@ window.startShopTimer=startShopTimer;
 var _commFilter='all';
 function filterCat(el,cat){
   _commFilter=cat;
+  // 뉴스 탭이 아니면 카테고리 칩 바를 숨긴다 (고정 헤더에 있으므로 직접 제어)
+  try{ var _ncb=document.getElementById('newsCatBar'); if(_ncb) _ncb.style.display = (cat==='뉴스') ? 'flex' : 'none'; }catch(e){}
   document.querySelectorAll('#filterRow .chip').forEach(function(c){c.classList.remove('on');});
   if(el) el.classList.add('on');
   // 게시글 뷰 표시, 채팅/설정 뷰 숨김
@@ -34481,6 +34705,7 @@ window.filterCat = filterCat;
 
 // ★ 실시간 소통탭 표시 (카카오톡 스타일 채팅)
 function showChatTab(el){
+  try{ var _nb=document.getElementById('newsCatBar'); if(_nb) _nb.style.display='none'; }catch(e){}
   document.querySelectorAll('#filterRow .chip').forEach(function(c){c.classList.remove('on');});
   if(el) el.classList.add('on');
   var sv=document.getElementById('commScrollView'), cv=document.getElementById('chatTabView'), fab=document.getElementById('commFab');
@@ -34697,6 +34922,7 @@ window.clearErrLog = clearErrLog; window.copyErrLog = copyErrLog;
 window.openPolicy = openPolicy; window.closePolicy = closePolicy;
 
 function showSettingsTab(el){
+  try{ var _nb=document.getElementById('newsCatBar'); if(_nb) _nb.style.display='none'; }catch(e){}
   document.querySelectorAll('#filterRow .chip').forEach(function(c){c.classList.remove('on');});
   if(el) el.classList.add('on');
   // 테마 카드 현재 상태 반영
