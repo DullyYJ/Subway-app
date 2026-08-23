@@ -2251,28 +2251,23 @@ function _foodShowMap(card, p){
         var sLat=_foodStnCoord?_foodStnCoord.lat:dLat, sLng=_foodStnCoord?_foodStnCoord.lng:dLng;
         var map=L.map(el,{zoomControl:true}); _foodMapObj=map;
         _addBaseTiles(map);
-        L.circleMarker([dLat,dLng],{radius:9,color:'#fff',weight:2,fillColor:'#e8482e',fillOpacity:1}).addTo(map).bindPopup(p.place_name);
+        _foodEndMarker(map,dLat,dLng,'도착','#e8482e').bindPopup(p.place_name);
         var pts=[[dLat,dLng]];
         var hasStn=_foodStnCoord && (sLat!==dLat||sLng!==dLng);
-        if(hasStn){ L.circleMarker([sLat,sLng],{radius:9,color:'#fff',weight:2,fillColor:'#2b7cff',fillOpacity:1}).addTo(map).bindPopup((stnNm||'출발')+'역'); pts.push([sLat,sLng]); }
+        if(hasStn){ _foodEndMarker(map,sLat,sLng,'출발','#2b7cff').bindPopup((stnNm||'출발')+'역'); pts.push([sLat,sLng]); }
         if(pts.length>1){ map.fitBounds(pts,{padding:[40,40]}); } else { map.setView([dLat,dLng],17); }
         var inval=function(){ try{map.invalidateSize();}catch(e){} };
         inval(); setTimeout(inval,150); setTimeout(inval,400); setTimeout(inval,800);
         if(hasStn){
-          var line=L.polyline([[sLat,sLng],[dLat,dLng]],{color:'#f07830',weight:4,opacity:.55,dashArray:'6,8'}).addTo(map);
-          fetch('https://router.project-osrm.org/route/v1/foot/'+sLng+','+sLat+';'+dLng+','+dLat+'?overview=full&geometries=geojson')
-            .then(function(r){ return r.ok?r.json():null; })
-            .then(function(d){
-              if(_foodMapObj!==map) return;
-              if(d&&d.routes&&d.routes[0]&&d.routes[0].geometry){
-                var cs=d.routes[0].geometry.coordinates.map(function(c){ return [c[1],c[0]]; });
-                try{ map.removeLayer(line); }catch(e){}
-                var rl=L.polyline(cs,{color:'#f07830',weight:5,opacity:.9}).addTo(map);
-                try{ map.fitBounds(rl.getBounds(),{padding:[40,40]}); }catch(e){}
-                var foot=panel.querySelector('.food-map-foot');
-                if(foot&&d.routes[0].distance){ foot.innerHTML+=' · 약 '+Math.round(d.routes[0].distance)+'m'; }
-              }
-            }).catch(function(){});
+          var line=_foodDrawRoute(map,[[sLat,sLng],[dLat,dLng]]);
+          _footRoute(sLat,sLng,dLat,dLng,function(cs,distM){
+            if(_foodMapObj!==map || !cs || cs.length<2) return;
+            try{ map.removeLayer(line); }catch(e){}
+            var rl=_foodDrawRoute(map,cs);
+            try{ map.fitBounds(rl.getBounds(),{padding:[46,46]}); }catch(e){}
+            var foot=panel.querySelector('.food-map-foot');
+            if(foot&&distM){ foot.innerHTML+=' · 약 '+Math.round(distM)+'m'; }
+          });
         }
       }catch(e){ _foodMapFallback(panel,'지도를 표시할 수 없어요'); }
     });
@@ -8975,6 +8970,94 @@ function _cellRouteIdx(name){
   return -1;
 }
 window._cellRouteIdx = _cellRouteIdx;
+
+// ── 도보 경로 (Valhalla 보행자) ────────────────────────────────
+//   ★ 예전에는 OSRM 데모 서버(router.project-osrm.org)의 /route/v1/foot/ 을 썼는데,
+//     그 서버는 **차량 프로파일만** 서비스한다. 그래서 보행자에겐 없는 일방통행
+//     규칙이 적용돼 멀쩡한 길을 두고 유턴하는 경로가 그려졌다.
+//   → 보행자 라우팅을 실제로 지원하는 Valhalla 공개 서버를 먼저 쓴다.
+//     실패하면 OSRM, 그것도 안 되면 직선으로 물러난다.
+var _FOOT_VALHALLA = 'https://valhalla1.openstreetmap.de/route?json=';
+var _FOOT_OSRM     = 'https://router.project-osrm.org/route/v1/foot/';
+
+// Valhalla 는 좌표를 polyline6(1e6 배율)로 인코딩해서 준다.
+function _decodePolyline6(str){
+  var idx=0, lat=0, lng=0, out=[];
+  while(idx < str.length){
+    var b, shift=0, result=0;
+    do{ b = str.charCodeAt(idx++) - 63; result |= (b & 0x1f) << shift; shift += 5; }while(b >= 0x20);
+    lat += ((result & 1) ? ~(result >> 1) : (result >> 1));
+    shift = 0; result = 0;
+    do{ b = str.charCodeAt(idx++) - 63; result |= (b & 0x1f) << shift; shift += 5; }while(b >= 0x20);
+    lng += ((result & 1) ? ~(result >> 1) : (result >> 1));
+    out.push([lat / 1e6, lng / 1e6]);
+  }
+  return out;
+}
+window._decodePolyline6 = _decodePolyline6;
+
+// 도보 경로를 구한다. cb(좌표배열, 거리m) — 실패하면 cb(null)
+function _footRoute(sLat, sLng, dLat, dLng, cb){
+  var done = false;
+  var ok = function(cs, m){ if(!done){ done = true; cb(cs, m); } };
+
+  // ① Valhalla 보행자
+  try{
+    var q = { locations:[{lat:sLat,lon:sLng},{lat:dLat,lon:dLng}],
+              costing:'pedestrian', units:'kilometers',
+              directions_options:{ language:'ko-KR' } };
+    fetch(_FOOT_VALHALLA + encodeURIComponent(JSON.stringify(q)))
+      .then(function(r){ if(!r.ok) throw new Error('http'); return r.json(); })
+      .then(function(d){
+        var leg = d && d.trip && d.trip.legs && d.trip.legs[0];
+        if(!leg || !leg.shape) throw new Error('noshape');
+        var cs = _decodePolyline6(leg.shape);
+        var m  = (d.trip.summary && d.trip.summary.length) ? d.trip.summary.length * 1000 : 0;
+        ok(cs, m);
+      })
+      .catch(function(){ osrm(); });
+  }catch(e){ osrm(); }
+
+  // ② OSRM (차량 프로파일이라 정확도는 떨어지지만 없는 것보단 낫다)
+  function osrm(){
+    if(done) return;
+    try{
+      fetch(_FOOT_OSRM + sLng + ',' + sLat + ';' + dLng + ',' + dLat + '?overview=full&geometries=geojson')
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(d){
+          var rt = d && d.routes && d.routes[0];
+          if(!rt || !rt.geometry) { ok(null, 0); return; }
+          ok(rt.geometry.coordinates.map(function(c){ return [c[1], c[0]]; }), rt.distance || 0);
+        })
+        .catch(function(){ ok(null, 0); });
+    }catch(e){ ok(null, 0); }
+  }
+}
+window._footRoute = _footRoute;
+
+// 도보 경로선 — 점선으로 그린다 (차로 가는 길이 아님을 한눈에 알리려고)
+function _foodDrawRoute(map, coords){
+  return L.polyline(coords, {
+    color: '#f07830', weight: 4, opacity: .95,
+    dashArray: '2,9', lineCap: 'round', lineJoin: 'round'
+  }).addTo(map);
+}
+window._foodDrawRoute = _foodDrawRoute;
+
+// 출발/도착 지점 — 점 대신 글자로 표시한다
+function _foodEndMarker(map, lat, lng, label, color){
+  var html = '<div style="display:flex;flex-direction:column;align-items:center;line-height:1;">'
+    + '<span style="background:' + color + ';color:#fff;font-size:11px;font-weight:800;'
+    +   'padding:3px 8px;border-radius:10px;white-space:nowrap;'
+    +   'box-shadow:0 1px 4px rgba(0,0,0,.3);">' + label + '</span>'
+    + '<span style="width:9px;height:9px;border-radius:50%;background:' + color + ';'
+    +   'border:2px solid #fff;margin-top:2px;box-shadow:0 1px 3px rgba(0,0,0,.3);"></span>'
+    + '</div>';
+  return L.marker([lat, lng], {
+    icon: L.divIcon({ html: html, className: '', iconSize: [54, 32], iconAnchor: [27, 32] })
+  }).addTo(map);
+}
+window._foodEndMarker = _foodEndMarker;
 
 // ── 지도 타일 (Carto Positron) ────────────────────────────────
 //   기존 OSM 기본 타일은 색이 진하고 도로·건물이 빽빽해서, 그 위에 얹는
