@@ -2264,7 +2264,10 @@ function _foodShowMap(card, p){
           var line=_foodDrawRoute(map,[[sLat,sLng],[dLat,dLng]]);
           _footRoute(sLat,sLng,dLat,dLng,function(cs,distM){
             if(_foodMapObj!==map || !cs || cs.length<2) return;
-            try{ map.removeLayer(line); }catch(e){}
+            try{
+              map.removeLayer(line);
+              (line._arrowLayers||[]).forEach(function(l){ try{ map.removeLayer(l); }catch(e2){} });
+            }catch(e){}
             var rl=_foodDrawRoute(map,cs);
             try{ map.fitBounds(rl.getBounds(),{padding:[46,46],maxZoom:18}); }catch(e){}
             var foot=panel.querySelector('.food-map-foot');
@@ -9037,14 +9040,74 @@ function _footRoute(sLat, sLng, dLat, dLng, cb){
 }
 window._footRoute = _footRoute;
 
-// 도보 경로선 — 점선으로 그린다 (차로 가는 길이 아님을 한눈에 알리려고)
+// 도보 경로선 — 점선 + 진행 방향 화살표
+//   점선만으로는 어느 쪽으로 가는지 알 수 없어서, 일정 간격마다 진행 방향을
+//   가리키는 작은 화살표를 얹는다. (Leaflet 기본 기능만 사용 — 플러그인 없음)
+var _ARROW_MIN_M   = 45;    // 이 간격마다 화살표 하나
+var _ARROW_MAX     = 8;     // 너무 많으면 지저분해진다
 function _foodDrawRoute(map, coords){
-  return L.polyline(coords, {
+  var line = L.polyline(coords, {
     color: '#f07830', weight: 4, opacity: .95,
     dashArray: '2,9', lineCap: 'round', lineJoin: 'round'
   }).addTo(map);
+  try{ _foodDrawArrows(map, coords, line); }catch(e){}
+  return line;
 }
 window._foodDrawRoute = _foodDrawRoute;
+
+// 경로를 따라가며 일정 거리마다 방향 화살표를 놓는다.
+//   반환 레이어들은 line에 매달아 두어, 선을 지울 때 같이 지워지게 한다.
+function _foodDrawArrows(map, coords, line){
+  if(!coords || coords.length < 2) return;
+  var m = (typeof haversineM === 'function') ? haversineM : null;
+  if(!m) return;
+
+  // 전체 길이를 먼저 재서 간격을 정한다 (짧은 경로에도 최소 1개는 나오도록)
+  var total = 0, i;
+  for(i = 0; i < coords.length - 1; i++)
+    total += m(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1]);
+  if(total < 12) return;
+  var step = Math.max(_ARROW_MIN_M, total / _ARROW_MAX);
+
+  var layers = [];
+  var acc = 0, nextAt = step * 0.5;   // 첫 화살표는 반 칸 뒤에서 시작
+  for(i = 0; i < coords.length - 1; i++){
+    var a = coords[i], b = coords[i+1];
+    var seg = m(a[0], a[1], b[0], b[1]);
+    if(seg <= 0) continue;
+    while(acc + seg >= nextAt && layers.length < _ARROW_MAX){
+      var t = (nextAt - acc) / seg;                       // 이 구간에서의 위치 비율
+      var lat = a[0] + (b[0] - a[0]) * t;
+      var lng = a[1] + (b[1] - a[1]) * t;
+      layers.push(_foodArrowAt(map, lat, lng, _bearingDeg(a, b)));
+      nextAt += step;
+    }
+    acc += seg;
+  }
+  if(line) line._arrowLayers = layers;
+}
+
+// 두 점 사이의 진행 방향(화면 기준 각도, 0=위쪽)
+function _bearingDeg(a, b){
+  var dLat = b[0] - a[0];
+  var dLng = (b[1] - a[1]) * Math.cos(a[0] * Math.PI / 180);   // 위도에 따른 경도 축소 보정
+  return Math.atan2(dLng, dLat) * 180 / Math.PI;               // 시계방향, 북쪽이 0
+}
+window._bearingDeg = _bearingDeg;
+
+function _foodArrowAt(map, lat, lng, deg){
+  var html = '<div style="transform:rotate(' + deg + 'deg);width:16px;height:16px;'
+    + 'display:flex;align-items:center;justify-content:center;">'
+    + '<svg width="11" height="13" viewBox="0 0 11 13">'
+    +   '<path d="M5.5 0 L11 13 L5.5 9.6 L0 13 Z" fill="#f07830" '
+    +         'stroke="#fff" stroke-width="1" stroke-linejoin="round"/>'
+    + '</svg></div>';
+  return L.marker([lat, lng], {
+    icon: L.divIcon({ html: html, className: '', iconSize: [16,16], iconAnchor: [8,8] }),
+    interactive: false,
+    keyboard: false
+  }).addTo(map);
+}
 
 // 출발/도착 지점 — 점 대신 글자로 표시한다
 function _foodEndMarker(map, lat, lng, label, color){
@@ -24464,57 +24527,92 @@ window._newsApplyCats = _newsApplyCats;
 //   → 카테고리마다 전용 검색 피드를 두어 각각 충분히 채운다.
 var _NEWS_CAT_FEEDS = {
   '증시': [
-    'https://news.google.com/rss/search?q=%EC%BD%94%EC%8A%A4%ED%94%BC%20%EC%BD%94%EC%8A%A4%EB%8B%A5%20%EC%A6%9D%EC%8B%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%A3%BC%EC%8B%9D%EC%8B%9C%EC%9E%A5%20%EC%99%B8%EA%B5%AD%EC%9D%B8%20%EC%88%9C%EB%A7%A4%EC%88%98%20%EA%B3%B5%EB%AA%A8%EC%A3%BC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EB%89%B4%EC%9A%95%EC%A6%9D%EC%8B%9C%20%EB%82%98%EC%8A%A4%EB%8B%A5%20%EB%8B%A4%EC%9A%B0%EC%A7%80%EC%88%98+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EB%AF%B8%EA%B5%AD%EC%A6%9D%EC%8B%9C%20%EC%9B%94%EA%B0%80%20S%26P500+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%A6%9D%EA%B6%8C%EC%82%AC%20%EB%AA%A9%ED%91%9C%EC%A3%BC%EA%B0%80%20%EC%8B%A4%EC%A0%81%EB%B0%9C%ED%91%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+    'https://news.google.com/rss/search?q=%EC%BD%94%EC%8A%A4%ED%94%BC%20%EC%BD%94%EC%8A%A4%EB%8B%A5%20%EC%A6%9D%EC%8B%9C+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%A3%BC%EC%8B%9D%EC%8B%9C%EC%9E%A5%20%EC%99%B8%EA%B5%AD%EC%9D%B8%20%EC%88%9C%EB%A7%A4%EC%88%98%20%EA%B3%B5%EB%AA%A8%EC%A3%BC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%89%B4%EC%9A%95%EC%A6%9D%EC%8B%9C%20%EB%82%98%EC%8A%A4%EB%8B%A5%20%EB%8B%A4%EC%9A%B0%EC%A7%80%EC%88%98+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%AF%B8%EA%B5%AD%EC%A6%9D%EC%8B%9C%20%EC%9B%94%EA%B0%80%20S%26P500+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%A6%9D%EA%B6%8C%EC%82%AC%20%EB%AA%A9%ED%91%9C%EC%A3%BC%EA%B0%80%20%EC%8B%A4%EC%A0%81%EB%B0%9C%ED%91%9C+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B0%B0%EB%8B%B9%20%EC%9E%90%EC%82%AC%EC%A3%BC%20%EC%86%8C%EA%B0%81+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%83%81%EC%9E%A5%EA%B8%B0%EC%97%85%20%EC%9D%B8%EC%88%98%ED%95%A9%EB%B3%91+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%A6%9D%EC%8B%9C%20%EC%A0%84%EB%A7%9D%20%EB%A6%AC%ED%8F%AC%ED%8A%B8+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B0%9C%EC%9D%B8%20%EA%B8%B0%EA%B4%80%20%EB%A7%A4%EB%A7%A4%EB%8F%99%ED%96%A5+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B9%84%ED%8A%B8%EC%BD%94%EC%9D%B8%20%EA%B0%80%EC%83%81%EC%9E%90%EC%82%B0%20%EC%8B%9C%EC%84%B8+when:14d&hl=ko&gl=KR&ceid=KR:ko'
   ],
   '경제': [
-    'https://news.google.com/rss/search?q=%ED%99%98%EC%9C%A8%20%EC%9B%90%EB%8B%AC%EB%9F%AC%20%EA%B8%B0%EC%A4%80%EA%B8%88%EB%A6%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EB%AC%BC%EA%B0%80%20%EC%86%8C%EB%B9%84%EC%9E%90%EB%AC%BC%EA%B0%80%20%EC%9D%B8%ED%94%8C%EB%A0%88%EC%9D%B4%EC%85%98+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EB%B6%80%EB%8F%99%EC%82%B0%20%EC%95%84%ED%8C%8C%ED%8A%B8%20%EC%A0%84%EC%84%B8%20%EB%B6%84%EC%96%91+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%88%98%EC%B6%9C%20%EB%AC%B4%EC%97%AD%EC%88%98%EC%A7%80%20%EA%B2%BD%EC%83%81%EC%88%98%EC%A7%80+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EA%B3%A0%EC%9A%A9%20%EC%B7%A8%EC%97%85%EC%9E%90%20%EC%8B%A4%EC%97%85%EB%A5%A0%20%EC%9E%84%EA%B8%88+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+    'https://news.google.com/rss/search?q=%ED%99%98%EC%9C%A8%20%EC%9B%90%EB%8B%AC%EB%9F%AC%20%EA%B8%B0%EC%A4%80%EA%B8%88%EB%A6%AC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%AC%BC%EA%B0%80%20%EC%86%8C%EB%B9%84%EC%9E%90%EB%AC%BC%EA%B0%80%20%EC%9D%B8%ED%94%8C%EB%A0%88%EC%9D%B4%EC%85%98+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B6%80%EB%8F%99%EC%82%B0%20%EC%95%84%ED%8C%8C%ED%8A%B8%20%EC%A0%84%EC%84%B8%20%EB%B6%84%EC%96%91+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%88%98%EC%B6%9C%20%EB%AC%B4%EC%97%AD%EC%88%98%EC%A7%80%20%EA%B2%BD%EC%83%81%EC%88%98%EC%A7%80+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B3%A0%EC%9A%A9%20%EC%B7%A8%EC%97%85%EC%9E%90%20%EC%8B%A4%EC%97%85%EB%A5%A0%20%EC%9E%84%EA%B8%88+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%86%8C%EB%B9%84%20%EB%82%B4%EC%88%98%20%EA%B2%BD%EA%B8%B0+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B8%88%EC%9C%B5%EA%B6%8C%20%EB%8C%80%EC%B6%9C%20%EA%B8%88%EB%A6%AC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%84%B8%EA%B8%88%20%EC%97%B0%EB%A7%90%EC%A0%95%EC%82%B0%20%EC%A0%95%EC%B1%85+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%9B%90%EC%9E%90%EC%9E%AC%20%EC%9C%A0%EA%B0%80%20%EA%B5%AD%EC%A0%9C%EC%9C%A0%EA%B0%80+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B8%B0%EC%97%85%20%EC%8B%A4%EC%A0%81%20%EB%A7%A4%EC%B6%9C%20%EC%98%81%EC%97%85%EC%9D%B4%EC%9D%B5+when:14d&hl=ko&gl=KR&ceid=KR:ko'
   ],
   '사회': [
-    'https://news.google.com/rss/search?q=%EC%82%AC%EA%B1%B4%EC%82%AC%EA%B3%A0%20%EA%B2%BD%EC%B0%B0%20%ED%99%94%EC%9E%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EA%B5%90%ED%86%B5%EC%82%AC%EA%B3%A0%20%EC%A7%80%ED%95%98%EC%B2%A0%20%EB%B2%84%EC%8A%A4%20%EC%82%AC%EA%B3%A0+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EB%B2%95%EC%9B%90%20%ED%8C%90%EA%B2%B0%20%EA%B2%80%EC%B0%B0%20%EC%88%98%EC%82%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EB%82%A0%EC%94%A8%20%EA%B8%B0%EC%83%81%EC%B2%AD%20%ED%83%9C%ED%92%8D%20%ED%8F%AD%EC%97%BC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EA%B5%90%EC%9C%A1%20%ED%95%99%EA%B5%90%20%EB%8C%80%ED%95%99%20%EC%9E%85%EC%8B%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+    'https://news.google.com/rss/search?q=%EC%82%AC%EA%B1%B4%EC%82%AC%EA%B3%A0%20%EA%B2%BD%EC%B0%B0%20%ED%99%94%EC%9E%AC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B5%90%ED%86%B5%EC%82%AC%EA%B3%A0%20%EC%A7%80%ED%95%98%EC%B2%A0%20%EB%B2%84%EC%8A%A4%20%EC%82%AC%EA%B3%A0+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B2%95%EC%9B%90%20%ED%8C%90%EA%B2%B0%20%EA%B2%80%EC%B0%B0%20%EC%88%98%EC%82%AC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%82%A0%EC%94%A8%20%EA%B8%B0%EC%83%81%EC%B2%AD%20%ED%83%9C%ED%92%8D%20%ED%8F%AD%EC%97%BC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B5%90%EC%9C%A1%20%ED%95%99%EA%B5%90%20%EB%8C%80%ED%95%99%20%EC%9E%85%EC%8B%9C+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%A7%80%ED%95%98%EC%B2%A0%20%EB%B2%84%EC%8A%A4%20%EA%B5%90%ED%86%B5%20%EC%A0%95%EC%B1%85+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B3%91%EC%9B%90%20%EC%9D%98%EB%A3%8C%20%EA%B1%B4%EA%B0%95%EB%B3%B4%ED%97%98+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%95%84%ED%8C%8C%ED%8A%B8%20%EC%9E%AC%EA%B0%9C%EB%B0%9C%20%EC%A3%BC%EB%AF%BC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%ED%99%98%EA%B2%BD%20%EB%AF%B8%EC%84%B8%EB%A8%BC%EC%A7%80%20%EC%9E%AC%ED%99%9C%EC%9A%A9+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B3%B5%EC%A7%80%20%EC%97%B0%EA%B8%88%20%EC%A7%80%EC%9B%90%EA%B8%88+when:14d&hl=ko&gl=KR&ceid=KR:ko'
   ],
   '정치': [
-    'https://news.google.com/rss/search?q=%EA%B5%AD%ED%9A%8C%20%EB%B3%B8%ED%9A%8C%EC%9D%98%20%EB%B2%95%EC%95%88%20%EC%B2%98%EB%A6%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EB%8C%80%ED%86%B5%EB%A0%B9%EC%8B%A4%20%EC%A0%95%EB%B6%80%20%EC%A0%95%EC%B1%85%20%EB%B0%9C%ED%91%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%97%AC%EC%95%BC%20%EB%8C%80%ED%91%9C%20%EC%A0%95%EC%B9%98%EA%B6%8C%20%EA%B3%B5%EB%B0%A9+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%84%A0%EA%B1%B0%20%EC%97%AC%EB%A1%A0%EC%A1%B0%EC%82%AC%20%EC%A7%80%EC%A7%80%EC%9C%A8+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%99%B8%EA%B5%90%20%EC%A0%95%EC%83%81%ED%9A%8C%EB%8B%B4%20%ED%95%9C%EB%AF%B8%20%ED%95%9C%EC%9D%BC+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+    'https://news.google.com/rss/search?q=%EA%B5%AD%ED%9A%8C%20%EB%B3%B8%ED%9A%8C%EC%9D%98%20%EB%B2%95%EC%95%88%20%EC%B2%98%EB%A6%AC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%8C%80%ED%86%B5%EB%A0%B9%EC%8B%A4%20%EC%A0%95%EB%B6%80%20%EC%A0%95%EC%B1%85%20%EB%B0%9C%ED%91%9C+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%97%AC%EC%95%BC%20%EB%8C%80%ED%91%9C%20%EC%A0%95%EC%B9%98%EA%B6%8C%20%EA%B3%B5%EB%B0%A9+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%84%A0%EA%B1%B0%20%EC%97%AC%EB%A1%A0%EC%A1%B0%EC%82%AC%20%EC%A7%80%EC%A7%80%EC%9C%A8+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%99%B8%EA%B5%90%20%EC%A0%95%EC%83%81%ED%9A%8C%EB%8B%B4%20%ED%95%9C%EB%AF%B8%20%ED%95%9C%EC%9D%BC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B5%AD%EC%A0%95%EA%B0%90%EC%82%AC%20%EC%83%81%EC%9E%84%EC%9C%84+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%A7%80%EB%B0%A9%EC%9E%90%EC%B9%98%EB%8B%A8%EC%B2%B4%20%EC%8B%9C%EB%8F%84%EC%A7%80%EC%82%AC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%A0%95%EB%8B%B9%20%EB%8B%B9%EB%8C%80%ED%91%9C%20%ED%9A%8C%EC%9D%98+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B5%AD%EB%B0%A9%20%EC%95%88%EB%B3%B4%20%EA%B5%B0+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B2%95%20%EA%B0%9C%EC%A0%95%EC%95%88%20%EC%8B%9C%ED%96%89+when:14d&hl=ko&gl=KR&ceid=KR:ko'
   ],
   '연예': [
-    'https://news.google.com/rss/search?q=%EC%95%84%EC%9D%B4%EB%8F%8C%20%EC%BB%B4%EB%B0%B1%20%EC%8B%A0%EA%B3%A1%20%EC%9D%8C%EC%9B%90+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EB%93%9C%EB%9D%BC%EB%A7%88%20%EC%8B%9C%EC%B2%AD%EB%A5%A0%20%EB%B0%A9%EC%86%A1+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%98%81%ED%99%94%20%EA%B0%9C%EB%B4%89%20%EB%B0%95%EC%8A%A4%EC%98%A4%ED%94%BC%EC%8A%A4+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%98%88%EB%8A%A5%20%EC%B6%9C%EC%97%B0%20%EB%B0%A9%EC%86%A1%EC%9D%B8+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=K%ED%8C%9D%20%ED%95%B4%EC%99%B8%20%EC%BD%98%EC%84%9C%ED%8A%B8%20%ED%88%AC%EC%96%B4+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+    'https://news.google.com/rss/search?q=%EC%95%84%EC%9D%B4%EB%8F%8C%20%EC%BB%B4%EB%B0%B1%20%EC%8B%A0%EA%B3%A1%20%EC%9D%8C%EC%9B%90+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%93%9C%EB%9D%BC%EB%A7%88%20%EC%8B%9C%EC%B2%AD%EB%A5%A0%20%EB%B0%A9%EC%86%A1+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%98%81%ED%99%94%20%EA%B0%9C%EB%B4%89%20%EB%B0%95%EC%8A%A4%EC%98%A4%ED%94%BC%EC%8A%A4+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%98%88%EB%8A%A5%20%EC%B6%9C%EC%97%B0%20%EB%B0%A9%EC%86%A1%EC%9D%B8+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=K%ED%8C%9D%20%ED%95%B4%EC%99%B8%20%EC%BD%98%EC%84%9C%ED%8A%B8%20%ED%88%AC%EC%96%B4+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B0%B0%EC%9A%B0%20%EC%BA%90%EC%8A%A4%ED%8C%85%20%EC%9E%91%ED%92%88+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B0%80%EC%88%98%20%EC%95%A8%EB%B2%94%20%EB%B0%9C%EB%A7%A4+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%9C%A0%ED%8A%9C%EB%B8%8C%20%ED%81%AC%EB%A6%AC%EC%97%90%EC%9D%B4%ED%84%B0+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%8B%9C%EC%83%81%EC%8B%9D%20%EC%88%98%EC%83%81+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%97%B0%EC%98%88%EA%B3%84%20%EA%B7%BC%ED%99%A9%20%EC%9D%B8%ED%84%B0%EB%B7%B0+when:14d&hl=ko&gl=KR&ceid=KR:ko'
   ],
   '스포츠': [
-    'https://news.google.com/rss/search?q=%ED%94%84%EB%A1%9C%EC%95%BC%EA%B5%AC%20KBO%20%EA%B2%BD%EA%B8%B0%20%EA%B2%B0%EA%B3%BC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%B6%95%EA%B5%AC%20K%EB%A6%AC%EA%B7%B8%20%EA%B5%AD%EA%B0%80%EB%8C%80%ED%91%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%86%90%ED%9D%A5%EB%AF%BC%20%EC%9D%B4%EA%B0%95%EC%9D%B8%20%ED%95%B4%EC%99%B8%EC%B6%95%EA%B5%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%ED%94%84%EB%A1%9C%EB%86%8D%EA%B5%AC%20%EB%B0%B0%EA%B5%AC%20KBL+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%98%AC%EB%A6%BC%ED%94%BD%20%EC%95%84%EC%8B%9C%EC%95%88%EA%B2%8C%EC%9E%84%20%EB%A9%94%EB%8B%AC+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+    'https://news.google.com/rss/search?q=%ED%94%84%EB%A1%9C%EC%95%BC%EA%B5%AC%20KBO%20%EA%B2%BD%EA%B8%B0%20%EA%B2%B0%EA%B3%BC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%B6%95%EA%B5%AC%20K%EB%A6%AC%EA%B7%B8%20%EA%B5%AD%EA%B0%80%EB%8C%80%ED%91%9C+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%86%90%ED%9D%A5%EB%AF%BC%20%EC%9D%B4%EA%B0%95%EC%9D%B8%20%ED%95%B4%EC%99%B8%EC%B6%95%EA%B5%AC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%ED%94%84%EB%A1%9C%EB%86%8D%EA%B5%AC%20%EB%B0%B0%EA%B5%AC%20KBL+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%98%AC%EB%A6%BC%ED%94%BD%20%EC%95%84%EC%8B%9C%EC%95%88%EA%B2%8C%EC%9E%84%20%EB%A9%94%EB%8B%AC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%95%BC%EA%B5%AC%20%EC%88%9C%EC%9C%84%20%EA%B2%BD%EA%B8%B0%20%EC%9D%BC%EC%A0%95+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%B6%95%EA%B5%AC%20%EB%8C%80%ED%91%9C%ED%8C%80%20%ED%8F%89%EA%B0%80%EC%A0%84+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B3%A8%ED%94%84%20%EB%8C%80%ED%9A%8C%20%EC%9A%B0%EC%8A%B9+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=e%EC%8A%A4%ED%8F%AC%EC%B8%A0%20%EB%A6%AC%EA%B7%B8+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EA%B2%A9%ED%88%AC%EA%B8%B0%20UFC%20%EA%B2%BD%EA%B8%B0+when:14d&hl=ko&gl=KR&ceid=KR:ko'
   ],
   'IT': [
-    'https://news.google.com/rss/search?q=%EC%9D%B8%EA%B3%B5%EC%A7%80%EB%8A%A5%20AI%20%EC%B1%97GPT+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EB%B0%98%EB%8F%84%EC%B2%B4%20%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90%20SK%ED%95%98%EC%9D%B4%EB%8B%89%EC%8A%A4+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%8A%A4%EB%A7%88%ED%8A%B8%ED%8F%B0%20%EA%B0%A4%EB%9F%AD%EC%8B%9C%20%EC%95%84%EC%9D%B4%ED%8F%B0%20%EC%B6%9C%EC%8B%9C+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EB%84%A4%EC%9D%B4%EB%B2%84%20%EC%B9%B4%EC%B9%B4%EC%98%A4%20%ED%94%8C%EB%9E%AB%ED%8F%BC+when:3d&hl=ko&gl=KR&ceid=KR:ko',
-    'https://news.google.com/rss/search?q=%EC%8A%A4%ED%83%80%ED%8A%B8%EC%97%85%20%ED%88%AC%EC%9E%90%20%EC%9C%A0%EC%B9%98%20IT%EC%97%85%EA%B3%84+when:3d&hl=ko&gl=KR&ceid=KR:ko'
+    'https://news.google.com/rss/search?q=%EC%9D%B8%EA%B3%B5%EC%A7%80%EB%8A%A5%20AI%20%EC%B1%97GPT+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B0%98%EB%8F%84%EC%B2%B4%20%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90%20SK%ED%95%98%EC%9D%B4%EB%8B%89%EC%8A%A4+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%8A%A4%EB%A7%88%ED%8A%B8%ED%8F%B0%20%EA%B0%A4%EB%9F%AD%EC%8B%9C%20%EC%95%84%EC%9D%B4%ED%8F%B0%20%EC%B6%9C%EC%8B%9C+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%84%A4%EC%9D%B4%EB%B2%84%20%EC%B9%B4%EC%B9%B4%EC%98%A4%20%ED%94%8C%EB%9E%AB%ED%8F%BC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%8A%A4%ED%83%80%ED%8A%B8%EC%97%85%20%ED%88%AC%EC%9E%90%20%EC%9C%A0%EC%B9%98%20IT%EC%97%85%EA%B3%84+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%ED%81%B4%EB%9D%BC%EC%9A%B0%EB%93%9C%20%EB%8D%B0%EC%9D%B4%ED%84%B0%EC%84%BC%ED%84%B0+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%B3%B4%EC%95%88%20%ED%95%B4%ED%82%B9%20%EA%B0%9C%EC%9D%B8%EC%A0%95%EB%B3%B4+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%A0%84%EA%B8%B0%EC%B0%A8%20%EB%B0%B0%ED%84%B0%EB%A6%AC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EC%9A%B0%EC%A3%BC%20%EC%9C%84%EC%84%B1%20%EB%B0%9C%EC%82%AC+when:14d&hl=ko&gl=KR&ceid=KR:ko',
+    'https://news.google.com/rss/search?q=%EB%A1%9C%EB%B4%87%20%EC%9E%90%EB%8F%99%ED%99%94%20%EA%B8%B0%EC%88%A0+when:14d&hl=ko&gl=KR&ceid=KR:ko'
   ]
 };
 var _NEWS_CAT_TARGET = 100;          // 카테고리당 목표 건수
-var _NEWS_CAT_TTL    = 10*60*1000;   // 같은 카테고리 재수집 간격
+var _NEWS_CAT_TTL    = 3*60*1000;    // 같은 카테고리 재수집 간격(목표 미달 시 곧 다시 시도)
 var _newsCatAt = {};                 // 카테고리별 마지막 수집 시각
 
 // 한 카테고리를 채운다. 이미 목표를 넘겼고 최근에 받았으면 건너뛴다.
@@ -24524,7 +24622,9 @@ function _fetchCatNews(cat, cb, force){
     if(!feeds || typeof _PROXY_LIST === 'undefined' || typeof _parseNewsRSS !== 'function'){ if(cb) cb(); return; }
     var have = (_NEWSFEED.items || []).filter(function(x){ return x && x.cat === cat; }).length;
     if(!force && have >= _NEWS_CAT_TARGET) { if(cb) cb(); return; }
-    if(!force && _newsCatAt[cat] && Date.now() - _newsCatAt[cat] < _NEWS_CAT_TTL){ if(cb) cb(); return; }
+    // 목표(100건)를 못 채운 상태면 TTL 을 짧게 잡아 계속 채워 나간다.
+    var ttl = (have >= _NEWS_CAT_TARGET) ? (10*60*1000) : _NEWS_CAT_TTL;
+    if(!force && _newsCatAt[cat] && Date.now() - _newsCatAt[cat] < ttl){ if(cb) cb(); return; }
     _newsCatAt[cat] = Date.now();
 
     var pending = feeds.length;
@@ -24668,9 +24768,13 @@ function _renderNewsTab(list){
             : 'background:transparent;color:var(--sub);border:1px solid var(--border2);')
       + '">' + c + '</button>';
   }).join('');
-  var cut = Date.now() - 3 * 24 * 3600 * 1000;
   if(typeof _newsApplyCats === 'function') _newsApplyCats(_NEWSFEED.items);
-  var fresh = (_NEWSFEED.items || []).filter(function(it){ return !(it.ts && it.ts < cut); });
+  // ★ 예전엔 3일 넘은 기사를 잘라내서, 카테고리 탭에 5건만 남는 일이 잦았다.
+  //   '오늘 뉴스가 아니어도 100건'이 목표이므로 최신순 정렬만 하고 기간은 자르지 않는다.
+  //   ('전체' 탭은 오늘의 흐름을 보는 곳이라 3일 컷을 유지한다)
+  var cut = Date.now() - 3 * 24 * 3600 * 1000;
+  var all = (_NEWSFEED.items || []);
+  var fresh = all.filter(function(it){ return !(it.ts && it.ts < cut); });
 
   var items;
   if(_newsCatSel === '전체'){
@@ -24692,16 +24796,26 @@ function _renderNewsTab(list){
       if(!added) break;
     }
   }else{
-    items = fresh.filter(function(it){ return it.cat === _newsCatSel; })
-                 .sort(function(a,b){ return (b.ts||0) - (a.ts||0); });
+    // 기간 제한 없이 그 카테고리 전부를 최신순으로
+    items = all.filter(function(it){ return it.cat === _newsCatSel; })
+               .sort(function(a,b){ return (b.ts||0) - (a.ts||0); });
   }
 
   // ★ 카테고리별 목표(100건)를 못 채웠으면 그 카테고리 전용 피드를 더 받아온다.
   if(_newsCatSel !== '전체' && typeof _fetchCatNews === 'function' && !window._newsCatFetching){
-    var haveN = fresh.filter(function(it){ return it.cat === _newsCatSel; }).length;
+    var haveN = items.length;
     if(haveN < _NEWS_CAT_TARGET){
-      window._newsCatFetching = 1;
-      _fetchCatNews(_newsCatSel, function(){ window._newsCatFetching = 0; _renderNewsTab(list); });
+      // 한 번에 다 안 차면 몇 차례 더 채운다 (탭에 머무는 동안 100건까지)
+      var round = (window._newsCatRounds = window._newsCatRounds || {});
+      var rk = _newsCatSel;
+      if((round[rk] || 0) < 3){
+        round[rk] = (round[rk] || 0) + 1;
+        window._newsCatFetching = 1;
+        _fetchCatNews(_newsCatSel, function(){
+          window._newsCatFetching = 0;
+          _renderNewsTab(list);
+        }, true);
+      }
     }
   }
   var esc = function(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
@@ -36104,18 +36218,10 @@ function _ltWxThemes(){
 // ── 오늘의 주제 후보 모으기 ──
 function _ltThemeCandidates(){
   var out=[], dy=_ltDay();
-  // 핫이슈 뉴스(비정치)
-  (_LT_HOT_NEWS||[]).slice(0,14).forEach(function(n){
-    var kw=(typeof _ltNewsKeyword==='function')?_ltNewsKeyword(n.title):'';
-    if(kw && !_ltIsBanned(kw)) out.push({ key:'hot_'+_ltKeySlug(kw), type:'news', kw:kw });
-  });
-  // 교통 관련 뉴스
-  try{
-    (typeof _REALTIME_NEWS!=='undefined'?_REALTIME_NEWS:[]).slice(0,8).forEach(function(n){
-      var kw=(typeof _ltNewsKeyword==='function')?_ltNewsKeyword(n.title):'';
-      if(kw && !_ltIsBanned(kw)) out.push({ key:'sub_'+_ltKeySlug(kw), type:'news', kw:kw });
-    });
-  }catch(e){}
+  // ★ 2026-08-23: 기사 제목을 그대로 인용하던 'news' 후보를 제거했다.
+  //   ('"우사인 볼트보다 빨랐다…中로봇 100m 9초" 관련해서 다들 어떻게 봄?' 같은 문장)
+  //   앞서 _ltNewsMsg 호출을 끊었지만, 이 후보가 _ltThemeMsg 안에서 같은 문장을
+  //   다시 만들어내고 있었다. 뉴스는 뉴스 탭에서 본다.
   // 날씨·계절
   out = out.concat(_ltWxThemes());
   // 주제 뱅크 × 변주
@@ -36147,7 +36253,7 @@ function _ltThemeMsg(){
     if(!pick) return null;
     var txt;
     if(pick.type==='news'){
-      txt=_rnd(_LT_NEWS_REACT).replace('{kw}', pick.kw);
+      return null;   // 뉴스 인용 멘트는 쓰지 않는다 (후보 생성에서도 이미 제외)
     } else if(pick.type==='wx'){
       txt=pick.txt;
     } else {
