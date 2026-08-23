@@ -25036,8 +25036,9 @@ var _autoPostTimer=null;
 // ── 초기 게시글 생성 ──────────────────────────────────────
 function initCommunityPosts(){
   _AI_POSTS=[];
-  var count=15;
-  for(var i=0, tries=0; i<count && tries<count*6; tries++){
+  //   200개 목표. 6개월 중복 게이트를 통과해야 하므로 시도 횟수도 넉넉히 준다.
+  var count=200;
+  for(var i=0, tries=0; i<count && tries<count*8; tries++){
     var p=_generatePost();
     if(!_postAccept(p)) continue;      // ★ 6개월 내 같은 골격의 글이면 버리고 다시 뽑는다
     p.time=Date.now()-_rndInt(i*5*60000,(i+1)*12*60000);
@@ -25231,6 +25232,223 @@ var _DAILY_TOPICS = [
     cat: '일상', reactions: {like:0, lol:0, sad:0},
   },
 ];
+// ── 일상 주제 확장 풀 (2026-08-22) ──────────────────────────────
+//   게시글을 200개 띄우려면 '6개월 내 같은 골격 금지' 규칙상 서로 다른
+//   주제가 200개 이상 있어야 한다. 기존 10개로는 턱없이 모자라
+//   출퇴근·먹고사는 일·집안일·취미 등 일상 주제를 대폭 늘렸다.
+//   ※ 여기 글들은 역명·노선 치환자가 없어 지역과 무관하게 자연스럽다.
+var _DAILY_TOPICS_EXT = [
+  { title: '알람 몇 개 맞춰두세요', body: '요즘 아침에 일어나는 게 유난히 힘드네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '알람 끄고 다시 잠든 적 있으세요', body: '다들 어떻게 버티시는지 궁금해요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '알람 소리 뭐로 해두셨어요', body: '요즘 아침에 일어나는 게 유난히 힘드네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '하루에 커피 몇 잔 드세요', body: '출근길에 한 잔 사는 게 습관이 됐어요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '아침 커피 없으면 못 버티는 분', body: '줄이려고 하는데 잘 안 되네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '커피 끊어보신 분 계세요', body: '출근길에 한 잔 사는 게 습관이 됐어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '점심 뭐 드셨어요', body: '매일 고민만 하다 결국 같은 데 가요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '점심 메뉴 고르는 게 제일 어려워요', body: '추천 좀 부탁드려요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '혼밥 자주 하시나요', body: '매일 고민만 하다 결국 같은 데 가요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '도시락 싸다니시는 분 계세요', body: '아침에 시간이 없어서 자꾸 포기하게 되네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '도시락 반찬 뭐 넣으세요', body: '그래도 돈은 확실히 아껴지더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '도시락 싸는 거 오래 가던가요', body: '아침에 시간이 없어서 자꾸 포기하게 되네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '편의점 신상 드셔보셨어요', body: '퇴근길에 습관처럼 들르게 돼요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '편의점 자주 가시는 편인가요', body: '괜히 안 사도 될 걸 사게 되더라고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '편의점에서 뭐 자주 사세요', body: '퇴근길에 습관처럼 들르게 돼요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '하루에 물 얼마나 드세요', body: '의식하지 않으면 하루 종일 안 마시게 되네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '텀블러 들고 다니시나요', body: '작은 습관인데 잘 안 붙어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '물 챙겨 마시는 게 왜 이리 어려울까요', body: '의식하지 않으면 하루 종일 안 마시게 되네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '하루 몇 걸음 걸으세요', body: '요즘 일부러 좀 더 걸어보려고 해요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '한 정거장 먼저 내려서 걸어보신 분', body: '생각보다 기분이 괜찮더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '걷는 습관 들이신 분 계세요', body: '요즘 일부러 좀 더 걸어보려고 해요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '계단으로 다니시는 분 있나요', body: '처음엔 힘들었는데 조금씩 나아지네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '에스컬레이터 대신 계단 써보셨어요', body: '무리하지 않는 선에서 해보려고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '계단 오르기 며칠 만에 포기했어요', body: '처음엔 힘들었는데 조금씩 나아지네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '앉아서 하는 스트레칭 뭐 하세요', body: '하루 종일 앉아 있으니 뻐근하네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '목이랑 어깨 자주 뭉치시나요', body: '작게라도 챙기는 게 낫더라고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '스트레칭 루틴 있으신 분', body: '하루 종일 앉아 있으니 뻐근하네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '몇 시에 주무세요', body: '누우면 오히려 정신이 말똥해져요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '잠들기 전에 뭐 하세요', body: '다들 어떻게 하시는지 궁금해요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '일찍 자려는데 잘 안 되네요', body: '누우면 오히려 정신이 말똥해져요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '주말에 뭐 하세요', body: '쉬다 보면 하루가 그냥 지나가요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '주말이 왜 이리 빨리 갈까요', body: '이번엔 뭐라도 해보려고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '주말 계획 미리 세우시나요', body: '쉬다 보면 하루가 그냥 지나가요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '최근에 본 영화 있으세요', body: '오랜만에 한 편 봤는데 괜찮았어요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '혼자 영화관 가보신 분', body: '추천 있으면 알려주세요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '집에서 영화 보는 게 더 좋으신가요', body: '오랜만에 한 편 봤는데 괜찮았어요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '요즘 보는 드라마 있으세요', body: '한 편만 보려다 세 편 봤네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '정주행 몰아보기 하시나요', body: '다음 화 기다리는 게 은근 재밌어요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '드라마 결말 스포 당해보신 분', body: '한 편만 보려다 세 편 봤네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '출퇴근에 뭐 들으세요', body: '같은 곡만 반복 재생하게 되네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '플레이리스트 어떻게 만드세요', body: '새로운 거 좀 추천받고 싶어요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '요즘 자주 듣는 노래 있으세요', body: '같은 곡만 반복 재생하게 되네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '팟캐스트 들으시는 분 계세요', body: '음악보다 말소리가 편할 때가 있어요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '이동 중에 뭐 들으세요', body: '괜찮은 채널 있으면 알려주세요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '오디오북 써보셨어요', body: '음악보다 말소리가 편할 때가 있어요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '요즘 읽는 책 있으세요', body: '사놓고 못 읽은 게 쌓여만 가요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '전자책이랑 종이책 중에 뭐 쓰세요', body: '조금씩이라도 읽어보려고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '책 끝까지 읽는 게 어렵네요', body: '사놓고 못 읽은 게 쌓여만 가요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '요즘 하는 게임 있으세요', body: '잠깐만 한다는 게 한 시간이네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '모바일 게임 오래 붙잡고 계시나요', body: '적당히가 제일 어려워요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '게임 시간 조절 어떻게 하세요', body: '잠깐만 한다는 게 한 시간이네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '운동 꾸준히 하시는 분 계세요', body: '시작은 쉬운데 이어가는 게 어렵네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '헬스랑 홈트 중에 뭐 하세요', body: '가볍게라도 계속 해보려고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '운동 시작하기 좋은 시간대 있을까요', body: '시작은 쉬운데 이어가는 게 어렵네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '자전거 타고 다니시는 분', body: '날 좋을 때 타면 기분이 좋더라고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '따릉이 자주 쓰세요', body: '안전이 제일 걱정이에요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '자전거 출퇴근 해보신 분 계세요', body: '날 좋을 때 타면 기분이 좋더라고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '오늘 날씨 어떠셨어요', body: '아침저녁이 확 달라졌어요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '우산 챙기셨어요', body: '다들 감기 조심하세요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '일교차 때문에 옷 고르기 힘드네요', body: '아침저녁이 확 달라졌어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '장은 어디서 보세요', body: '필요한 것만 사려는데 잘 안 되네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '온라인 장보기 쓰시나요', body: '냉장고 정리부터 해야 할 것 같아요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '한 번에 몰아서 사시는 편인가요', body: '필요한 것만 사려는데 잘 안 되네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '집에서 요리 자주 하세요', body: '간단한 것부터 해보고 있어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '제일 자주 해먹는 메뉴가 뭔가요', body: '레시피 추천받고 싶네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '요리하고 설거지가 더 힘들어요', body: '간단한 것부터 해보고 있어요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '배달 자주 시키세요', body: '편하긴 한데 자꾸 쓰게 되네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '배달비 부담되지 않으세요', body: '줄여보려고 노력 중이에요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '포장 주문 쓰시는 분', body: '편하긴 한데 자꾸 쓰게 되네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '하루 커피값 계산해보셨어요', body: '모아보니 생각보다 크더라고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '텀블러 할인 챙기시나요', body: '작은 것부터 줄여보려고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '카페 대신 집에서 내려 드시는 분', body: '모아보니 생각보다 크더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '가계부 쓰시는 분 계세요', body: '기록만 해도 씀씀이가 보이더라고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '앱으로 관리하세요 손으로 쓰세요', body: '꾸준히가 관건인 것 같아요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '가계부 며칠 만에 놓으셨나요', body: '기록만 해도 씀씀이가 보이더라고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '집 정리 자주 하세요', body: '버리는 게 제일 어렵네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '안 쓰는 물건 어떻게 처리하세요', body: '한 칸씩만 해보려고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '미니멀하게 살아보신 분', body: '버리는 게 제일 어렵네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '빨래 언제 돌리세요', body: '돌리는 것보다 개는 게 일이에요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '건조기 쓰시는 분 계세요', body: '다들 어떻게 하시는지 궁금해요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '빨래 개는 거 미루게 되지 않나요', body: '돌리는 것보다 개는 게 일이에요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '집에서 식물 키우시는 분', body: '초록색이 있으니 분위기가 달라지네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '물 주는 주기 어떻게 하세요', body: '자꾸 시들어서 고민이에요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '화분 몇 개나 두셨어요', body: '초록색이 있으니 분위기가 달라지네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '반려동물 키우시는 분 계세요', body: '같이 있으면 확실히 위로가 돼요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '산책 하루에 몇 번 하세요', body: '챙길 게 많긴 하더라고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '집 비울 때 어떻게 하세요', body: '같이 있으면 확실히 위로가 돼요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '사진 자주 찍으세요', body: '찍어두고 다시 안 보게 되네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '갤러리 정리하시나요', body: '한 번씩 정리해야겠어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '폰 용량 부족하지 않으세요', body: '찍어두고 다시 안 보게 되네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '메모 어디에 하세요', body: '적어두면 확실히 덜 잊게 돼요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '할 일 목록 쓰시나요', body: '앱이랑 종이 중에 고민이에요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '적어두고 까먹은 적 있으세요', body: '적어두면 확실히 덜 잊게 돼요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '폰 알림 다 켜두세요', body: '하루에 몇 번씩 울리니 정신이 없어요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '방해금지 모드 쓰시나요', body: '필요한 것만 남겨보려고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '알림 정리하고 편해지셨어요', body: '하루에 몇 번씩 울리니 정신이 없어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '하루 스크린타임 얼마나 되세요', body: '생각보다 숫자가 크더라고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '자기 전에 폰 보시나요', body: '조금씩 줄여보고 있어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '폰 사용 줄여보신 분', body: '생각보다 숫자가 크더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '이어폰 오래 끼고 계시나요', body: '없으면 허전한 물건이 됐어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '노이즈캔슬링 쓰시는 분', body: '귀 건강도 챙겨야겠더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '이어폰 잃어버린 적 있으세요', body: '없으면 허전한 물건이 됐어요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '출근 가방에 뭐 넣고 다니세요', body: '짐이 자꾸 늘어나네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '가방 무게 신경 쓰이시나요', body: '한 번 비워야 할 것 같아요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '백팩이랑 토트백 중에 뭐 쓰세요', body: '짐이 자꾸 늘어나네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '접이식 우산 들고 다니세요', body: '가방에 하나 넣어두니 마음이 편해요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '우산 몇 번이나 잃어버리셨어요', body: '잃어버리는 게 문제네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '비 오는 날 신발 어떻게 하세요', body: '가방에 하나 넣어두니 마음이 편해요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '출근용 신발 뭐 신으세요', body: '편한 게 최고라는 걸 느끼고 있어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '편한 신발 추천해주실 분', body: '오래 신을 걸 고르고 싶네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '많이 걷는 날 신발 바꾸시나요', body: '편한 게 최고라는 걸 느끼고 있어요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '요즘 뭐 입고 다니세요', body: '실내외 온도차가 크네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '사무실이 추우신가요', body: '얇은 거 하나 챙기는 게 낫더라고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '겉옷 하나 챙기시는 편인가요', body: '실내외 온도차가 크네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '머리 얼마 만에 자르세요', body: '갈 때마다 설명이 어려워요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '단골 미용실 있으세요', body: '이번엔 짧게 잘라볼까 해요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '머리 자르고 만족하신 적 있나요', body: '갈 때마다 설명이 어려워요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '안경이랑 렌즈 중에 뭐 쓰세요', body: '화면을 오래 보니 눈이 뻑뻑하네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '블루라이트 차단 써보셨어요', body: '먼 산 한 번씩 보려고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '눈 피로 어떻게 푸세요', body: '화면을 오래 보니 눈이 뻑뻑하네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '앉는 자세 신경 쓰시나요', body: '어깨가 자꾸 말리는 느낌이에요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '모니터 높이 맞추셨어요', body: '조금씩 고쳐보려고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '의자 바꾸고 달라지셨어요', body: '어깨가 자꾸 말리는 느낌이에요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '휴가 계획 세우셨어요', body: '미루다 보니 남아 있네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '연차 언제 쓰세요', body: '짧게라도 쉬고 싶어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '휴가 때 뭐 하실 거예요', body: '미루다 보니 남아 있네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '가까운 데 다녀오신 곳 있으세요', body: '멀리 안 가도 기분전환은 되더라고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '당일치기 어디가 좋을까요', body: '추천 있으면 알려주세요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '여행 짐 어떻게 싸세요', body: '멀리 안 가도 기분전환은 되더라고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '저녁에 산책 나가시나요', body: '걷다 보면 생각이 정리돼요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '산책 코스 정해두셨어요', body: '날 좋을 때 꼭 나가보세요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '혼자 걷는 시간 좋아하시나요', body: '걷다 보면 생각이 정리돼요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '근처에 자주 가는 공원 있으세요', body: '가까운 데 있으니 자주 가게 돼요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '공원에서 뭐 하고 시간 보내세요', body: '조용해서 좋더라고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '벤치에 앉아 쉬어보신 적', body: '가까운 데 있으니 자주 가게 돼요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '카페에서 뭐 하고 계세요', body: '집중이 잘 될 때가 있어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '조용한 카페 아시는 분', body: '자리 잡기가 관건이네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '카페 오래 앉아 있으면 눈치 보이시나요', body: '집중이 잘 될 때가 있어요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '주말 아침 몇 시에 일어나세요', body: '푹 자고 싶은데 눈이 일찍 떠져요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '늦잠 자면 하루가 짧지 않나요', body: '리듬 지키는 게 나은 것 같기도 해요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '주말에도 알람 맞추시나요', body: '푹 자고 싶은데 눈이 일찍 떠져요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '친구 얼마 만에 만나세요', body: '다들 바쁘다 보니 미뤄지네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '연락 먼저 하는 편인가요', body: '한 번 봐야겠어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '약속 잡기가 왜 이리 어려울까요', body: '다들 바쁘다 보니 미뤄지네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '가족이랑 통화 자주 하세요', body: '연락 자주 못 해서 미안하네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '주말에 얼굴 보시나요', body: '전화 한 통 드려야겠어요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '안부 먼저 묻는 편인가요', body: '연락 자주 못 해서 미안하네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '요즘 빠진 취미 있으세요', body: '뭐라도 하나 있으면 좋더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '새로 시작해보고 싶은 거 있으세요', body: '추천받고 싶어요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '취미 오래 이어가시는 편인가요', body: '뭐라도 하나 있으면 좋더라고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '퇴근하고 공부하시는 분 계세요', body: '피곤해서 자꾸 미루게 되네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '자격증 준비 중이신 분', body: '조금씩이라도 해보려고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '공부 시간 어떻게 만드세요', body: '피곤해서 자꾸 미루게 되네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '외국어 공부하시는 분 있나요', body: '매일 조금씩이 어렵네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '앱으로 하시나요 학원 다니시나요', body: '같이 하는 사람이 있으면 낫더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '꾸준히 하는 비결 있으세요', body: '매일 조금씩이 어렵네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '영수증 챙기시는 편인가요', body: '확인할 때마다 놀라게 되네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '카드값 미리 확인하세요', body: '계획을 좀 세워야겠어요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '이번 달 지출 어떠셨어요', body: '확인할 때마다 놀라게 되네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '중고거래 자주 하세요', body: '안 쓰는 물건 정리에 좋더라고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '팔아보신 물건 있으세요', body: '조심할 것도 많은 것 같아요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '거래 장소 어디로 정하세요', body: '안 쓰는 물건 정리에 좋더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '택배 언제 주로 받으세요', body: '문 앞에 쌓이면 신경 쓰이네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '부재중이면 어떻게 하세요', body: '바로바로 정리하려고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '포장재 정리 어떻게 하시나요', body: '문 앞에 쌓이면 신경 쓰이네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '청소 주기 어떻게 되세요', body: '미루면 더 힘들어지더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '한 번에 몰아서 하시나요', body: '조금씩 나눠서 해보려고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '청소기 뭐 쓰세요', body: '미루면 더 힘들어지더라고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '설거지 바로 하시는 편인가요', body: '쌓이면 보기만 해도 지치네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '식기세척기 쓰시는 분', body: '바로 하는 게 낫긴 해요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '설거지 미루면 후회하지 않나요', body: '쌓이면 보기만 해도 지치네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '아침 챙겨 드세요', body: '시간이 없어서 자꾸 거르게 돼요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '간단하게 뭐 드시나요', body: '간단한 거라도 챙겨보려고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '아침 거르면 힘들지 않으세요', body: '시간이 없어서 자꾸 거르게 돼요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '사무실에 간식 두시나요', body: '손이 자꾸 가네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '오후에 당 떨어지지 않으세요', body: '적당히가 어렵습니다\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '간식 줄여보신 분', body: '손이 자꾸 가네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '회식 자주 있으신가요', body: '요즘은 많이 짧아진 것 같아요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '1차만 하고 가시는 편인가요', body: '각자 편한 게 제일이죠\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '회식 대신 점심 하는 곳 있나요', body: '요즘은 많이 짧아진 것 같아요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '재택 하시는 날 있으세요', body: '편한데 구분이 잘 안 되네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '집에서 집중 잘 되시나요', body: '시간 정해두는 게 도움이 돼요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '재택이랑 출근 중에 뭐가 나으세요', body: '편한데 구분이 잘 안 되네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '점심시간에 나가서 걸으시나요', body: '잠깐 걷고 오면 오후가 낫더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '밥 먹고 바로 앉으면 졸리지 않나요', body: '날 좋을 때 꼭 나가보세요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '점심시간 어떻게 쓰세요', body: '잠깐 걷고 오면 오후가 낫더라고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '퇴근길에 주로 뭐 하세요', body: '하루 중 제일 조용한 시간 같아요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '앉아서 가시는 편인가요', body: '다들 어떻게 보내시는지 궁금해요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '퇴근하고 바로 집에 가세요', body: '하루 중 제일 조용한 시간 같아요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '환승 많은 길이랑 돌아가는 길 중에 뭐 고르세요', body: '갈아타는 게 은근 피곤하더라고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '환승 통로 긴 곳 아시는 분', body: '조금 돌아가도 편한 게 낫기도 해요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '환승 없이 가는 노선 있으면 그거 타시나요', body: '갈아타는 게 은근 피곤하더라고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '앉는 자리 정해두고 타시나요', body: '습관처럼 같은 칸에 서게 되네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '서서 가는 게 더 편하신 분', body: '다들 요령이 있으신 것 같아요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '자리 나면 바로 앉으세요', body: '습관처럼 같은 칸에 서게 되네요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '첫차 타보신 적 있으세요', body: '일찍 나오면 확실히 덜 붐비네요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '이른 출근 어떠세요', body: '일어나는 게 문제죠\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '일찍 나오면 여유가 있던가요', body: '일찍 나오면 확실히 덜 붐비네요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '막차 놓쳐보신 적 있으세요', body: '시간 확인하는 습관이 생겼어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '막차 시간 확인하고 다니시나요', body: '여유 있게 움직이는 게 낫더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '늦게 다닐 때 뭐 타세요', body: '시간 확인하는 습관이 생겼어요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '정기권 쓰시는 분 계세요', body: '계산해보니 차이가 있더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '교통비 한 달에 얼마 나오세요', body: '챙길 건 챙겨야죠\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '환급 챙기고 계신가요', body: '계산해보니 차이가 있더라고요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '길찾기 앱 뭐 쓰세요', body: '익숙해지면 나만의 길이 생기더라고요\n\n별거 아닌데 계속 생각나서 남겨봐요', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '안내대로 안 가고 다른 길 가보신 적', body: '공유해주시면 좋겠어요\n\n다들 어떻게 하시는지 궁금해서 적어봅니다', cat: '일상', reactions: {like:0, lol:0, sad:0} },
+  { title: '지름길 알고 계신 곳 있나요', body: '익숙해지면 나만의 길이 생기더라고요\n\n비슷한 분 계시면 얘기 나눠보고 싶어요', cat: '일상', reactions: {like:0, lol:0, sad:0} }
+];
+
+try{ _DAILY_TOPICS = _DAILY_TOPICS.concat(_DAILY_TOPICS_EXT); }catch(e){}
+
 
 // ── 댓글 풀 ───────────────────────────────────────────────
 var _COMMENT_POOL = {
@@ -25427,22 +25645,10 @@ function _ctxPostCandidate(){
     var dy  = (typeof _ltDay==='function') ? _ltDay() : null;
     var ymd = dy ? dy.ymd : new Date().toDateString();
 
-    // ① 그날의 핫이슈 뉴스 (정치 제외)
-    var hot = (typeof _LT_HOT_NEWS!=='undefined') ? (_LT_HOT_NEWS||[]) : [];
-    hot.slice(0,12).forEach(function(n){
-      if(!n || !n.title || _postBanned(n.title)) return;
-      var kw = (typeof _ltNewsKeyword==='function') ? _ltNewsKeyword(n.title) : n.title;
-      if(!kw || _postBanned(kw)) return;
-      cands.push({
-        key: 'post_hot_' + _postSlug(kw),
-        cat: '일상',
-        title: '"' + kw + '" 이거 다들 보셨어요?',
-        body: _postBody([
-          '오늘 뉴스에 "' + kw + '" 관련 얘기가 계속 올라오더라고요',
-          '지하철에서도 이 얘기하는 분들 몇 분 봤어요'
-        ])
-      });
-    });
+    // ① (삭제) 뉴스 헤드라인을 그대로 제목에 넣던 후보
+    //   '"XRP, 비트코인 차트서 2중 골든크로스…" 이거 다들 보셨어요?' 처럼
+    //   기사 제목이 통째로 들어가 게시판이 뉴스 복사본처럼 보였다.
+    //   뉴스는 뉴스 탭에서 보면 되므로 게시글에서는 만들지 않는다.
 
     // ② 날씨
     if(wx){
@@ -25536,17 +25742,9 @@ function _ctxPostCandidate(){
 }
 
 function _generatePost() {
-  // ★ 실시간 뉴스가 있으면 우선 사용 (실제 현재 시점 기사 기반)
-  var hasRealtimeNews = (typeof _REALTIME_NEWS !== 'undefined' && _REALTIME_NEWS.length > 0);
-  // 실시간 뉴스 있으면 55% 뉴스, 없으면 0% (가짜 뉴스 대신 일상글)
-  var newsChance = hasRealtimeNews ? 0.55 : 0.0;
-  var isNews = Math.random() < newsChance;
-
-  // ★ 뉴스 글이면 실시간 외부 뉴스만 사용 (가짜 지연 템플릿 사용 안 함)
-  if(isNews && typeof _makeNewsPostFromRealtime === 'function') {
-    var rt = _makeNewsPostFromRealtime();
-    if(rt) return rt;  // 실시간 뉴스 성공
-  }
+  // ★ 2026-08-22: 기사 제목을 그대로 옮기던 '뉴스 글'을 끈다.
+  //   게시판이 뉴스 헤드라인 복사본으로 뒤덮여 커뮤니티처럼 보이지 않았다.
+  //   (_makeNewsPostFromRealtime 은 남겨 두되 호출하지 않는다 — 뉴스는 뉴스 탭에서 본다)
 
   // ★ 오늘의 상황(핫이슈 뉴스·날씨·계절/요일·생활주제) 기반 글 — 5개월 내 미사용 주제만
   var _ctx = (typeof _ctxPostCandidate==='function') ? _ctxPostCandidate() : null;
@@ -35986,6 +36184,29 @@ var _LT_REPLIES = [
   '아 저도 봤어요','와 대박','음 글쎄요 전 좀 다르게 봐요','ㄹㅇ 공감','그게 맞나요?',
   '저는 잘 모르겠던데','오늘 유독 그러네요','어제도 그랬어요','헉 몰랐네','다들 비슷하네요ㅋ',
 ];
+// 시간대별 멘트 중 '6개월 내 쓴 적 없는' 것을 고른다.
+//   풀이 유한해서 언젠가는 다 소진된다 → 그때는 가장 오래전에 쓴 것을 재사용한다.
+//   (완전히 막으면 채팅이 멈춰버리므로, 가장 덜 지겨운 순서로 돌린다)
+function _ltPickFresh(){
+  try{
+    var pool = _ltPickPool() || [];
+    if(!pool.length) return '';
+    var used = (typeof _ltTopicUsed === 'function') ? _ltTopicUsed : null;
+    if(!used) return _rnd(pool);
+    var fresh = pool.filter(function(t){ return !used('say_' + _ltKeySlug(t)); });
+    if(fresh.length) return _rnd(fresh);
+    // 전부 소진 → 가장 오래전에 쓴 것
+    var log = (typeof _ltTopicLog === 'function') ? _ltTopicLog() : {};
+    var best = pool[0], bt = Infinity;
+    pool.forEach(function(t){
+      var v = log['say_' + _ltKeySlug(t)] || 0;
+      if(v < bt){ bt = v; best = t; }
+    });
+    return best;
+  }catch(e){ return _rnd(_ltPickPool() || ['']); }
+}
+window._ltPickFresh = _ltPickFresh;
+
 function _ltReplyMsg(){
   // 직전 글이 있으면 그에 대한 반응 (내 글이면 더 높은 확률로 응답)
   var last = _LIVE_TALK.length ? _LIVE_TALK[_LIVE_TALK.length-1] : null;
@@ -36167,16 +36388,22 @@ function _ltGenerate(){
   // 2) ★ 오늘의 주제(핫이슈 뉴스·날씨·요일/계절 조합, 6개월 내 미사용) 45%
   if(!text && r < 0.45 && typeof _ltThemeMsg==='function') text = _ltThemeMsg();
   // 3) 실시간 뉴스 기반
-  if(!text && r < 0.60) text = _ltNewsMsg();
-  // 4) 시간대별 멘트
-  if(!text) text = _rnd(_ltPickPool());
+  // ★ 뉴스 제목을 그대로 인용하던 멘트("…" 이거 방금 봤어요)는 제거했다.
+  //   기사 헤드라인이 그대로 채팅에 붙으면 사람 대화로 안 보이고 광고처럼 읽힌다.
+  //   (_ltNewsMsg 는 남겨두되 호출하지 않는다)
+  // 4) 시간대별 멘트 — ★ 6개월 원장을 여기에도 적용한다.
+  //   예전엔 '최근 20개'만 피해서, 같은 멘트가 며칠 간격으로 계속 돌아왔다.
+  //   주제 멘트(_ltThemeMsg)에만 있던 6개월 규칙을 일반 멘트에도 건다.
+  if(!text) text = _ltPickFresh();
 
-  // ★ 최근 20개와 겹치면 다시 뽑기 (매시간·매분 다르게, 반복 체감 제거)
+  // 최근 20개와 겹치거나 금지어면 다시 뽑기
   var t2 = 0;
   while((_ltRecentTexts.indexOf(text) >= 0 || (typeof _ltIsBanned==='function' && _ltIsBanned(text))) && t2++ < 25){
-    text = _rnd(_ltPickPool());
+    text = _ltPickFresh();
   }
   if(typeof _ltIsBanned==='function' && _ltIsBanned(text)) return;
+  // 이 멘트를 6개월 원장에 기록
+  try{ if(typeof _ltTopicMark==='function') _ltTopicMark('say_' + _ltKeySlug(text)); }catch(e){}
 
   _ltLastNick = nick;
   _ltRecentTexts.push(text);
