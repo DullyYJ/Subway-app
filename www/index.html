@@ -24449,6 +24449,8 @@ window.renderCommList=renderCommList;
 var _NEWSFEED = { items: [], ts: 0 };
 var _newsCatSel = '전체';
 function _fetchNewsFeed(cb){
+  // ★ 저장된 기사를 먼저 올려 화면을 즉시 채운다 (네트워크를 기다리지 않는다)
+  try{ if(typeof _newsStoreHydrate === 'function') _newsStoreHydrate(); }catch(e){}
   fetch(_BOARD_WRITER_URL + '/newsfeed')
     .then(function(r){ return r.json(); })
     .then(function(d){
@@ -24460,6 +24462,23 @@ function _fetchNewsFeed(cb){
       _fetchStockNews(function(){
         _newsApplyCats(_NEWSFEED.items);
         if(cb) cb();
+        // 모든 카테고리를 뒤에서 한 번에 채운다 (화면은 이미 저장본으로 차 있다)
+        try{
+          if(!window._newsAllFetched){
+            window._newsAllFetched = 1;
+            setTimeout(function(){
+              // 서버가 있으면 한 번에 받고, 없으면 예전처럼 앱이 직접 긁는다
+              _fetchNewsFromServer(function(ok){
+                if(ok){
+                  try{ if(_commFilter === '뉴스'){ var l=document.getElementById('commList'); if(l) _renderNewsTab(l); } }catch(e2){}
+                  return;
+                }
+                console.log('[뉴스] 서버 실패 → 앱에서 직접 수집');
+                if(typeof _fetchAllCatNews==='function') _fetchAllCatNews();
+              });
+            }, 300);
+          }
+        }catch(e){}
       });
     }).catch(function(){ if(cb) cb(); });
 }
@@ -24616,6 +24635,110 @@ var _NEWS_CAT_TTL    = 3*60*1000;    // 같은 카테고리 재수집 간격(목
 var _newsCatAt = {};                 // 카테고리별 마지막 수집 시각
 
 // 한 카테고리를 채운다. 이미 목표를 넘겼고 최근에 받았으면 건너뛴다.
+// ── 뉴스 저장소 (localStorage) ──────────────────────────────────
+//   ★ 매번 70개 피드를 새로 받으면 탭을 누를 때마다 기다려야 한다.
+//     한 번 받은 기사는 저장해 두고, 앱을 켜면 **즉시** 그 목록을 보여준다.
+//     새 기사는 뒤에서 조용히 받아와 합친다(화면은 이미 채워져 있다).
+var _NEWS_STORE_KEY = 'newsStore';
+var _NEWS_STORE_MAX = 1200;                 // 카테고리 7개 × 약 170건
+var _NEWS_STORE_TTL = 30 * 24 * 3600 * 1000; // 30일 지난 기사는 버린다
+
+function _newsStoreLoad(){
+  try{
+    var raw = localStorage.getItem(_NEWS_STORE_KEY);
+    if(!raw) return [];
+    var arr = JSON.parse(raw);
+    if(!Array.isArray(arr)) return [];
+    var cut = Date.now() - _NEWS_STORE_TTL;
+    return arr.filter(function(x){ return x && x.title && !(x.ts && x.ts < cut); });
+  }catch(e){ return []; }
+}
+function _newsStoreSave(){
+  try{
+    var arr = (_NEWSFEED.items || []).slice()
+      .sort(function(a,b){ return (b.ts||0) - (a.ts||0); })
+      .slice(0, _NEWS_STORE_MAX)
+      // 저장 용량을 아끼려고 화면에 쓰는 필드만 남긴다
+      .map(function(x){ return { title:x.title, link:x.link, desc:x.desc, ts:x.ts, source:x.source, cat:x.cat }; });
+    localStorage.setItem(_NEWS_STORE_KEY, JSON.stringify(arr));
+  }catch(e){
+    // 용량 초과 등 — 절반만 남기고 한 번 더 시도
+    try{
+      var half = (_NEWSFEED.items || []).slice(0, Math.floor(_NEWS_STORE_MAX/2))
+        .map(function(x){ return { title:x.title, link:x.link, ts:x.ts, source:x.source, cat:x.cat }; });
+      localStorage.setItem(_NEWS_STORE_KEY, JSON.stringify(half));
+    }catch(e2){}
+  }
+}
+window._newsStoreLoad = _newsStoreLoad;
+window._newsStoreSave = _newsStoreSave;
+
+// 앱 시작 시 1회: 저장된 기사를 즉시 올려 화면을 채운다
+function _newsStoreHydrate(){
+  if(window._newsHydrated) return;
+  window._newsHydrated = 1;
+  try{
+    var saved = _newsStoreLoad();
+    if(saved.length){
+      // 저장본이 먼저 오고, 이후 새 기사는 _newsMerge 가 앞에 붙인다
+      _NEWSFEED.items = (_NEWSFEED.items || []).concat(saved);
+      console.log('[뉴스] 저장본 ' + saved.length + '건 즉시 로드');
+    }
+  }catch(e){}
+}
+window._newsStoreHydrate = _newsStoreHydrate;
+
+// ── 서버에서 뉴스 한 번에 받아오기 ────────────────────────────
+//   ★ 원래는 앱이 기기마다 70개 피드를 CORS 프록시로 긁었다. 느리고 자주 실패했다.
+//     이제 서버(워커)가 정기적으로 모아 D1에 넣어두므로 **호출 한 번**이면 끝난다.
+//     서버가 없거나 실패하면 예전 방식(_fetchAllCatNews)으로 물러난다.
+var _NEWS_SERVER_URL = 'https://gentle-lab-7e47subway-api.phg0643.workers.dev/news/all';
+function _fetchNewsFromServer(cb){
+  var done = false;
+  var finish = function(ok){ if(!done){ done = true; cb(ok); } };
+  var timer = setTimeout(function(){ finish(false); }, 6000);
+  try{
+    fetch(_NEWS_SERVER_URL + '?per=' + _NEWS_CAT_TARGET)
+      .then(function(r){ if(!r.ok) throw new Error('http'); return r.json(); })
+      .then(function(d){
+        clearTimeout(timer);
+        if(!d || !d.ok || !d.cats){ finish(false); return; }
+        var total = 0;
+        Object.keys(d.cats).forEach(function(cat){
+          var arr = d.cats[cat] || [];
+          total += arr.length;
+          // 서버가 카테고리를 확정해 주므로 그대로 신뢰한다
+          _newsMerge(arr.map(function(n){
+            return { title:n.title, link:n.link, source:n.source, ts:n.ts, _srvCat:cat };
+          }), cat);
+        });
+        console.log('[뉴스] 서버에서 ' + total + '건 수신');
+        _newsStoreSave();
+        finish(total > 0);
+      })
+      .catch(function(){ clearTimeout(timer); finish(false); });
+  }catch(e){ clearTimeout(timer); finish(false); }
+}
+window._fetchNewsFromServer = _fetchNewsFromServer;
+
+// 모든 카테고리를 한 번에 병렬로 채운다 (앱 시작 직후 뒤에서 실행)
+//   화면은 저장본으로 이미 차 있으므로 사용자는 기다리지 않는다.
+function _fetchAllCatNews(cb){
+  try{
+    var cats = Object.keys(_NEWS_CAT_FEEDS || {});
+    if(!cats.length){ if(cb) cb(); return; }
+    var pending = cats.length;
+    var done = function(){
+      if(--pending > 0) return;
+      _newsStoreSave();
+      try{ if(_commFilter === '뉴스'){ var l=document.getElementById('commList'); if(l) _renderNewsTab(l); } }catch(e){}
+      if(cb) cb();
+    };
+    cats.forEach(function(c){ _fetchCatNews(c, done, true); });
+  }catch(e){ if(cb) cb(); }
+}
+window._fetchAllCatNews = _fetchAllCatNews;
+
 function _fetchCatNews(cat, cb, force){
   try{
     var feeds = _NEWS_CAT_FEEDS[cat];
@@ -24628,7 +24751,11 @@ function _fetchCatNews(cat, cb, force){
     _newsCatAt[cat] = Date.now();
 
     var pending = feeds.length;
-    var done = function(){ if(--pending <= 0 && cb) cb(); };
+    var done = function(){
+      if(--pending > 0) return;
+      _newsStoreSave();          // 받은 만큼 바로 저장 → 다음 실행은 기다림 없음
+      if(cb) cb();
+    };
     feeds.forEach(function(rss){
       // _PROXY_LIST 는 URL을 받아 프록시 주소를 만들어 주는 '함수 배열'이다.
       // 하나가 실패하면 다음 프록시로 넘어간다 (기존 뉴스 수집과 같은 방식).
@@ -24666,6 +24793,13 @@ function _newsMerge(news, hintCat){
       have[k] = 1; if(n.link) have['L:' + n.link] = 1;
       var _ts = n.ts || 0;
       if(!_ts && n.pubDate){ var _p = Date.parse(n.pubDate); if(isFinite(_p)) _ts = _p; }
+      // 서버가 카테고리를 확정해 준 기사는 다시 분류하지 않는다
+      if(n._srvCat){
+        var sItem = { title:n.title, link:n.link || '', desc:'', ts:_ts || Date.now(),
+                      source:n.source || '', cat:n._srvCat };
+        add.push(sItem);
+        return;
+      }
       // ★ 분류는 한 번만 한다. 예전 초안은 두 번 불렀는데, 두 번째에 {title}만
       //   넘겨 desc를 잃어버려 분류가 오히려 약해졌다.
       var auto = (typeof _newsClassify === 'function') ? _newsClassify(n) : '';
@@ -24805,17 +24939,12 @@ function _renderNewsTab(list){
   if(_newsCatSel !== '전체' && typeof _fetchCatNews === 'function' && !window._newsCatFetching){
     var haveN = items.length;
     if(haveN < _NEWS_CAT_TARGET){
-      // 한 번에 다 안 차면 몇 차례 더 채운다 (탭에 머무는 동안 100건까지)
-      var round = (window._newsCatRounds = window._newsCatRounds || {});
-      var rk = _newsCatSel;
-      if((round[rk] || 0) < 3){
-        round[rk] = (round[rk] || 0) + 1;
-        window._newsCatFetching = 1;
-        _fetchCatNews(_newsCatSel, function(){
-          window._newsCatFetching = 0;
-          _renderNewsTab(list);
-        }, true);
-      }
+      // 저장본으로 이미 차 있으면 조용히 보충만 한다 (화면은 그대로 유지)
+      window._newsCatFetching = 1;
+      _fetchCatNews(_newsCatSel, function(){
+        window._newsCatFetching = 0;
+        _renderNewsTab(list);
+      });
     }
   }
   var esc = function(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
