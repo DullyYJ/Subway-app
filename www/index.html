@@ -1969,19 +1969,24 @@ function _fetchPublicFood(stnNm, lat, lng){
   if(!lat||!lng) return;
   var c=_foodPubCache[stnNm];
   if(c && Date.now()-c.ts < 10*60*1000){ _foodPublicData=c.data; _renderFoodList(); return; }
-  var url='https://apis.data.go.kr/B553077/api/open/sdsc2/storeListInRadius'
-    +'?serviceKey='+encodeURIComponent(_BUS_TAGO_KEY)
-    +'&radius='+((typeof _FOOD_RADIUS_M!=='undefined')?_FOOD_RADIUS_M:1000)+'&cx='+lng+'&cy='+lat
-    +'&indsLclsCd=Q&type=json&numOfRows=200&pageNo=1';
-  if(typeof _busProxyGet!=='function') return;
-  _busProxyGet(url, function(err, data){
-    if(err) return;
-    var items=[];
-    try {
-      items=(data && data.body && data.body.items) || (data && data.response && data.response.body && data.response.body.items) || [];
-      if(!Array.isArray(items)) items = items ? [items] : [];
-    } catch(e){}
-    var mapped=items.filter(function(it){ return it && it.bizesNm; }).map(function(it){
+  // ★ 한 페이지(200건)로는 카테고리별 50개를 채우기 어렵다.
+  //   페이지를 나눠 최대 _FOOD_PUB_PAGES 장까지 받아 합친다.
+  //   진행 상황은 window._foodPubDiag 에 남겨 설정→진단에서 확인할 수 있다.
+  var _rad = (typeof _FOOD_PUB_RADIUS_M!=='undefined') ? _FOOD_PUB_RADIUS_M
+           : ((typeof _FOOD_RADIUS_M!=='undefined') ? _FOOD_RADIUS_M : 1000);
+  var diag = window._foodPubDiag = { stn: stnNm, radius: _rad, pages: [], total: 0, err: null };
+  if(typeof _busProxyGet!=='function'){ diag.err = 'no-proxy'; return; }
+
+  var acc = [], page = 1;
+  var mkUrl = function(p){
+    return 'https://apis.data.go.kr/B553077/api/open/sdsc2/storeListInRadius'
+      +'?serviceKey='+encodeURIComponent(_BUS_TAGO_KEY)
+      +'&radius='+_rad+'&cx='+lng+'&cy='+lat
+      +'&indsLclsCd=Q&type=json&numOfRows=200&pageNo='+p;
+  };
+  var finish = function(){
+    var seen = {};
+    var mapped = acc.filter(function(it){ return it && it.bizesNm; }).map(function(it){
       var ilat=parseFloat(it.lat), ilng=parseFloat(it.lon);
       var dist=(typeof haversineM==='function' && !isNaN(ilat) && !isNaN(ilng)) ? Math.round(haversineM(lat,lng,ilat,ilng)) : null;
       return {
@@ -1990,12 +1995,34 @@ function _fetchPublicFood(stnNm, lat, lng){
         road_address_name: it.rdnmAdr || it.lnoAdr || '',
         x: it.lon, y: it.lat, distance: dist, source:'public'
       };
+    }).filter(function(p){
+      // 같은 상호가 같은 자리에 중복 등록된 경우 제거
+      var k = String(p.place_name).replace(/\s/g,'') + '@' + p.road_address_name;
+      if(seen[k]) return false; seen[k] = 1; return true;
     });
     mapped.sort(function(a,b){ return (a.distance==null?99999:a.distance)-(b.distance==null?99999:b.distance); });
+    diag.total = mapped.length;
     _foodPublicData=mapped;
     _foodPubCache[stnNm]={ ts:Date.now(), data:mapped };
     _renderFoodList();
-  });
+  };
+  var step = function(){
+    if(page > _FOOD_PUB_PAGES){ finish(); return; }
+    _busProxyGet(mkUrl(page), function(err, data){
+      var items=[];
+      try {
+        items=(data && data.body && data.body.items) || (data && data.response && data.response.body && data.response.body.items) || [];
+        if(!Array.isArray(items)) items = items ? [items] : [];
+      } catch(e){}
+      diag.pages.push({ p: page, got: items.length, err: err ? String(err.message||err) : null });
+      if(err && !acc.length) diag.err = String(err.message||err);
+      acc = acc.concat(items);
+      // 200건 미만이면 마지막 페이지
+      if(err || items.length < 200){ finish(); return; }
+      page++; step();
+    });
+  };
+  step();
 }
 window._fetchPublicFood = _fetchPublicFood;
 
@@ -2011,6 +2038,8 @@ function _stnFoodLookup(name){
 // ★ 중심좌표 기준 반경 내 음식점 통합 (역별 20개 제한을 넘어 인근 역 목록까지 합침)
 var _FOOD_RADIUS_M = 1000;      // 맛집 검색 반경(m)
 var _FOOD_MAX_ITEMS = 150;      // 목록 최대 개수
+var _FOOD_PUB_RADIUS_M = 1500;  // 공공데이터 조회 반경(m) — 카테고리별 50개를 채우려면 넓혀야 한다
+var _FOOD_PUB_PAGES = 3;        // 200건씩 최대 3장(600건)까지 받아온다
 function _foodNearbyPool(cLat, cLng, radiusM, ownKey){
   try{
     if(typeof STN_FOOD==='undefined' || cLat==null || cLng==null) return null;
@@ -13156,6 +13185,12 @@ window._bgDiag = async function(){
     var _ck = Object.keys(_cm), _cr = _ck.filter(function(k){ return (_cm[k].n||0) >= _CELL_MIN_HITS; });
     add('학습된 기지국: ' + _ck.length + '개 (신뢰 ' + _cr.length + '개)');
     if(_cellLast) add('최근 관측 셀: ' + _cellLast.key);
+    var _fd = window._foodPubDiag;
+    if(_fd){
+      add('맛집 공공데이터: ' + _fd.total + '건 (반경 ' + _fd.radius + 'm, ' + _fd.stn + ')');
+      _fd.pages.forEach(function(p){ add('  · ' + p.p + '페이지: ' + p.got + '건' + (p.err ? (' / 오류 ' + p.err) : '')); });
+      if(_fd.err) add('  · 오류: ' + _fd.err);
+    } else add('맛집 공공데이터: 아직 조회 안 함');
     if(typeof LOCFSM !== 'undefined'){
       add('위치 상태: ' + LOCFSM.state + (LOCFSM.anchor ? (' (' + LOCFSM.anchor.src + ')') : ''));
       add('튐으로 버린 GPS: ' + LOCFSM.rejected + '건');
