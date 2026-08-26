@@ -5510,8 +5510,14 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
   // ★ 지하철 세그먼트: 승차역 도착시각 기준 '다음 열차 출발시각'까지 대기 반영(Bug2)
   //    시각표 미보유·막차 지남·대기 30분 초과 시에는 기존 방식(즉시 탑승) 유지
   var _ttWaitTotal=0;
+  var _boardArriveMin=null;
   var segMs=segs.map(function(sg){
     var t=cumMs;
+    // ★ 승차역(첫 대중교통 구간)에 '실제로 도착하는 시각' — 대기 반영 전 값.
+    //   이후 모든 재동기화가 이 값을 기준으로 다음 열차를 찾는다(단일 시간축).
+    if(sg.type!==3 && _boardArriveMin===null){
+      var _d0=new Date(t); _boardArriveMin=_d0.getHours()*60+_d0.getMinutes()+_d0.getSeconds()/60;
+    }
     if(sg.type===1 && sg.stops && sg.stops.length && typeof _ttNextDepForSeg==='function'){
       try{
         var _d=new Date(t);
@@ -5531,6 +5537,7 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
     return t;
   });
   window._htlWaitMin=_ttWaitTotal;
+  window._htlBoardArriveMin=_boardArriveMin;
   if(typeof _htlTagoWarm==='function') setTimeout(function(){ _htlTagoWarm(segs); }, 300);
   var gIdx=0;
 
@@ -5947,6 +5954,158 @@ function _renderTransitResultCard(data, start, dest, cacheSource) {
 }
 window._renderTransitResultCard = _renderTransitResultCard;
 
+// ══════════════════════════════════════════════
+// ★ 승차 시각 단일화 — Bug2 재발 방지
+//   승차 시각을 정하는 코드가 4곳(_renderHtlTrack / _applyRealBoardTime /
+//   _htlResyncBoard / _resyncBoardToNextTrain)에 흔어져 있었고 방향 판정도
+//   각자 따로였다. 그중 셋이 '다음 열차'를 현재 시각으로 찾으면서
+//   대기시간은 '역 도착 예정 시각'에서 빼는 바람에 wait이 음수가 돼
+//   보정이 통째로 스킵됐고, 결과적으로 '역에 도착하는 시각 = 열차 출발 시각'이 됐다.
+//   → 기준 시각·방향 판정·시각표 조회를 아래 함수로 모은다.
+// ══════════════════════════════════════════════
+var _RT_ARR_MAX_AHEAD = 20;      // 승차까지 이보다 멀면 실시간 API가 볼 수 없음 → 호출 생략(분)
+var _BOARD_CATCH_BUFFER_MIN = 0.5;  // 이 정도 여유는 있어야 '탈 수 있는 열차'로 본다(30초)
+var _BOARD_WALK_MPS = 1.2;          // 도보 속도
+var _BOARD_ETA_DETOUR = 1.25;       // 직선거리 → 실제 보행거리 보정
+
+// ★ 승차역에 도착하는 시각(분) — 걸으면서 계속 갱신된다.
+//   ① 이미 승차역에 있으면 현재 시각
+//   ② GPS로 남은 거리를 알면 현재 + 남은 도보시간 (가까워질수록 정확해짐)
+//   ③ 둘 다 없으면 렌더 시점에 계산해둔 도착 예정 시각
+function _boardEtaMin(){
+  var _now = (typeof kstMinutesAdj==='function') ? kstMinutesAdj()
+           : (new Date().getHours()*60+new Date().getMinutes());
+  try{
+    var atStop = (window._htlBoardNear === true)
+              || (typeof _htlWait !== 'undefined' && _htlWait && _htlWait.arrived === true);
+    if(atStop) return _now;
+    var d = (typeof _htlDistToBoard==='function') ? _htlDistToBoard() : null;
+    if(d != null && isFinite(d)){
+      return _now + (d * _BOARD_ETA_DETOUR / _BOARD_WALK_MPS) / 60;
+    }
+  }catch(e){}
+  return (window._htlBoardArriveMin != null) ? window._htlBoardArriveMin : _now;
+}
+
+function _fmtMinHM(m){
+  if(m==null) return '-';
+  var t=((Math.round(m)%1440)+1440)%1440;
+  return ('0'+Math.floor(t/60)).slice(-2)+':'+('0'+(t%60)).slice(-2);
+}
+
+// ① 방향키 '상'/'하' — _ttSegDir 하나로 통일 (STNDB는 폴백)
+function _boardDirKey(nd, nextNd){
+  var line = (nd && nd.lineName) || '';
+  var isHol = (typeof _isHolidayOrWeekend==='function') ? _isHolidayOrWeekend() : false;
+  try{
+    if(nextNd && typeof _ttSegDir==='function'){
+      var d = _ttSegDir(line, [{stationName:nd.name},{stationName:nextNd.name}], isHol);
+      if(d) return (d==='상행') ? '상' : '하';
+    }
+  }catch(e){}
+  try{
+    if(nextNd && typeof STNDB!=='undefined'){
+      var _norm = (typeof _nm==='function') ? _nm : function(x){ return x; };
+      var ls = STNDB.filter(function(st){ return st.line===line; });
+      var ci = ls.findIndex(function(st){ return _norm(st.name)===_norm(nd.name); });
+      var ni = ls.findIndex(function(st){ return _norm(st.name)===_norm(nextNd.name); });
+      if(ci>=0 && ni>=0) return (ci<ni) ? '하' : '상';
+    }
+  }catch(e){}
+  return '하';
+}
+
+// ② 시각표 기준 다음 열차(동기) — 공식 시각표 → 캐시/원격 → 생성 시각표
+function _boardNextDepTable(nd, nextNd, fromMin){
+  if(!nd || fromMin==null) return null;
+  var line = nd.lineName || '';
+  var dk = _boardDirKey(nd, nextNd);
+  var isHol = (typeof _isHolidayOrWeekend==='function') ? _isHolidayOrWeekend() : false;
+  var mins = null;
+  try{
+    if(typeof _ttOfficialTimes==='function'){
+      var tms = _ttOfficialTimes(line, nd.name, dk, isHol);
+      if(tms && tms.length){
+        for(var i=0;i<tms.length;i++){ if(tms[i] >= fromMin){ mins = tms[i]; break; } }
+        if(mins==null) mins = tms[0] + 1440;
+      }
+    }
+  }catch(e){}
+  if(mins==null && typeof getNextDepartureMins==='function'){
+    try{ mins = getNextDepartureMins(line, nd.name, (dk==='상')?'상행':'하행', fromMin); }catch(e){}
+  }
+  return mins;
+}
+
+// ③ 다음 열차(비동기) — 실시간 도착정보 제공 노선이고 승차가 임박할 때만 실시간
+//   ★ 실시간은 '지금부터 N분 뒤 도착' 정보라 먼 미래(도보 20분 뒤 승차 등)엔
+//     쓸 수 없다. 그때는 노선과 무관하게 시각표가 정답이다.
+function _boardNextDep(nd, nextNd, fromMin, cb){
+  var line = (nd && nd.lineName) || '';
+  var dk = _boardDirKey(nd, nextNd);
+  function _fallback(){ cb(_boardNextDepTable(nd, nextNd, fromMin), 'table', dk); }
+  var _now = (typeof kstMinutesAdj==='function') ? kstMinutesAdj() : (new Date().getHours()*60+new Date().getMinutes());
+  var ahead = fromMin - _now; if(ahead < -720) ahead += 1440;
+  var hasRT = (typeof _rtCovered==='function' && _rtCovered(line))
+           || (typeof _rtArrCovered==='function' && _rtArrCovered(line));
+  // 승차가 20분 넘게 남았으면 실시간 목록에 해당 열차가 있을 리 없음 → API 호출 자체를 생략
+  if(!hasRT || ahead > _RT_ARR_MAX_AHEAD || typeof seoulFetch!=='function'){ _fallback(); return; }
+  var sid = null;
+  try{ sid = (typeof _rtLineId==='function' && _rtLineId(line))
+             || (window._RT_ARR_LINE2ID ? window._RT_ARR_LINE2ID[line] : null); }catch(e){}
+  var done=false;
+  var to=setTimeout(function(){ if(!done){ done=true; _fallback(); } }, 5500);
+  try{
+    seoulFetch('realtimeStationArrival/0/10/'+encodeURIComponent(nd.name), 5000).then(function(raw){
+      if(done) return; done=true; clearTimeout(to);
+      var items = (raw && raw.realtimeArrivalList) ? raw.realtimeArrivalList : null;
+      var best = null;
+      if(items && items.length){
+        items.forEach(function(t){
+          if(!t) return;
+          if(sid && String(t.subwayId||'') !== String(sid)) return;
+          var sec = parseInt(t.barvlDt, 10);
+          if(!isFinite(sec) || sec <= 0) return;
+          var fwd = (nextNd && typeof _rtArrForward==='function')
+                    ? _rtArrForward(line, nd.name, nextNd.name, t.bstatnNm) : null;
+          if(fwd === false) return;
+          // ★ 핵심: '내가 역에 도착한 뒤에 오는 열차' 중 가장 빠른 것만 고른다.
+          //   내가 닿기 전에 떠나버리는 열차를 골라 부는 게 예전 버그의 본질이었다.
+          var arrMin = _now + sec/60;
+          if(arrMin < fromMin + _BOARD_CATCH_BUFFER_MIN) return;
+          if(best==null || arrMin < best) best = arrMin;
+        });
+      }
+      // 실시간 목록에 내가 탈 수 있는 열차가 없음(아직 멀리 있음) → 시각표
+      if(best==null){ cb(_boardNextDepTable(nd, nextNd, fromMin), 'table', dk); return; }
+      cb(best, 'realtime', dk);
+    }).catch(function(){ if(!done){ done=true; clearTimeout(to); _fallback(); } });
+  }catch(e){ if(!done){ done=true; clearTimeout(to); _fallback(); } }
+}
+
+// ④ 불변식 — 승차역 표시 시각은 '역 도착 시각'보다 이를 수 없다.
+//   (다른 기능이 재계산 경로를 추가하다 규칙을 깨도 여기서 다시 잡힌다)
+function _htlBoardFixWait(){
+  try{
+    if(typeof _htlNotDeparted==='function' && !_htlNotDeparted()) return;   // 출발 후엔 실측이 우선
+    var eta = _boardEtaMin();
+    if(eta == null) return;
+    var bi = (typeof _htlBoardIdx==='function') ? _htlBoardIdx() : -1;
+    if(bi < 0) return;
+    var nd = _transitNodeData[bi];
+    if(!nd || nd._schedMin == null) return;
+    var d = nd._schedMin - eta;
+    if(d < -720) d += 1440;
+    if(d >= -0.02) return;                                                  // 정상
+    if(typeof _htlShiftFrom==='function') _htlShiftFrom(bi, -d*60);
+  }catch(e){}
+}
+window._boardEtaMin       = _boardEtaMin;
+window._boardNextDep      = _boardNextDep;
+window._boardNextDepTable = _boardNextDepTable;
+window._boardDirKey       = _boardDirKey;
+window._htlBoardFixWait   = _htlBoardFixWait;
+
 // ── 실제 다음 차(버스 도착/지하철 시각표) 시각으로 타임라인 보정 ──
 function _applyRealBoardTime(opts){
   opts = opts || {};
@@ -5960,9 +6119,13 @@ function _applyRealBoardTime(opts){
     var idx=-1, nd=null;
     for(var i=0;i<_transitNodeData.length;i++){ var n=_transitNodeData[i]; if(!n.isOrigin && !n.isWalk && (n.isBus||n.isSub)){ idx=i; nd=n; break; } }
     if(!nd || nd._schedMin==null) return;
-    var nowMin = (typeof kstMinutesAdj==='function') ? kstMinutesAdj() : (new Date().getHours()*60+new Date().getMinutes());
-    // ★ opts.fromMin = '승차역에 실제로 도착할 시각'(도보 ETA 반영). 없으면 현재 시각.
-    if(opts.fromMin != null) nowMin = opts.fromMin;
+    var _now = (typeof kstMinutesAdj==='function') ? kstMinutesAdj() : (new Date().getHours()*60+new Date().getMinutes());
+    // ★ 다음 열차를 찾는 기준 시각 = '승차역에 있게 되는 시각'
+    //   · 아직 가는 중이면 도보 ETA를 반영한 도착 예정 시각(_htlBoardArriveMin)
+    //   · 이미 승차역에 도착했으면 현재 시각
+    //   예전엔 무조건 현재 시각으로 찾고 대기는 도착 예정 시각에서 빼는 바람에
+    //   wait이 음수가 돼 보정이 통째로 스킵됐다(= 역 도착시각이 곳 출발시각).
+    var nowMin = (opts.fromMin != null) ? opts.fromMin : _boardEtaMin();
     var arriveStopMin = nd._schedMin;   // 현재 계산상 탑승(정류장 도착) 시각
 
     // ★ allowEarlier=true 이면 '더 빠른 차'로 앞당기는 보정도 허용
@@ -6020,52 +6183,24 @@ function _applyRealBoardTime(opts){
         });
       });
     } else if(nd.isSub){
-      var line = nd.lineName || '';
-      // 다음 지하철 역으로 상/하행 판별 (BFS 경로와 동일 방식)
+      // ★ 실시간(도착정보 제공 노선)/시각표 분기를 _boardNextDep 하나로 통일.
+      //   방향 판정도 _boardDirKey 하나만 쓴다(예전엔 여기·_ttSegDir·_resyncBoardToNextTrain에
+      //   각각 다른 방향 판정 코드가 있어 서로 어긋났다).
       var nextNd = null;
-      for(var j=idx+1;j<_transitNodeData.length;j++){ var m=_transitNodeData[j]; if(!m.isWalk && m.isSub){ nextNd=m; break; } }
-      // ★ 방향 판정: 승차역·다음역의 공식 첫차 시각차로 판정(Bug2의 _ttSegDir와 동일 원리)
-      //   STNDB 역 순서는 노선별로 뒤죽박죽이라 순서 기반은 폴백으로만 사용
-      var dir = null;
-      var _hol0 = (typeof _isHolidayOrWeekend==='function') ? _isHolidayOrWeekend() : false;
-      if(nextNd && typeof _ttFirstOfficial==='function'){
-        var _cand = [];
-        ['상','하'].forEach(function(dk){
-          var fa = _ttFirstOfficial(line, nd.name, dk, _hol0);
-          var fb = _ttFirstOfficial(line, nextNd.name, dk, _hol0);
-          if(fa==null || fb==null) return;
-          if(fb - fa > 0) _cand.push({ dk:dk, diff: fb - fa });
-        });
-        if(_cand.length){
-          _cand.sort(function(x,y){ return x.diff - y.diff; });
-          dir = (_cand[0].dk === '상') ? '상행' : '하행';
-        }
+      for(var j=idx+1;j<_transitNodeData.length;j++){
+        var m=_transitNodeData[j]; if(!m.isWalk && m.isSub){ nextNd=m; break; }
       }
-      if(dir == null){
-        dir = '하행';
-        if(typeof STNDB!=='undefined' && nextNd){
-          var _norm = (typeof _nm==='function') ? _nm : function(x){return x;};
-          var ls = STNDB.filter(function(st){ return st.line===line; });
-          var ci = ls.findIndex(function(st){ return _norm(st.name)===_norm(nd.name); });
-          var ni3 = ls.findIndex(function(st){ return _norm(st.name)===_norm(nextNd.name); });
-          if(ci>=0 && ni3>=0) dir = (ci<ni3) ? '하행' : '상행';
-        }
-      }
-      // ★ 공식 시각표(방향 반영) 우선 — Bug2에서 만든 _ttOfficialTimes 사용
-      var mins = null;
-      try{
-        if(typeof _ttOfficialTimes==='function'){
-          var _hol = (typeof _isHolidayOrWeekend==='function') ? _isHolidayOrWeekend() : false;
-          var _tms = _ttOfficialTimes(line, nd.name, (dir==='상행'?'상':'하'), _hol);
-          if(_tms && _tms.length){
-            for(var _ti=0; _ti<_tms.length; _ti++){ if(_tms[_ti] >= nowMin){ mins = _tms[_ti]; break; } }
-            if(mins==null) mins = _tms[0] + 1440;
-          }
-        }
-      }catch(e){}
-      if(mins==null && typeof getNextDepartureMins==='function')
-        mins = getNextDepartureMins(line, nd.name, dir, nowMin);
-      if(mins!=null) applyDelay(mins, _allowEarlier);
+      if(window._boardResyncBusy) return;            // 응답 겹침으로 이중 보정 방지
+      window._boardResyncBusy = true;
+      _boardNextDep(nd, nextNd, nowMin, function(mins, src){
+        window._boardResyncBusy = false;
+        if(mins==null) return;
+        // 실시간 값은 권위있는 값이므로 앞당김도 반영한다(열차가 빨라진 경우).
+        applyDelay(mins, _allowEarlier || src === 'realtime');
+        _htlBoardFixWait();
+        console.log('[승차시각] '+(nd.lineName||'')+' '+nd.name
+          +' | 역 도착 '+_fmtMinHM(nowMin)+' → 출발 '+_fmtMinHM(mins)+' ('+src+')');
+      });
     }
   }catch(e){}
 }
@@ -9642,15 +9777,10 @@ function _resyncBoardToNextTrain(){
     // 다음 지하철 역으로 상/하행 판별
     var nextNd=null;
     for(var j=bIdx+1;j<_transitNodeData.length;j++){ var m=_transitNodeData[j]; if(!m.isWalk && m.isSub){ nextNd=m; break; } }
-    var dir='하행';
-    if(typeof STNDB!=='undefined' && nextNd){
-      var _norm = (typeof _nm==='function') ? _nm : function(x){return x;};
-      var ls = STNDB.filter(function(st){ return st.line===line; });
-      var ci  = ls.findIndex(function(st){ return _norm(st.name)===_norm(bNd.name); });
-      var ni3 = ls.findIndex(function(st){ return _norm(st.name)===_norm(nextNd.name); });
-      if(ci>=0 && ni3>=0) dir = (ci<ni3) ? '하행' : '상행';
-    }
-    var depMin = (typeof getNextDepartureMins==='function') ? getNextDepartureMins(line, bNd.name, dir, nowMin) : null;
+    // ★ 방향 판정·시각표 조회를 _boardNextDepTable 로 통일.
+    //   예전엔 STNDB 역순서로만 방향을 잡고 공식 시각표(_ttOfficialTimes)를
+    //   아예 안 봐서 인천1·2호선 등은 생성 시각표로 떨어졌다.
+    var depMin = _boardNextDepTable(bNd, nextNd, nowMin);
     if(depMin == null) return false;
     // 분 → 오늘 기준 ms (자정 넘김 보정)
     var base = new Date(nowD.getFullYear(), nowD.getMonth(), nowD.getDate(), 0,0,0).getTime();
@@ -10663,6 +10793,8 @@ function switchBusView(mode) {
   var tf = document.getElementById('busvTabFav');
   if(tn) tn.classList.toggle('on', mode === 'near');
   if(tf) tf.classList.toggle('on', mode === 'fav');
+  var mw = document.getElementById('mapBusMapWrap');
+  if(mw && mode !== 'near') mw.style.display = 'none';   // 지도는 '주변 정류장'에서만
   if(mode === 'near') loadMapNearStops();
   else loadMapBusStops();
 }
@@ -10936,13 +11068,106 @@ function _prefetchNearStops(lat, lng){
 }
 window._prefetchNearStops = _prefetchNearStops;
 
+// ══════════════════════════════════════════════════════════════════
+// ★ 주변 정류장 지도 — 카드 번호(1,2,3…)와 핀 번호가 1:1로 대응한다.
+//   목록만 보면 '그 정류장이 어느 쪽인지'를 알 수 없어서(같은 이름의
+//   양방향 정류장이 흔함) 위치를 먼저 보여주고 도착정보는 그 아래에 둔다.
+// ══════════════════════════════════════════════════════════════════
+var _busNearMap = null, _busNearMapEl = null, _busNearMarkers = [], _busNearMeMk = null;
+
+function _busStopLatLng(st){
+  var la = parseFloat(st.gpslati != null ? st.gpslati : (st.lat != null ? st.lat : st.y));
+  var ln = parseFloat(st.gpslong != null ? st.gpslong : (st.lng != null ? st.lng : st.x));
+  return (isFinite(la) && isFinite(ln)) ? [la, ln] : null;
+}
+// 핀/카드 강조 — 어느 쪽을 눌러도 같은 번호를 비춘다
+function _busFocusStop(idx, from){
+  try{
+    _busNearMarkers.forEach(function(m, i){
+      var el = (m && m.getElement) ? m.getElement() : null;
+      if(el) el.classList.toggle('on', i === idx);
+    });
+    var cards = document.querySelectorAll('#mapBusStopList .map-bus-stop-card');
+    Array.prototype.forEach.call(cards, function(c, i){ c.classList.toggle('bus-card-on', i === idx); });
+    if(from === 'map'){
+      if(cards[idx] && cards[idx].scrollIntoView) cards[idx].scrollIntoView({behavior:'smooth', block:'start'});
+    } else if(_busNearMap && _busNearMarkers[idx]){
+      _busNearMap.panTo(_busNearMarkers[idx].getLatLng(), {animate:true});
+    }
+  }catch(e){}
+}
+window._busFocusStop = _busFocusStop;
+
+function _busNearMapRender(stops){
+  var wrap = document.getElementById('mapBusMapWrap');
+  if(!wrap) return;
+  var mode = (typeof _busViewMode === 'undefined') ? 'near' : _busViewMode;
+  if(mode !== 'near' || !stops || !stops.length){ wrap.style.display = 'none'; return; }
+  if(typeof _ensureLeaflet !== 'function'){ wrap.style.display = 'none'; return; }
+  wrap.style.display = 'block';
+  _ensureLeaflet(function(){
+    try{
+      if(!window.L){ wrap.style.display = 'none'; return; }
+      var el = document.getElementById('mapBusMapCanvas');
+      if(!el){ wrap.style.display = 'none'; return; }
+      if(!_busNearMap || _busNearMapEl !== el){
+        _busNearMap = L.map(el, { zoomControl:false, attributionControl:true });
+        _busNearMapEl = el;
+        if(typeof _addBaseTiles === 'function') _addBaseTiles(_busNearMap);
+        L.control.zoom({ position:'bottomright' }).addTo(_busNearMap);
+      }
+      _busNearMarkers.forEach(function(m){ try{ if(m) _busNearMap.removeLayer(m); }catch(e){} });
+      _busNearMarkers = [];
+      if(_busNearMeMk){ try{ _busNearMap.removeLayer(_busNearMeMk); }catch(e){} _busNearMeMk = null; }
+
+      var pts = [];
+      stops.forEach(function(st, i){
+        var ll = _busStopLatLng(st);
+        if(!ll){ _busNearMarkers.push(null); return; }
+        var nm = st.nodenm || st.nodeName || st.name || '정류장';
+        var mk = L.marker(ll, {
+          icon: L.divIcon({ className:'bus-map-pin', html:'<i>'+(i+1)+'</i>',
+                            iconSize:[26,26], iconAnchor:[13,13] }),
+          zIndexOffset: 100 + (stops.length - i)
+        }).addTo(_busNearMap);
+        mk.bindPopup('<b>'+(i+1)+'. '+_ltEsc(nm)+'</b>'
+          + (st.dist ? '<br>'+((typeof _busDist==='function') ? _busDist(st.dist) : (Math.round(st.dist)+'m')) : ''));
+        mk.on('click', function(){ _busFocusStop(i, 'map'); });
+        _busNearMarkers.push(mk);
+        pts.push(ll);
+      });
+
+      var c = window._nearStopsCache;
+      var mla = (typeof _busGpsLat !== 'undefined' && _busGpsLat != null) ? _busGpsLat : (c ? c.lat : null);
+      var mln = (typeof _busGpsLng !== 'undefined' && _busGpsLng != null) ? _busGpsLng : (c ? c.lng : null);
+      if(mla != null && mln != null && isFinite(mla) && isFinite(mln)){
+        _busNearMeMk = L.marker([mla, mln], {
+          icon: L.divIcon({ className:'bus-me-dot', html:'<i></i>', iconSize:[15,15], iconAnchor:[7,7] }),
+          zIndexOffset: 50
+        }).addTo(_busNearMap);
+        _busNearMeMk.bindPopup('내 위치');
+        pts.push([mla, mln]);
+      }
+
+      if(pts.length === 1) _busNearMap.setView(pts[0], 17);
+      else if(pts.length) _busNearMap.fitBounds(L.latLngBounds(pts), { padding:[36,36], maxZoom:17 });
+      // 컨테이너 높이가 확정된 뒤에 타일이 채워지도록 재측정
+      [0, 150, 400, 800].forEach(function(d){
+        setTimeout(function(){ try{ _busNearMap.invalidateSize(); }catch(e){} }, d);
+      });
+    }catch(e){ wrap.style.display = 'none'; }
+  });
+}
+window._busNearMapRender = _busNearMapRender;
+
 // 공용 렌더러: 정렬된 정류장 배열을 카드로 (초기 로드/재정렬 공용)
 function _renderNearStops(stops){
   var listEl = document.getElementById('mapBusStopList');
   if(!listEl) return;
   window._nearOrderedStops = stops;
   var total = stops.length;
-  listEl.innerHTML = '<div style="padding:10px 14px;font-size:12px;color:var(--sub);">📍 주변 정류장 ' + total + '개 · 카드를 <b>꾹 눌러</b> 순서 변경</div>';
+  listEl.innerHTML = '<div style="padding:10px 14px;font-size:12px;color:var(--sub);">📍 주변 정류장 ' + total + '개 · 번호는 위 지도와 같아요 · 꾹 눌러 순서 변경</div>';
+  _busNearMapRender(stops);   // ★ 지도도 같은 순서로 다시 그린다(드래그 정렬 후 번호 유지)
   window._mapBusCards = [];
   stops.forEach(function(stop, idx){
     var card = _renderMapBusCard(stop, idx, 'near', total);
@@ -11352,12 +11577,14 @@ function _renderMapBusCard(stop, idx, mode, total) {
     //   최소 너비까지 찌그러지면서 '남대문경찰서.서울역10번출구'가 한 글자씩 세로로
     //   쪼개졌다. 래퍼에 flex:1·min-width:0을 주고 나머지는 shrink 금지로 고정한다.
     '<div class="map-bus-stop-name">' +
+      (mode === 'near' ? '<span class="bus-num-badge">' + (idx + 1) + '</span>' : '') +
       '<span class="map-bus-nm-wrap">' + nameHtml +
         ' <span class="bus-lm" style="font-size:11px;font-weight:700;color:var(--gold);">' +
           (function(){ var c = (typeof _busLmCached === 'function') ? _busLmCached(nodeId) : undefined; return c ? '(' + _ltEsc(c) + ' 방향)' : ''; })() + '</span>' +
       '</span>' +
       '<button class="bus-alias-edit" title="이름 설정" style="flex:0 0 auto;background:none;border:none;cursor:pointer;font-size:12px;padding:0 3px;line-height:1;opacity:.55;">✏️</button>' +
-      '<button class="bus-map-btn" title="정류장 위치 지도" style="flex:0 0 auto;background:none;border:none;cursor:pointer;font-size:13px;padding:0 3px;line-height:1;opacity:.7;">🗺️</button>' +
+      (mode === 'near' ? '' :
+        '<button class="bus-map-btn" title="정류장 위치 지도" style="flex:0 0 auto;background:none;border:none;cursor:pointer;font-size:13px;padding:0 3px;line-height:1;opacity:.7;">🗺️</button>') +
       rightBtn + '</div>' +
     (dir ? '<div class="map-bus-stop-sub">' + _ltEsc(dir) + ' 방면</div>' : '') +
     '<div class="map-bus-row" style="color:var(--sub);font-size:13px;">도착 정보 불러오는 중...</div>';
@@ -11365,6 +11592,13 @@ function _renderMapBusCard(stop, idx, mode, total) {
   if(eb) eb.addEventListener('click', function(ev){ ev.stopPropagation(); _busEditAlias(nodeId, name, mode); });
   var mb = card.querySelector('.bus-map-btn');
   if(mb) mb.addEventListener('click', function(ev){ ev.stopPropagation(); if(typeof _busShowMap==='function') _busShowMap(card, stop); });
+  // ★ 카드를 탭하면 지도의 같은 번호 핀을 강조하고 그쪽으로 지도를 이동
+  if(mode === 'near'){
+    card.addEventListener('click', function(ev){
+      if(ev.target && ev.target.closest && ev.target.closest('button')) return;
+      if(typeof _busFocusStop === 'function') _busFocusStop(idx, 'card');
+    });
+  }
   var fb = card.querySelector('.bus-fav-toggle');
   if(fb){
     // 길게눌러 순서변경(드래그)과 충돌하지 않도록 터치 시작도 차단
@@ -28855,6 +29089,11 @@ function safeSetItem(key, val){
       <button class="busv-tab" id="busvTabFav" onclick="switchBusView('fav')">⭐ 즐겨찾기</button>
       <button class="busv-refresh" onclick="refreshBusView()" title="새로고침">🔄</button>
     </div>
+    <!-- ★ 주변 정류장 지도 (고정 — 이 아래 목록만 스크롤) -->
+    <div id="mapBusMapWrap" style="display:none;">
+      <div id="mapBusMapCanvas"></div>
+      <div id="mapBusMapHint">숫자를 누르면 아래 정류장으로 이동해요</div>
+    </div>
     <!-- 정류장 목록 -->
     <div class="map-bus-panel" id="mapBusStopList">
       <div class="map-bus-empty" id="mapBusEmpty">
@@ -38464,7 +38703,26 @@ document.addEventListener('DOMContentLoaded', function() {
 .map-itab{flex:1;padding:10px;font-size:14px;font-weight:600;color:var(--sub);
   cursor:pointer;text-align:center;border-bottom:2px solid transparent;transition:all .2s;}
 .map-itab.on{color:var(--text);border-bottom-color:var(--gold);}
-.map-bus-panel{flex:1;overflow-y:auto;background:var(--bg);-webkit-overflow-scrolling:touch;}
+.map-bus-panel{flex:1;min-height:0;overflow-y:auto;background:var(--bg);-webkit-overflow-scrolling:touch;}
+/* ★ 주변 정류장 지도 — 패널 상단 고정, 스크롤은 아래 목록에서만 */
+#mapBusMapWrap{flex:0 0 auto;position:relative;height:34vh;min-height:196px;max-height:330px;
+  border-bottom:1px solid var(--border);background:#e8eef2;overflow:hidden;}
+#mapBusMapCanvas{width:100%;height:100%;display:block;background:#e8eef2;}
+#mapBusMapHint{position:absolute;left:0;right:0;bottom:0;z-index:500;pointer-events:none;
+  padding:5px 10px;font-size:11px;font-weight:600;color:#fff;
+  background:linear-gradient(180deg,rgba(0,0,0,0),rgba(0,0,0,.45));text-align:center;}
+.bus-map-pin{background:none!important;border:none!important;}
+.bus-map-pin i{display:flex;align-items:center;justify-content:center;width:26px;height:26px;
+  border-radius:50%;background:#0066FF;color:#fff;font-size:12px;font-weight:800;font-style:normal;
+  border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.4);transition:transform .15s,background .15s;}
+.bus-map-pin.on i{background:#e8482e;transform:scale(1.25);}
+.bus-me-dot{background:none!important;border:none!important;}
+.bus-me-dot i{display:block;width:15px;height:15px;border-radius:50%;background:#ff9f0a;
+  border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.4);}
+.bus-num-badge{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
+  width:21px;height:21px;border-radius:50%;background:#0066FF;color:#fff;
+  font-size:11px;font-weight:800;line-height:1;margin-right:7px;}
+.map-bus-stop-card.bus-card-on{border-color:#0066FF;box-shadow:0 0 0 2px rgba(0,102,255,.2);}
 /* 주변/즐겨찾기 토글 */
 .busv-toggle{display:flex;align-items:center;gap:8px;padding:10px 12px;flex-shrink:0;border-bottom:1px solid var(--border);background:var(--bg);}
 .busv-tab{flex:1;padding:9px;border-radius:12px;border:1px solid var(--border);background:var(--card);
