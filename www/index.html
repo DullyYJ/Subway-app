@@ -25334,6 +25334,33 @@ function _renderCmts(post){
 // [정리] 중복 정의 제거: dcReact (아래쪽 정의 사용)
 
 // ── 목록 렌더 ─────────────────────────────────────────────
+// ★ 지금 글을 읽거나 쓰는 중인가 — 이때는 목록을 다시 그리지 않는다
+function _commBusyReading(){
+  try{
+    var op = window._commOpenPosts || {};
+    for(var k in op){ if(op[k]) return true; }      // 펼쳐 둔 글이 있으면 읽는 중
+    var ae = document.activeElement;                 // 댓글 입력 중
+    if(ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')){
+      var sv = document.getElementById('commScrollView');
+      if(sv && sv.contains(ae)) return true;
+    }
+  }catch(e){}
+  return false;
+}
+window._commBusyReading = _commBusyReading;
+
+// 보류해 둔 갱신이 있으면, 다 접은 뒤에 한 번 반영한다
+function _commFlushPending(){
+  try{
+    if(!window._commPendingRender) return;
+    if(_commBusyReading()) return;
+    window._commPendingRender = false;
+    if(typeof renderCommList === 'function') renderCommList();
+  }catch(e){}
+}
+window._commFlushPending = _commFlushPending;
+try{ setInterval(_commFlushPending, 4000); }catch(e){}
+
 function renderCommList(){
   var list=document.getElementById('commList');
   var empty=document.getElementById('commEmpty');
@@ -26252,10 +26279,14 @@ function _scheduleNewPost(){
       _AI_POSTS.unshift(p);             // 최상단에 추가
       if(_AI_POSTS.length > 60) _AI_POSTS.pop();  // 메모리 관리
       // 커뮤니티 탭이 열려있으면 즉시 갱신
+      // ★ 단, 글을 펼쳐 읽고 있거나 댓글을 쓰는 중이면 건드리지 않는다.
+      //   예전엔 20초마다 목록을 통째로 다시 그려서, 글을 열자마자
+      //   몇 초 뒤에 접히며 목록으로 돌아가는 것처럼 보였다.
       var commTab = document.getElementById('tab-community');
       if(commTab && (commTab.classList.contains('active') || commTab.style.display !== 'none')
          && typeof renderCommList === 'function') {
-        renderCommList();
+        if(_commBusyReading()) window._commPendingRender = true;
+        else renderCommList();
       }
       console.log('[커뮤니티] 새 글 추가: ' + (p.title||'').slice(0,30));
     } catch(e){ console.warn('[새 글 추가 오류]', e.message); }
@@ -26806,11 +26837,67 @@ var _POST_BODY_END = [
   '그냥 이런 날도 있는 거겠죠',
   '읽어주셔서 감사합니다'
 ];
-function _postBody(lines){
+
+// ══════════════════════════════════════════════════════════════════
+// ★ 글쓴이마다 다른 말투 (2026-08-26)
+//   문제: _postBody 가 글마다 LEAD/MID/END 를 한 줄씩 무조건 덧붙여서,
+//   서로 다른 사람이 쓴 글인데 본문 뒤 세 줄이 항상 같은 틀이었다.
+//   ("요즘 계속 이 생각이 들어서 / 혼자만 이러는 건 아니겠죠 / 좋은 방법 있으면…")
+//   → 닉네임에서 말투를 정하고(같은 닉은 늘 같은 말투), 말투마다
+//     덧붙이는 줄 수·어미·말버릇을 다르게 한다. 아무것도 안 붙이는 말투도 둔다.
+var _POST_VOICES = [
+  { k:'담백',  n:0, tail:'',
+    open:[], close:[] },
+  { k:'수다',  n:2, tail:'ㅋㅋ',
+    open:['별거 아닌데 갑자기 생각나서요','아침부터 이 생각만 하고 있네요','쓰다 보니 길어졌어요'],
+    close:['다들 그러시죠?','저만 이러는 거 아니죠','아 몰라요 그냥 그렇다고요'] },
+  { k:'정중',  n:2, tail:'',
+    open:['평소 궁금했던 걸 여쭤봅니다','경험 있으신 분 계실까 해서 적습니다'],
+    close:['조언 주시면 감사하겠습니다','좋은 하루 보내시길 바랍니다','미리 감사드립니다'] },
+  { k:'무뚝뚝', n:1, tail:'',
+    open:[],
+    close:['그게 답인 듯','뭐 그렇습니다','일단 이렇게 삽니다'] },
+  { k:'질문',  n:1, tail:'',
+    open:['이거 다들 어떻게 하세요?'],
+    close:['어떤 게 나을까요','추천 좀 부탁해요','경험담 궁금합니다'] },
+  { k:'감성',  n:2, tail:'',
+    open:['창밖 보다가 문득 적어봐요','오늘따라 유난히 그렇네요'],
+    close:['그런 날이 있잖아요','내일은 또 다르겠죠','괜히 마음이 그렇네요'] },
+  { k:'투덜',  n:1, tail:'',
+    open:['진짜 매번 이래요'],
+    close:['하 진짜','이게 맞나 싶어요','언제쯤 익숙해질까요'] },
+  { k:'실용',  n:1, tail:'',
+    open:['정리해두면 좋을 것 같아서 적어요'],
+    close:['혹시 더 나은 방법 아시면 알려주세요','참고되셨으면 좋겠네요'] }
+];
+
+// 닉네임 → 말투 (같은 사람은 항상 같은 말투를 쓴다)
+function _postVoice(nick){
+  try{
+    var t = String(nick || '');
+    if(!t) return _rnd(_POST_VOICES);
+    var h = 0;
+    for(var i=0;i<t.length;i++) h = (h*31 + t.charCodeAt(i)) >>> 0;
+    return _POST_VOICES[h % _POST_VOICES.length];
+  }catch(e){ return _POST_VOICES[0]; }
+}
+window._postVoice = _postVoice;
+
+// lines: 주제에서 나온 알맹이 문장들. nick 이 있으면 그 사람 말투로 마감한다.
+function _postBody(lines, nick){
   var arr = (lines||[]).filter(Boolean);
-  arr.push(_rnd(_POST_BODY_LEAD));
-  arr.push(_rnd(_POST_BODY_MID));
-  arr.push(_rnd(_POST_BODY_END));
+  var v = _postVoice(nick);
+  // 말투가 정한 만큼만 덧붙인다 ('담백'은 0줄 — 주제 문장만 남는다)
+  if(v.n >= 1 && v.open.length && Math.random() < 0.7) arr.unshift(_rnd(v.open));
+  if(v.n >= 1 && v.close.length) arr.push(_rnd(v.close));
+  if(v.n >= 2 && v.close.length > 1 && Math.random() < 0.35){
+    var extra = _rnd(v.close);
+    if(extra !== arr[arr.length-1]) arr.push(extra);
+  }
+  // 말버릇은 첫 줄 끝에만 살짝
+  if(v.tail && arr.length && Math.random() < 0.5){
+    arr[0] = arr[0] + ' ' + v.tail;
+  }
   return arr.join('\n\n');
 }
 
@@ -26841,7 +26928,7 @@ function _ctxPostCandidate(){
                 : t>=15 ? '오늘 ' + t + '도라 걷기 딱 좋은 날씨네요'
                 : t>=5  ? '오늘 ' + t + '도, 겉옷 없이 나갔다가 후회함'
                 :         '오늘 ' + t + '도라던데 다들 든든하게 입으셨나요'),
-          body: _postBody([
+          lines: ([
             '아침에 확인하니 오늘 기온이 ' + t + '도더라고요' + (wx.txt ? ' (' + wx.txt + ')' : ''),
             (t>=28 ? '지하철 에어컨 나오는 칸 찾아서 이동했습니다'
                    : t<=5 ? '지하철 안이 그나마 따뜻해서 살 것 같았어요'
@@ -26853,14 +26940,14 @@ function _ctxPostCandidate(){
         cands.push({
           key: 'post_wx_rain_' + ymd, cat: '일상',
           title: '오늘 비 온다는데 우산 챙기셨어요?',
-          body: _postBody(['강수확률이 ' + rain + '%라 아침부터 우산 들고 나왔어요',
+          lines: (['강수확률이 ' + rain + '%라 아침부터 우산 들고 나왔어요',
                            '지하철 계단이 미끄러우니 다들 조심하세요'])
         });
       } else if(rain >= 20){
         cands.push({
           key: 'post_wx_drizzle_' + ymd, cat: '일상',
           title: '우산 들고 갈까 말까 30분째 고민중',
-          body: _postBody(['강수확률 ' + rain + '%라는 애매한 숫자 때문에 매번 고민돼요',
+          lines: (['강수확률 ' + rain + '%라는 애매한 숫자 때문에 매번 고민돼요',
                            '들고 나가면 안 오고, 두고 나가면 꼭 오더라고요'])
         });
       }
@@ -26877,12 +26964,12 @@ function _ctxPostCandidate(){
       cands.push({
         key: 'post_season_' + dy.season + '_' + dy.mo, cat: '일상',
         title: dy.season + '이라 그런지 요즘 출퇴근길 느낌이 다르네요',
-        body: _postBody(seasonTxt)
+        lines: (seasonTxt)
       });
       cands.push({
         key: 'post_dow_' + (dy.weekend?'wk':'wd') + '_' + dy.mo, cat: '일상',
         title: dy.weekend ? '주말인데도 지하철에 사람 많더라고요' : '이번 주도 절반 왔네요',
-        body: _postBody(dy.weekend
+        lines: (dy.weekend
           ? ['주말이라 여유롭겠지 했는데 생각보다 붐볐어요','다들 어디 나들이 가시는 걸까요']
           : ['한 주가 언제 이렇게 지나갔는지 모르겠어요','남은 날도 무리 없이 지나가면 좋겠네요'])
       });
@@ -26895,7 +26982,7 @@ function _ctxPostCandidate(){
           cands.push({
             key: 'post_bank_' + tb.k + '_' + si, cat: '일상',
             title: sent,
-            body: _postBody(['요즘 계속 이 생각이 들어서 글 남겨봅니다'])
+            lines: (['요즘 계속 이 생각이 들어서 글 남겨봅니다'])
           });
         });
       });
@@ -26904,7 +26991,8 @@ function _ctxPostCandidate(){
     if(!cands.length) return null;
     // 5개월 내 사용하지 않은 주제 우선 (뉴스·날씨 등 '오늘' 주제에 가중)
     var fresh = cands.filter(function(c){
-      return !_postUsed(c.key) && !_postBanned(c.title) && !_postBanned(c.body) && !_postDupInList(c.title);
+      return !_postUsed(c.key) && !_postBanned(c.title)
+             && !_postBanned((c.lines||[]).join(' ')) && !_postDupInList(c.title);
     });
     var pick;
     if(fresh.length){
@@ -26928,6 +27016,9 @@ function _generatePost() {
   var _ctx = (typeof _ctxPostCandidate==='function') ? _ctxPostCandidate() : null;
   if(_ctx){
     var _cn = _rnd(_NICK_POOL);
+    // ★ 닉네임이 정해진 뒤에 그 사람 말투로 본문을 마감한다.
+    //   (후보를 만드는 시점에는 글쓴이가 정해지지 않아 말투를 입힐 수 없었다)
+    if(_ctx.lines && typeof _postBody==='function') _ctx.body = _postBody(_ctx.lines, _cn);
     var _cp = {
       id:    _POST_ID++,
       cat:   _ctx.cat || '일상',
@@ -27141,11 +27232,21 @@ function _renderPost(post) {
       + _dcCmtInputHtml(post.id)
     + '</div>';
 
+  // ★ 다시 그릴 때 펼쳐뒀던 글은 펼쳐진 채로 되살린다
+  if(window._commOpenPosts && window._commOpenPosts[post.id]){
+    var _b0 = el.querySelector('.dc-post-body');
+    if(_b0) _b0.style.display = 'block';
+  }
+
   // 클릭 시 본문 토글
   el.querySelector('.dc-post-hdr').addEventListener('click', function(){
     var body = el.querySelector('.dc-post-body');
     var open = body.style.display !== 'none';
     body.style.display = open ? 'none' : 'block';
+    // ★ 열림/닫힘을 기록 — 자동 갱신이 돌아도 본문이 접히지 않게
+    window._commOpenPosts = window._commOpenPosts || {};
+    if(open) delete window._commOpenPosts[post.id];
+    else window._commOpenPosts[post.id] = true;
     post.views++;
     var vEl = el.querySelector('.dc-views');
     if(vEl) vEl.textContent = '👁 ' + post.views;
