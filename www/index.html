@@ -5466,6 +5466,151 @@ function _htlAddMin(hhmm, min){
   return (h<10?'0':'')+h+':'+(mm<10?'0':'')+mm;
 }
 
+// ══════════════════════════════════════════════════════════════════
+// ★ 구간 내 정류장/역별 누적 소요시간(초) — 2026-08-26
+//   예전에는 버스 구간을 무조건 균등분할했다(sg.dur / (정류장수-1)).
+//   그래서 300m 떨어진 정류장과 1.5km 떨어진 정류장이 똑같이 4~5분으로
+//   찍혀서 "정류장 사이 시간이 고정된 것 같다"는 증상이 나왔다.
+//   → 정류장 좌표로 실제 거리를 재서 그 비율대로 나눈다. 정차시간은
+//     중간 정류장마다 따로 떼어 둔다(거리 0인 구간에서도 시간이 흐르도록).
+//   지하철은 실측 역간 소요시간(_REAL_SEG)이 있으면 그게 항상 우선.
+// ★ 버스 구간 규칙은 원래 정해둔 것을 그대로 따른다.
+//   D1 의 bus_route_stops 에는 소요시간 컬럼이 없어(정류장 순서·좌표만 있음)
+//   '정류장 거리 ÷ 버스 평균속도 + 정차시간' 으로 잡기로 했었다.
+var _BUS_DWELL_SEC = 20;        // 중간 정류장 1곳당 정차시간(원래 규칙값)
+var _BUS_KMH = 18;              // 도심 버스 평균속도(원래 규칙값) — 구간시간을 모를 때 사용
+var _MIN_STOP_GAP_SEC = 20;     // 정류장 간 최소 간격(같은 시각 중복 표시 방지)
+
+// 정류장 객체에 실려 온 실측 시간에서 누적 오프셋(초)을 뽑는다.
+// 전 정류장이 값을 갖고 단조 증가할 때만 인정한다(하나라도 비면 null → 추정으로 폴백).
+function _stopRealOffsets(stops){
+  try{
+    var n = stops.length, i, out = [], v;
+    // (a) 누적 초
+    var ok = true;
+    for(i=0;i<n;i++){
+      v = stops[i].secFromStart;
+      if(v==null || !isFinite(v)){ ok=false; break; }
+      out.push(parseFloat(v));
+    }
+    if(ok && _monoOk(out)) return _zeroBase(out);
+    // (b) "HH:MM" 시각 — 자정 넘김 보정하며 첫 정류장 기준 누적 초로
+    out = []; ok = true;
+    var prev = null, add = 0;
+    for(i=0;i<n;i++){
+      var t = stops[i].arrTime;
+      if(!t || !/^\d{1,2}:\d{2}$/.test(t)){ ok=false; break; }
+      var p = t.split(':'), m = parseInt(p[0],10)*60 + parseInt(p[1],10);
+      if(prev!=null && m + add < prev) add += 1440;      // 자정 넘김
+      prev = m + add;
+      out.push(prev * 60);
+    }
+    if(ok && _monoOk(out)) return _zeroBase(out);
+    // (c) 누적 분
+    out = []; ok = true;
+    for(i=0;i<n;i++){
+      v = stops[i].arrMin;
+      if(v==null || !isFinite(v)){ ok=false; break; }
+      out.push(parseFloat(v) * 60);
+    }
+    if(ok && _monoOk(out)) return _zeroBase(out);
+  }catch(e){}
+  return null;
+}
+function _monoOk(a){
+  if(!a || a.length < 2) return false;
+  for(var i=1;i<a.length;i++){ if(!(a[i] >= a[i-1])) return false; }
+  return a[a.length-1] > a[0];        // 전부 같은 값이면 쓸모없음
+}
+function _zeroBase(a){
+  var b0 = a[0], out = [];
+  for(var i=0;i<a.length;i++) out.push(a[i] - b0);
+  return out;
+}
+
+function _segStopOffsets(sg){
+  var stops = (sg && sg.stops) || [];
+  var n = stops.length;
+  if(n < 2) return [0];
+  var dur = sg.dur || 0;
+  var i, off, c;
+
+  // ★ 승차 대기는 첫 정류장에서 한 번 일어나는 일이지 정류장 사이에
+  //   나눠 넣을 것이 아니다. route-v2 의 sectionTime 은 '대기 + 주행'이라,
+  //   그걸 통째로 나누면 구간마다 대기시간이 섮여 전부 길게 나온다.
+  //   → 주행만 정류장에 배분하고, 대기는 첫 구간에만 더한다(총합은 dur 그대로).
+  var wait = 0;
+  if(sg.type === 2 && sg.waitSec != null && isFinite(sg.waitSec)){
+    wait = Math.max(0, Math.min(parseFloat(sg.waitSec), dur * 0.6));
+  }
+  var moveDur = Math.max(dur - wait, 0);
+
+  // ★ ①순위: 정류장 객체가 실측 시간을 직접 들고 오면 그걸 그대로 쓴다.
+  //   (TAGO 등에서 받아 쌓은 정류장별 소요시간이 있으면 추정보다 항상 정확하다)
+  //   누적 초(secFromStart) → 시각문자열(arrTime) → 누적 분(arrMin) 순으로 본다.
+  var real = _stopRealOffsets(stops);
+  if(real) return real;
+
+  // ② 지하철 실측 역간 소요시간 (전 구간 다 있을 때만)
+  if(sg.type === 1 && typeof _realSeg === 'function'){
+    var real = [], okReal = true;
+    for(i=1;i<n;i++){
+      var r = _realSeg(sg.name, stops[i-1].stationName, stops[i].stationName);
+      if(r == null){ okReal = false; break; }
+      real.push(r);
+    }
+    if(okReal){
+      off = [0]; c = 0;
+      for(i=0;i<real.length;i++){ c += real[i]; off.push(c); }
+      return off;
+    }
+  }
+
+  // ② 좌표 기반 거리 비례
+  var d = [], tot = 0, okGeo = true;
+  for(i=1;i<n;i++){
+    var a = stops[i-1], b = stops[i];
+    var ay = parseFloat(a.lat!=null ? a.lat : a.y);
+    var ax = parseFloat(a.lon!=null ? a.lon : (a.lng!=null ? a.lng : a.x));
+    var by = parseFloat(b.lat!=null ? b.lat : b.y);
+    var bx = parseFloat(b.lon!=null ? b.lon : (b.lng!=null ? b.lng : b.x));
+    if(!isFinite(ay)||!isFinite(ax)||!isFinite(by)||!isFinite(bx)){ okGeo = false; break; }
+    var m = (typeof haversineM==='function') ? haversineM(ay,ax,by,bx) : 0;
+    if(!isFinite(m) || m < 0) m = 0;
+    d.push(m); tot += m;
+  }
+  if(okGeo && tot > 0){
+    var mid = (n - 2 > 0) ? (n - 2) : 0;                 // 중간 정류장 수
+    var dwellAll = (sg.type === 2) ? Math.min(_BUS_DWELL_SEC * mid, moveDur * 0.35) : 0;
+    var moveAll  = Math.max(moveDur - dwellAll, moveDur * 0.5);
+    var perDwell = mid > 0 ? dwellAll / mid : 0;
+    off = [0]; c = 0;
+    for(i=0;i<d.length;i++){
+      c += moveAll * (d[i] / tot);
+      if(i < d.length - 1) c += perDwell;                // 마지막 도착엔 정차 없음
+      off.push(c);
+    }
+    var last = off[off.length-1];
+    if(last > 0 && moveDur > 0){                          // 주행 총합을 moveDur 에 맞춘다
+      var k = moveDur / last;
+      for(i=0;i<off.length;i++) off[i] *= k;
+    }
+    if(wait > 0){ for(i=1;i<off.length;i++) off[i] += wait; }   // 대기는 첫 구간에만
+    // 너무 붙어서 같은 시각이 연달아 찍히는 것만 방지
+    for(i=1;i<off.length;i++){
+      if(off[i] - off[i-1] < _MIN_STOP_GAP_SEC) off[i] = off[i-1] + _MIN_STOP_GAP_SEC;
+    }
+    return off;
+  }
+
+  // ④ 폴백: 균등분할(좌표가 없는 경우)
+  var even = moveDur / (n - 1);
+  off = [0];
+  for(i=1;i<n;i++) off.push(even * i + wait);
+  return off;
+}
+window._segStopOffsets = _segStopOffsets;
+
 function _renderHtlTrack(sections, start, dest, totalMin) {
   var track = document.getElementById('transitHtlTrack');
   if(!track) return;
@@ -5478,7 +5623,9 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
     var stops=[];
     try{ stops=(sec.passStopList||{}).stationList||(sec.passStopList||{}).stations||[]; }catch(e){}
     return {type:tr.type||3, name:tr.name||'',
-            dur:sec.duration||0, dist:sec.distance||0, stops:stops.slice()};
+            dur:sec.duration||0, dist:sec.distance||0,
+            waitSec:(sec.waitSec!=null ? sec.waitSec : null),
+            stops:stops.slice()};
   });
 
   for(var i=1;i<segs.length;i++){
@@ -5521,14 +5668,21 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
     if(sg.type===1 && sg.stops && sg.stops.length && typeof _ttNextDepForSeg==='function'){
       try{
         var _d=new Date(t);
-        var _bm=_d.getHours()*60+_d.getMinutes();
+        // ★ 초까지 반영한 도착 시각. 예전엔 분 단위로 잘라서
+        //   06:18:40 도착을 06:18로 보고 06:18 열차를 탈 수 있다고 판단했다.
+        var _bm=_d.getHours()*60+_d.getMinutes()+_d.getSeconds()/60;
         var _dep=_ttNextDepForSeg(sg,_bm);
         if(_dep!=null){
           var _w=_dep-_bm; if(_w<0) _w+=1440;
-          if(_w>0 && _w<=_TT_MAX_WAIT){
-            var _nd=new Date(t); _nd.setSeconds(0,0);
-            _nd.setMinutes(_nd.getMinutes()+_w);
-            t=_nd.getTime(); _ttWaitTotal+=_w;
+          // ★ _w>0 일 때만 이동하던 것을 '항상 시각표에 스냅'으로 바꿈.
+          //   예전에는 _w 가 0으로 계산되면 아무것도 안 해서 화면에
+          //   '역에 도착한 시각'이 그대로 출발시각처럼 남았다.
+          //   지하철 출발은 반드시 시각표/실시간 값이어야 한다.
+          if(_w>=0 && _w<=_TT_MAX_WAIT){
+            var _mid=new Date(t); _mid.setHours(0,0,0,0);
+            var _tt=_mid.getTime()+Math.round(_dep*60000);
+            while(_tt < t-60000) _tt += 86400000;          // 자정 넘김 보정
+            t=_tt; _ttWaitTotal+=_w;
           }
         }
       }catch(e){}
@@ -5551,6 +5705,7 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
 
   var pts=[];
   var _firstDep=segMs[0];
+
   var _lastStnArr='';
   segs.forEach(function(sg,si){
     var col=_transitColor(sg.type,sg.name);
@@ -5567,15 +5722,10 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
       return;
     }
     if(!sg.stops.length) return;
-    // ★ 역간 시각: 실제 역간 소요시간(_REAL_SEG) 우선, 없으면 균등분할 폴백
-    var _evenSec = sg.stops.length>1 ? (sg.dur/(sg.stops.length-1)) : 0;
-    var _cumSec = 0;
-    var _offSec = sg.stops.map(function(st2, k2){
-      if(k2===0) return 0;
-      var _real = (sg.type===1) ? _realSeg(sg.name, sg.stops[k2-1].stationName, st2.stationName) : null;
-      _cumSec += (_real!=null ? _real : _evenSec);
-      return _cumSec;
-    });
+    // ★ 정류장/역간 시각 — _segStopOffsets 로 일원화
+    //   지하철: 실측 역간 소요시간 → 거리 비례 → 균등
+    //   버스  : 거리 비례(정차시간 포함) → 균등
+    var _offSec = _segStopOffsets(sg);
     sg.stops.forEach(function(st,ni){
       var isF=(gIdx===0),isL=(gIdx===totalCnt-1);
       var arrT='';
@@ -6554,7 +6704,41 @@ function prefetchFoodForDest(){
 }
 window.prefetchFoodForDest = prefetchFoodForDest;
 
+// ★ 세부경로는 '먼저 열고' 채운다 — 2026-08-26
+//   예전엔 데이터가 아직 없으면 return 으로 조용히 아무 일도 안 했다.
+//   탐색 직후 버튼을 누르면 반응이 없다가 뒤늦게 열리는 것처럼 느껴진 원인.
+//   이제는 곧바로 시트를 띄우고, 경로가 준비되는 대로 내용을 채운다.
 function openTransitDetail() {
+  var modal = document.getElementById('transitDetailModal');
+  var sects = document.getElementById('transitDetailSections');
+  if(!modal) return;
+  var ready = function(){
+    return !!(_transitResultData && (_transitResultData.routes||[]).length);
+  };
+  if(ready()){
+    modal.style.display = 'flex';                 // 시트를 먼저 띄우고
+    requestAnimationFrame(function(){             // 그리는 건 다음 프레임에
+      try{ _buildTransitDetailNow(); }catch(e){}
+    });
+    return;
+  }
+  if(sects) sects.innerHTML =
+    '<div style="padding:34px 20px;text-align:center;color:var(--sub);font-size:13px;">경로를 불러오는 중...</div>';
+  modal.style.display = 'flex';
+  var tries = 0;
+  (function _wait(){
+    if(ready()){ try{ _buildTransitDetailNow(); }catch(e){} return; }
+    if(++tries > 40){                              // 6초
+      if(sects) sects.innerHTML =
+        '<div style="padding:34px 20px;text-align:center;color:var(--sub);font-size:13px;">경로를 먼저 탐색해 주세요.</div>';
+      return;
+    }
+    setTimeout(_wait, 150);
+  })();
+}
+window.openTransitDetail = openTransitDetail;
+
+function _buildTransitDetailNow() {
   var modal = document.getElementById('transitDetailModal');
   var title = document.getElementById('transitDetailTitle');
   var sects = document.getElementById('transitDetailSections');
@@ -7657,6 +7841,33 @@ function _selectSubwayNearestRoute(){
 window._selectSubwayNearestRoute = _selectSubwayNearestRoute;
 
 // 단일 ODsay path → route 형식
+// ★ 정류장 객체 정규화 — 시간 정보가 오면 반드시 보존한다(2026-08-26)
+//   예전 변환기는 stationName/lat/lon 세 필드만 남기고 나머지를 통째로 버렸다.
+//   그래서 엔진이나 TAGO에서 정류장별 소요/도착 시각을 실어 보내도
+//   앱까지 도달하지 못했다. 아래 키 중 하나라도 있으면 초 단위로 담아둔다.
+//     sec / secFromStart / travelSec  : 구간 시작으로부터 누적 초
+//     arrTime / time / arrivalTime    : "HH:MM" 또는 누적 분
+function _normStop(sv){
+  if(!sv) return { stationName:'', lat:null, lon:null };
+  var o = { stationName: sv.stationName||sv.name||'',
+            lat: (sv.y!=null?sv.y:(sv.lat!=null?sv.lat:null)),
+            lon: (sv.x!=null?sv.x:(sv.lon!=null?sv.lon:(sv.lng!=null?sv.lng:null))) };
+  // 누적 초
+  var sec = null;
+  if(sv.secFromStart!=null)      sec = parseFloat(sv.secFromStart);
+  else if(sv.travelSec!=null)    sec = parseFloat(sv.travelSec);
+  else if(sv.sec!=null)          sec = parseFloat(sv.sec);
+  if(sec!=null && isFinite(sec) && sec>=0) o.secFromStart = sec;
+  // 시각 문자열/분
+  var tv = (sv.arrTime!=null?sv.arrTime:(sv.arrivalTime!=null?sv.arrivalTime:sv.time));
+  if(tv!=null && tv!==''){
+    if(typeof tv==='string' && /^\d{1,2}:\d{2}$/.test(tv)) o.arrTime = tv;
+    else { var mn=parseFloat(tv); if(isFinite(mn) && mn>=0) o.arrMin = mn; }
+  }
+  return o;
+}
+window._normStop = _normStop;
+
 function _convertSinglePathToRoute(path) {
   if(!path) return { summary:{}, sections:[] };
   var info = path.info || {};
@@ -7664,10 +7875,7 @@ function _convertSinglePathToRoute(path) {
   var sections = subPaths.map(function(sp) {
     var ttype = sp.trafficType;
     var lane  = (sp.lane || [])[0] || {};
-    var stops = ((sp.passStopList || {}).stations || []).map(function(s){
-      return { stationName: s.stationName||s.name||'',
-        lat: s.y||s.lat||null, lon: s.x||s.lon||null };
-    });
+    var stops = ((sp.passStopList || {}).stations || []).map(_normStop);
     return {
       transportation: {
         type: ttype,
@@ -7676,6 +7884,9 @@ function _convertSinglePathToRoute(path) {
       },
       duration: (sp.sectionTime||0)*60,
       distance: sp.distance||0,
+      // ★ route-v2 워커가 실어 보내는 '승차 대기 초'. sectionTime 안에
+      //   이미 들어 있어서, 이걸 모르면 대기시간을 정류장 사이에 나눠 넣게 된다.
+      waitSec: (sp.waitSec!=null ? sp.waitSec : null),
       passStopList: stops.length ? { stationList: stops } : null
     };
   });
@@ -7709,15 +7920,8 @@ function _convertODsayToRoutes(odsayData) {
         },
         duration: (sp.sectionTime || 0) * 60,
         distance: sp.distance || 0,
-        passStopList: stops.length ? {
-          stationList: stops.map(function(s){
-            return {
-              stationName: s.stationName || s.name || '',
-              lat: s.y || s.lat || null,
-              lon: s.x || s.lon || s.lng || null
-            };
-          })
-        } : null
+        waitSec: (sp.waitSec!=null ? sp.waitSec : null),
+        passStopList: stops.length ? { stationList: stops.map(_normStop) } : null
       };
     });
     return {
@@ -37352,16 +37556,18 @@ function _ltStartConvo(){
     if(!_LT_CONVOS.length) return false;
     var used = (typeof _ltTopicUsed==='function') ? _ltTopicUsed : null;
     var idxs = _LT_CONVOS.map(function(_,i){ return i; });
-    var fresh = used ? idxs.filter(function(i){ return !used('conv_'+i); }) : idxs;
-    var pick;
-    if(fresh.length) pick = fresh[_rndInt(0, fresh.length-1)];
-    else {
-      // 전부 소진 → 가장 오래전에 쓴 것
-      var log = (typeof _ltTopicLog==='function') ? _ltTopicLog() : {};
-      var best=0, bt=Infinity;
-      idxs.forEach(function(i){ var v=log['conv_'+i]||0; if(v<bt){ bt=v; best=i; } });
-      pick = best;
-    }
+    // ★ 이번 세션에서 이미 재생한 대화는 전부 돌기 전엔 다시 쓰지 않는다.
+    //   예전엔 6개월 원장이 다 차면 '가장 오래전' 하나를 골랐는데, 같은
+    //   밀리초에 기록된 항목끼리 순위가 갈리지 않아 방금 나온 대화가
+    //   곧바로 다시 나오는 일이 있었다.
+    window._ltConvoSession = window._ltConvoSession || [];
+    var sess = window._ltConvoSession;
+    var notSess = idxs.filter(function(i){ return sess.indexOf(i) < 0; });
+    var fresh = used ? notSess.filter(function(i){ return !used('conv_'+i); }) : notSess;
+    if(!fresh.length) fresh = notSess;          // 6개월 원장은 찼지만 세션엔 남음
+    if(!fresh.length){ sess.length = 0; fresh = idxs.slice(); }   // 한 바퀴 다 돌면 초기화
+    var pick = fresh[_rndInt(0, fresh.length-1)];
+    sess.push(pick);
     var lines = _LT_CONVOS[pick];
     if(typeof _ltIsBanned==='function' && lines.some(function(t){ return _ltIsBanned(t); })) return false;
     // 줄마다 서로 다른 닉네임 배정 (연속 같은 사람 금지, 가끔 재등장은 허용)
