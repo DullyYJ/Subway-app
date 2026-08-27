@@ -11488,7 +11488,10 @@ function _busNearMapRender(stops){
           zIndexOffset: 100 + (stops.length - i)
         }).addTo(_busNearMap);
         mk.bindPopup('<b>'+(i+1)+'. '+_ltEsc(nm)+'</b>'
-          + (st.dist ? '<br>'+((typeof _busDist==='function') ? _busDist(st.dist) : (Math.round(st.dist)+'m')) : ''));
+          + (st.dist ? '<br>'+((typeof _busDist==='function') ? _busDist(st.dist) : (Math.round(st.dist)+'m')) : '')
+          // 지도 위치와 어긋나면 이 좌표를 다른 지도에 찍어 비교해 보면 된다
+          + '<br><span style="font-size:10px;opacity:.6">' + ll[0].toFixed(6) + ', ' + ll[1].toFixed(6)
+          + (st.nodeid ? ' · ' + _ltEsc(String(st.nodeid)) : '') + '</span>');
         mk.on('click', function(){ _busFocusStop(i, 'map'); });
         _busNearMarkers.push(mk);
         pts.push(ll);
@@ -36147,9 +36150,12 @@ var _commFilter='all';
 //       (첫 카테고리에서 오른쪽도 마찬가지로 멈춘다 — 뉴스 안에 머문다)
 //   · 세로 스크롤·가로 스크롤(칩 바)·입력창·버튼과 충돌하지 않게 판정한다.
 // ══════════════════════════════════════════════════════════════════
-var _SWIPE_MIN_PX   = 55;    // 이만큼은 밀어야 전환
-var _SWIPE_MAX_OFF  = 40;    // 세로로 이만큼 넘게 흔들리면 스크롤로 본다
-var _SWIPE_MAX_MS   = 700;   // 너무 느린 동작은 무시
+// ★ 감도 완화(2026-08-26) — 범위를 넓게 밀어야 동작해서 불편하다는 피드백.
+//   짧게 튐겨도, 조금 비스듬해도, 천천히 밀어도 인식되게 낮추었다.
+var _SWIPE_MIN_PX   = 32;    // 이만큼은 밀어야 전환
+var _SWIPE_MAX_OFF  = 80;    // 세로로 이만큼 넘게 흔들리면 스크롤로 본다
+var _SWIPE_MAX_MS   = 1200;  // 너무 느린 동작은 무시
+var _SWIPE_RATIO    = 1.0;   // 가로 이동이 세로보다 크기만 하면 인정
 var _swipe = null;
 
 // 지금 어떤 커뮤니티 탭이 열려 있나
@@ -36206,7 +36212,15 @@ function _newsCatStep(dir){
 function _commSwipeStep(dir){
   var cur = _commCurTab();
   // 뉴스 탭이면 카테고리가 우선 — 끝에 닿으면 그대로 멈춘다(탭을 넘기지 않는다)
-  if(cur === 'news'){ _newsCatStep(-dir); return; }
+  if(cur === 'news'){
+    // 뉴스 안에서는 카테고리가 스와이프 단위
+    if(_newsCatStep(-dir)) return;
+    // ★ 끝에 닿았을 때의 처리는 방향별로 다르다
+    //   · IT(마지막)에서 왼쪽 → 설정으로 넘어가지 않고 멈춘다
+    //   · 전체(처음)에서 오른쪽 → 게시판으로 돌아간다
+    if(dir === 1) _commGoTab('board');
+    return;
+  }
   var order = ['chat', 'board', 'news', 'settings'];
   var i = order.indexOf(cur);
   if(i < 0) return;
@@ -36258,7 +36272,10 @@ function _commSwipeInit(){
   host.addEventListener('touchmove', function(e){
     if(!_swipe || !e.touches || e.touches.length !== 1) return;
     var t = e.touches[0];
-    if(Math.abs(t.clientY - _swipe.y) > _SWIPE_MAX_OFF) _swipe.off = true;  // 세로 스크롤로 판정
+    var _ax = Math.abs(t.clientX - _swipe.x), _ay = Math.abs(t.clientY - _swipe.y);
+    // 세로로 많이 움직였고 그게 가로보다 클 때만 스크롤로 본다.
+    // (예전엔 세로 40px만 넘어도 무조건 취소돼서, 비스듬하게 밀면 안 먹었다)
+    if(_ay > _SWIPE_MAX_OFF && _ay > _ax) _swipe.off = true;
   }, { passive:true });
 
   host.addEventListener('touchend', function(e){
@@ -36270,7 +36287,7 @@ function _commSwipeInit(){
     var dx = t.clientX - sw.x;
     var dy = t.clientY - sw.y;
     if(Math.abs(dx) < _SWIPE_MIN_PX) return;
-    if(Math.abs(dx) < Math.abs(dy) * 1.5) return;    // 대각선은 무시
+    if(Math.abs(dx) < Math.abs(dy) * _SWIPE_RATIO) return;    // 세로가 더 크면 스크롤
     _commSwipeStep(dx < 0 ? -1 : 1);
   }, { passive:true });
 
@@ -39596,7 +39613,7 @@ document.addEventListener('DOMContentLoaded', function() {
   padding:5px 10px;font-size:11px;font-weight:600;color:#fff;
   background:linear-gradient(180deg,rgba(0,0,0,0),rgba(0,0,0,.45));text-align:center;}
 .bus-map-pin{background:none!important;border:none!important;}
-.bus-map-pin i{display:flex;align-items:center;justify-content:center;width:26px;height:26px;
+.bus-map-pin i{display:flex;align-items:center;justify-content:center;width:26px;height:26px;box-sizing:border-box;
   border-radius:50%;background:#0066FF;color:#fff;font-size:12px;font-weight:800;font-style:normal;
   border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.4);transition:transform .15s,background .15s;}
 .bus-map-pin.on i{background:#e8482e;transform:scale(1.25);}
