@@ -9567,12 +9567,34 @@ window._foodEndMarker = _foodEndMarker;
 //   Positron(light_all)은 너무 밋밋해 길 찾기에 필요한 정보가 부족했다.
 //   Voyager 는 같은 CARTO 계열이면서 건물·도로명·상점 POI가 색으로 구분돼
 //   배경은 깔끔하되 주변을 알아볼 수 있다.
+// ★ 2026-08-26: CARTO 가 래스터(PNG) 베이스맵에 **API 키를 요구**하기 시작했다.
+//   키 없이 불러오면 타일은 200으로 오지만 'API KEY REQUIRED' 워터마크가
+//   박혀서 온다. 타일 요청 자체는 성공이라 tileerror 폴백도 안 먹는다.
+//   게다가 CARTO 는 래스터 베이스맵을 퇴역시키는 중이고, 무료 키는
+//   비상업 용도로 안내된다. → 기본값을 키가 필요 없는 OSM 으로 되돌린다.
+//   CARTO 키를 설정에 넣으면 그때만 Voyager 를 쓴다(?key=...).
 var _TILE_CARTO_LIGHT = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
 var _TILE_CARTO_DARK  = 'https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png';
 var _TILE_OSM         = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 var _TILE_ATTR_CARTO  = '© OpenStreetMap · © CARTO';
 var _TILE_ATTR_OSM    = '© OpenStreetMap';
 var _tileFallback = false;   // 한 번 실패하면 이후 지도는 모두 OSM 으로
+
+// CARTO API 키 (비어두면 OSM 사용)
+function _cartoKey(){
+  try{ return (localStorage.getItem('cartoKey')||'').trim(); }catch(e){ return ''; }
+}
+function _saveCartoKey(){
+  try{
+    var el = document.getElementById('cartoKeyInput');
+    var v  = el ? (el.value||'').trim() : '';
+    localStorage.setItem('cartoKey', v);
+    if(typeof toast==='function') toast(v ? '지도 키를 저장했어요. 지도를 다시 열면 적용돼요' : '기본 지도(OSM)로 돌아갔어요');
+    _tileFallback = false;
+  }catch(e){}
+}
+window._cartoKey = _cartoKey;
+window._saveCartoKey = _saveCartoKey;
 
 function _isDarkTheme(){
   try{
@@ -9582,12 +9604,21 @@ function _isDarkTheme(){
 }
 // 지도에 배경 타일을 얹는다. 실패가 잦으면 자동으로 OSM 으로 되돌린다.
 function _addBaseTiles(map){
+  function _osm(){
+    return L.tileLayer(_TILE_OSM, {
+      maxZoom: 19,
+      subdomains: 'abc',
+      attribution: _TILE_ATTR_OSM
+    }).addTo(map);
+  }
   try{
-    if(_tileFallback){
-      L.tileLayer(_TILE_OSM, { maxZoom:19, attribution:_TILE_ATTR_OSM }).addTo(map);
-      return;
-    }
-    var layer = L.tileLayer(_isDarkTheme() ? _TILE_CARTO_DARK : _TILE_CARTO_LIGHT, {
+    var key = _cartoKey();
+    // 키가 없거나 이전에 실패한 적이 있으면 OSM
+    if(!key || _tileFallback){ _osm(); return; }
+
+    var url = (_isDarkTheme() ? _TILE_CARTO_DARK : _TILE_CARTO_LIGHT)
+              + '?key=' + encodeURIComponent(key);
+    var layer = L.tileLayer(url, {
       maxZoom: 20,
       subdomains: 'abcd',
       detectRetina: true,          // 고해상도 화면에서 {r}=@2x 타일 사용
@@ -9599,11 +9630,11 @@ function _addBaseTiles(map){
       _tileFallback = true;
       console.log('[지도] CARTO 타일 실패 → OSM 으로 전환');
       try{ map.removeLayer(layer); }catch(e){}
-      L.tileLayer(_TILE_OSM, { maxZoom:19, attribution:_TILE_ATTR_OSM }).addTo(map);
+      _osm();
     });
     layer.addTo(map);
   }catch(e){
-    try{ L.tileLayer(_TILE_OSM, { maxZoom:19, attribution:_TILE_ATTR_OSM }).addTo(map); }catch(e2){}
+    try{ _osm(); }catch(e2){}
   }
 }
 window._addBaseTiles = _addBaseTiles;
@@ -12634,6 +12665,11 @@ window._saveBusProxy = _saveBusProxy;
       var sv = localStorage.getItem('busProxyUrl');
       el.value = (sv === null) ? _BUS_PROXY_DEFAULT : sv;
     } catch(e){ el.value = _BUS_PROXY_DEFAULT; }
+    // ★ 지도 타일 키도 같은 타이밍에 채운다
+    try {
+      var ck = document.getElementById('cartoKeyInput');
+      if(ck) ck.value = (typeof _cartoKey === 'function') ? _cartoKey() : '';
+    } catch(e){}
   }, 1500);
 })();
 function _busDiagEl(txt, clear){
@@ -14538,6 +14574,18 @@ window.addEventListener('unhandledrejection', function(e) {
         <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">🚌 버스 도착정보 진단</div>
         <p style="font-size:12px;color:var(--sub);margin-bottom:12px;">도착정보가 안 뜨는 정류장의 원인을 확인해요. (노선도 &gt; 버스 탭을 먼저 연 뒤 실행)</p>
         <button onclick="_busDiag()" style="width:100%;padding:11px;border-radius:10px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:var(--gold);color:#121214;font-family:inherit;margin-bottom:10px;">진단 실행</button>
+        <div style="margin-bottom:10px;">
+          <div style="font-size:11.5px;color:var(--sub);margin-bottom:6px;">지도 타일 키 (CARTO, 비워두면 기본 지도 사용)</div>
+          <div style="display:flex;gap:6px;margin-bottom:6px;">
+            <input id="cartoKeyInput" type="text" placeholder="CARTO API 키 (선택)"
+              style="flex:1;min-width:0;padding:9px 10px;border-radius:9px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-family:inherit;">
+            <button onclick="_saveCartoKey()" style="padding:9px 14px;border-radius:9px;border:none;cursor:pointer;font-size:12px;font-weight:800;background:#2f7cf6;color:#fff;font-family:inherit;">저장</button>
+          </div>
+          <div style="font-size:11px;color:var(--sub);line-height:1.5;margin-bottom:12px;">
+            CARTO 가 2026년 8월부터 지도 타일에 키를 요구해요. 키가 없으면 기본 지도(OSM)로 보여요.
+          </div>
+        </div>
+
         <div style="margin-bottom:10px;">
           <div style="font-size:11.5px;color:var(--sub);margin-bottom:6px;">버스 전용 프록시 주소 (서울·경기 도착정보용, 비워두면 기본 서버 사용)</div>
           <div style="display:flex;gap:6px;">
