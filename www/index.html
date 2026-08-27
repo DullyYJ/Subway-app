@@ -5528,6 +5528,75 @@ function _zeroBase(a){
   return out;
 }
 
+
+// ══════════════════════════════════════════════════════════════════
+// ★ 버스 구간 소요시간 실측 검증 (2026-08-26)
+//   증상: 한진→테크노파크 순환43 구간이 카카오 21분인데 앱은 45분.
+//   앱은 버스 시간을 계산하지 않는다 — route-v2 워커가 준 sectionTime을
+//   그대로 쓴다. 워커 규칙은 '정류장 거리 ÷ 평균속도 + 정차시간'인데,
+//   D1의 정류장 순서·좌표가 꼬이면 거리가 부풀고 시간이 통째로 커진다.
+//   → 앱이 받은 정류장 좌표로 구간 거리를 직접 재서 교차검증한다.
+//     워커 값이 실측과 크게 어긋나면 실측 기준으로 바로잡는다.
+// ★ 임계값은 보수적으로 — 잘못 '고치는' 게 그냥 두는 것보다 나쁘다.
+//   도심 정체 구간은 실제로 10~12km/h 까지 떨어지므로 그건 건드리지 않는다.
+//   스크린샷 사례(순환43)는 8km/h대라 이 기준에 걸린다.
+var _BUS_KMH_LOW   = 9;     // 이보다 느리면 워커 값이 과대
+var _BUS_KMH_HIGH  = 45;    // 이보다 빠르면 과소
+var _BUS_KMH_FIX   = 19;    // 바로잡을 때 쓰는 도심 버스 평균속도
+var _BUS_MIN_STOPS = 3;     // 정류장이 이보다 적으면 판단하지 않는다
+
+// 정류장을 이어 만든 구간 거리(m). 좌표가 하나라도 없으면 null.
+function _busLegDistM(sg){
+  try{
+    var st = (sg && sg.stops) || [];
+    if(st.length < 2) return null;
+    var tot = 0;
+    for(var i=1;i<st.length;i++){
+      var a = st[i-1], b = st[i];
+      var ay = parseFloat(a.lat != null ? a.lat : a.y);
+      var ax = parseFloat(a.lon != null ? a.lon : (a.lng != null ? a.lng : a.x));
+      var by = parseFloat(b.lat != null ? b.lat : b.y);
+      var bx = parseFloat(b.lon != null ? b.lon : (b.lng != null ? b.lng : b.x));
+      if(!isFinite(ay)||!isFinite(ax)||!isFinite(by)||!isFinite(bx)) return null;
+      var d = (typeof haversineM === 'function') ? haversineM(ay,ax,by,bx) : 0;
+      if(!isFinite(d) || d < 0) return null;
+      tot += d;
+    }
+    return tot;
+  }catch(e){ return null; }
+}
+window._busLegDistM = _busLegDistM;
+
+// 구간의 실효속도(km/h) — 대기시간을 뺀 주행시간 기준. 모르면 null.
+function _busLegKmh(sg){
+  var dist = _busLegDistM(sg);
+  if(dist == null || dist <= 0) return null;
+  var dur = sg.dur || 0;
+  var wait = (sg.waitSec != null && isFinite(sg.waitSec)) ? Math.max(0, sg.waitSec) : 0;
+  var move = dur - wait;
+  if(move <= 0) return null;
+  return (dist / move) * 3.6;
+}
+window._busLegKmh = _busLegKmh;
+
+// 워커 값이 실측과 크게 어긋나면 바로잡은 주행시간(초)을 돌려준다. 정상이면 null.
+function _busLegFixSec(sg){
+  try{
+    if(!sg || sg.type !== 2) return null;
+    var st = sg.stops || [];
+    if(st.length < _BUS_MIN_STOPS) return null;
+    var kmh = _busLegKmh(sg);
+    if(kmh == null) return null;
+    if(kmh >= _BUS_KMH_LOW && kmh <= _BUS_KMH_HIGH) return null;   // 그럴듯하면 그대로
+    var dist = _busLegDistM(sg);
+    var mid  = (st.length - 2 > 0) ? (st.length - 2) : 0;
+    var fixed = (dist / (_BUS_KMH_FIX / 3.6)) + (mid * _BUS_DWELL_SEC);
+    if(!isFinite(fixed) || fixed <= 0) return null;
+    return fixed;
+  }catch(e){ return null; }
+}
+window._busLegFixSec = _busLegFixSec;
+
 function _segStopOffsets(sg){
   var stops = (sg && sg.stops) || [];
   var n = stops.length;
@@ -5544,6 +5613,23 @@ function _segStopOffsets(sg){
     wait = Math.max(0, Math.min(parseFloat(sg.waitSec), dur * 0.6));
   }
   var moveDur = Math.max(dur - wait, 0);
+  // ★ 워커가 준 주행시간이 실측 거리와 안 맞으면 실측 기준으로 바꿋다
+  if(typeof _busLegFixSec === 'function'){
+    var _fx = _busLegFixSec(sg);
+    if(_fx != null){
+      if(!window._busFixLog) window._busFixLog = [];
+      window._busFixLog.push({ line: sg.name || '', stops: (sg.stops||[]).length,
+                               distM: Math.round(_busLegDistM(sg) || 0),
+                               was: Math.round(moveDur), now: Math.round(_fx),
+                               kmh: Math.round((_busLegKmh(sg)||0)*10)/10 });
+      if(window._busFixLog.length > 20) window._busFixLog.shift();
+      console.log('[버스] ' + (sg.name||'') + ' 구간 주행 '
+        + Math.round(moveDur/60) + '분 → ' + Math.round(_fx/60) + '분 (실측 '
+        + Math.round((_busLegDistM(sg)||0)) + 'm, 원래 속도 ' + (Math.round((_busLegKmh(sg)||0)*10)/10) + 'km/h)');
+      moveDur = _fx;
+      sg._fixedDur = _fx + wait;      // 구간 총 시간도 함께 바로잡는다
+    }
+  }
 
   // ★ ①순위: 정류장 객체가 실측 시간을 직접 들고 오면 그걸 그대로 쓴다.
   //   (TAGO 등에서 받아 쌓은 정류장별 소요시간이 있으면 추정보다 항상 정확하다)
@@ -5635,6 +5721,40 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
        _nm(p.stops[p.stops.length-1].stationName)===_nm(c.stops[0].stationName))
       c.stops=c.stops.slice(1);
   }
+  // ★ 버스 구간 소요시간 실측 검증 — 시각을 쌓기 전에 바로잡는다.
+  //   워커(route-v2)가 준 sectionTime 이 정류장 좌표로 잰 거리와 크게 어긋나면
+  //   (예: 한진→테크노파크 순환43 이 카카오 21분인데 45분으로 옴)
+  //   실측 거리 기준으로 다시 계산한다. 정류장 중복 제거 뒤에 해야 정확하다.
+  window._busFixLog = [];
+  for(var bi=0;bi<segs.length;bi++){
+    var _bs = segs[bi];
+    if(_bs.type !== 2) continue;
+    // ★ 보정 여부와 무관하게 전 구간을 기록한다(전수조사용)
+    var _mk = (typeof _busLegKmh==='function') ? _busLegKmh(_bs) : null;
+    var _md = (typeof _busLegDistM==='function') ? _busLegDistM(_bs) : null;
+    if(_mk != null){
+      window._busSurvey = window._busSurvey || [];
+      window._busSurvey.push({ line:_bs.name||'', stops:(_bs.stops||[]).length,
+        distM:Math.round(_md||0), min:Math.round(_bs.dur/60),
+        kmh:Math.round(_mk*10)/10, at:Date.now() });
+      if(window._busSurvey.length > 100) window._busSurvey.shift();
+    }
+    var _fx = (typeof _busLegFixSec==='function') ? _busLegFixSec(_bs) : null;
+    if(_fx == null) continue;
+    var _bw = (_bs.waitSec != null && isFinite(_bs.waitSec))
+              ? Math.max(0, Math.min(parseFloat(_bs.waitSec), _bs.dur * 0.6)) : 0;
+    window._busFixLog.push({
+      line: _bs.name || '', stops: (_bs.stops||[]).length,
+      distM: Math.round(_busLegDistM(_bs) || 0),
+      wasMin: Math.round(_bs.dur/60), nowMin: Math.round((_fx + _bw)/60),
+      kmh: Math.round((_busLegKmh(_bs)||0)*10)/10
+    });
+    console.log('[버스] ' + (_bs.name||'') + ' ' + Math.round(_bs.dur/60) + '분 → '
+      + Math.round((_fx+_bw)/60) + '분 (정류장 ' + (_bs.stops||[]).length + '개, 실측 '
+      + Math.round(_busLegDistM(_bs)||0) + 'm, 워커 속도 ' + (Math.round((_busLegKmh(_bs)||0)*10)/10) + 'km/h)');
+    _bs.dur = _fx + _bw;
+  }
+
   for(var wi=0;wi<segs.length;wi++){
     if(segs[wi].type!==3) continue;
     var ps=null,ns=null;
