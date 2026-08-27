@@ -36137,6 +36137,153 @@ window.startShopTimer=startShopTimer;
 
 // ── 커뮤니티 ────────────────────────────────────────────────
 var _commFilter='all';
+
+// ══════════════════════════════════════════════════════════════════
+// ★ 커뮤니티 탭 좌우 스와이프 전환 (2026-08-26)
+//   · 상단 탭 순서: 실시간소통 → 게시판 → 뉴스 → 설정
+//   · 뉴스 탭 안에서는 '카테고리'가 스와이프 단위가 된다
+//       전체 → 증시 → 경제 → 사회 → 정치 → 연예 → 스포츠 → IT
+//     ★ 마지막 IT 에서 왼쪽으로 밀어도 설정으로 넘어가지 않는다. 거기서 멈춘다.
+//       (첫 카테고리에서 오른쪽도 마찬가지로 멈춘다 — 뉴스 안에 머문다)
+//   · 세로 스크롤·가로 스크롤(칩 바)·입력창·버튼과 충돌하지 않게 판정한다.
+// ══════════════════════════════════════════════════════════════════
+var _SWIPE_MIN_PX   = 55;    // 이만큼은 밀어야 전환
+var _SWIPE_MAX_OFF  = 40;    // 세로로 이만큼 넘게 흔들리면 스크롤로 본다
+var _SWIPE_MAX_MS   = 700;   // 너무 느린 동작은 무시
+var _swipe = null;
+
+// 지금 어떤 커뮤니티 탭이 열려 있나
+function _commCurTab(){
+  try{
+    var cv  = document.getElementById('chatTabView');
+    var stv = document.getElementById('settingsTabView');
+    if(cv  && cv.style.display  !== 'none' && cv.style.display  !== '') return 'chat';
+    if(stv && stv.style.display !== 'none') return 'settings';
+    return (_commFilter === '뉴스') ? 'news' : 'board';
+  }catch(e){ return 'board'; }
+}
+
+// 탭 전환 — 칩을 실제로 눌렀을 때와 같은 경로를 탄다(활성 표시까지 맞음)
+function _commGoTab(name){
+  try{
+    var row = document.getElementById('filterRow');
+    if(!row) return;
+    var chips = row.querySelectorAll('.chip');
+    if(name === 'chat')     { if(typeof showChatTab==='function')     showChatTab(chips[0]); return; }
+    if(name === 'board')    { if(typeof filterCat==='function')       filterCat(chips[1], 'all'); return; }
+    if(name === 'news')     { if(typeof filterCat==='function')       filterCat(chips[2], '뉴스'); return; }
+    if(name === 'settings') { if(typeof showSettingsTab==='function') showSettingsTab(chips[3]); return; }
+  }catch(e){}
+}
+
+// 뉴스 카테고리를 한 칸 옮긴다. 끝이면 false(=아무것도 안 함).
+function _newsCatStep(dir){
+  try{
+    var cats = (typeof _NEWS_CATS !== 'undefined') ? _NEWS_CATS
+             : ['전체','사회','정치','경제','연예','스포츠','IT'];
+    var cur = cats.indexOf(_newsCatSel);
+    if(cur < 0) cur = 0;
+    var nx = cur + dir;
+    if(nx < 0 || nx >= cats.length) return false;      // ★ 양 끝에서 멈춘다
+    _newsCatSel = cats[nx];
+    var list = document.getElementById('commList');
+    if(list && typeof _renderNewsTab === 'function') _renderNewsTab(list);
+    // 선택된 칩이 보이도록 칩 바를 스크롤
+    try{
+      var bar = document.getElementById('newsCatBar');
+      if(bar){
+        var b = bar.querySelector('.news-cat-chip[data-cat="' + _newsCatSel + '"]');
+        if(b && b.scrollIntoView) b.scrollIntoView({ inline:'center', block:'nearest' });
+      }
+    }catch(e){}
+    // 목록은 맨 위부터
+    try{ var sv=document.getElementById('commScrollView'); if(sv) sv.scrollTop=0; }catch(e){}
+    return true;
+  }catch(e){ return false; }
+}
+
+// dir: -1 = 왼쪽으로 밈(다음), +1 = 오른쪽으로 밈(이전)
+function _commSwipeStep(dir){
+  var cur = _commCurTab();
+  // 뉴스 탭이면 카테고리가 우선 — 끝에 닿으면 그대로 멈춘다(탭을 넘기지 않는다)
+  if(cur === 'news'){ _newsCatStep(-dir); return; }
+  var order = ['chat', 'board', 'news', 'settings'];
+  var i = order.indexOf(cur);
+  if(i < 0) return;
+  var nx = i - dir;                       // 왼쪽으로 밀면 다음 탭
+  if(nx < 0 || nx >= order.length) return;
+  // 게시판 → 왼쪽 → 뉴스로 들어갈 때는 첫 카테고리부터
+  if(order[nx] === 'news' && dir === -1) _newsCatSel = '전체';
+  // 설정 → 오른쪽 → 뉴스로 돌아올 때는 마지막 카테고리
+  if(order[nx] === 'news' && dir === 1){
+    var cats = (typeof _NEWS_CATS !== 'undefined') ? _NEWS_CATS : null;
+    if(cats && cats.length) _newsCatSel = cats[cats.length-1];
+  }
+  _commGoTab(order[nx]);
+}
+window._commSwipeStep = _commSwipeStep;
+
+// 이 지점에서 시작한 스와이프는 무시한다 (가로로 움직이는 것들)
+function _swipeBlocked(el){
+  try{
+    for(var n = el; n && n !== document.body; n = n.parentNode){
+      if(n.nodeType !== 1) continue;
+      var tag = (n.tagName || '').toLowerCase();
+      if(tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button') return true;
+      var id = n.id || '';
+      if(id === 'newsCatBar' || id === 'filterRow') return true;   // 칩 바는 가로 스크롤
+      // 가로로 스크롤되는 영역(지도·가로 목록 등)
+      try{
+        var ov = window.getComputedStyle(n).overflowX;
+        if((ov === 'auto' || ov === 'scroll') && n.scrollWidth > n.clientWidth + 4) return true;
+      }catch(e){}
+      if(n.classList && (n.classList.contains('leaflet-container'))) return true;
+    }
+  }catch(e){}
+  return false;
+}
+
+function _commSwipeInit(){
+  var host = document.getElementById('tab-community');
+  if(!host || host._swipeOn) return;
+  host._swipeOn = true;
+
+  host.addEventListener('touchstart', function(e){
+    if(!e.touches || e.touches.length !== 1){ _swipe = null; return; }
+    if(_swipeBlocked(e.target)){ _swipe = null; return; }
+    var t = e.touches[0];
+    _swipe = { x:t.clientX, y:t.clientY, t:Date.now(), off:false };
+  }, { passive:true });
+
+  host.addEventListener('touchmove', function(e){
+    if(!_swipe || !e.touches || e.touches.length !== 1) return;
+    var t = e.touches[0];
+    if(Math.abs(t.clientY - _swipe.y) > _SWIPE_MAX_OFF) _swipe.off = true;  // 세로 스크롤로 판정
+  }, { passive:true });
+
+  host.addEventListener('touchend', function(e){
+    var sw = _swipe; _swipe = null;
+    if(!sw || sw.off) return;
+    if(Date.now() - sw.t > _SWIPE_MAX_MS) return;
+    var t = (e.changedTouches && e.changedTouches[0]);
+    if(!t) return;
+    var dx = t.clientX - sw.x;
+    var dy = t.clientY - sw.y;
+    if(Math.abs(dx) < _SWIPE_MIN_PX) return;
+    if(Math.abs(dx) < Math.abs(dy) * 1.5) return;    // 대각선은 무시
+    _commSwipeStep(dx < 0 ? -1 : 1);
+  }, { passive:true });
+
+  host.addEventListener('touchcancel', function(){ _swipe = null; }, { passive:true });
+}
+window._commSwipeInit = _commSwipeInit;
+
+try{
+  if(document.readyState === 'loading')
+    document.addEventListener('DOMContentLoaded', _commSwipeInit);
+  else _commSwipeInit();
+}catch(e){}
+
 function filterCat(el,cat){
   _commFilter=cat;
   // 뉴스 탭이 아니면 카테고리 칩 바를 숨긴다 (고정 헤더에 있으므로 직접 제어)
