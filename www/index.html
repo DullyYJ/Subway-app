@@ -5537,13 +5537,27 @@ function _zeroBase(a){
 //   D1의 정류장 순서·좌표가 꼬이면 거리가 부풀고 시간이 통째로 커진다.
 //   → 앱이 받은 정류장 좌표로 구간 거리를 직접 재서 교차검증한다.
 //     워커 값이 실측과 크게 어긋나면 실측 기준으로 바로잡는다.
-// ★ 임계값은 보수적으로 — 잘못 '고치는' 게 그냥 두는 것보다 나쁘다.
-//   도심 정체 구간은 실제로 10~12km/h 까지 떨어지므로 그건 건드리지 않는다.
-//   스크린샷 사례(순환43)는 8km/h대라 이 기준에 걸린다.
-var _BUS_KMH_LOW   = 9;     // 이보다 느리면 워커 값이 과대
-var _BUS_KMH_HIGH  = 45;    // 이보다 빠르면 과소
-var _BUS_KMH_FIX   = 19;    // 바로잡을 때 쓰는 도심 버스 평균속도
-var _BUS_MIN_STOPS = 3;     // 정류장이 이보다 적으면 판단하지 않는다
+// ★ 판정은 '속도 범위'가 아니라 route-v2 와 같은 모델로 한다.
+//   속도만 보면 정류장이 촘촘한 구간(간격 100m)은 정상인데도 느리게 나와 오탐이 난다.
+//   같은 식(정류장당 고정비용 + 거리÷순항속도)으로 기대치를 구해 비율로 비교하면
+//   간격이 촘촘하든 성기든 정확히 맞는다.
+var _BUS_STOP_SEC   = 30;    // 워커의 BUS_STOP_SEC 과 같은 값
+var _BUS_CRUISE_MPS = 5.6;   // 워커의 BUS_CRUISE_MPS 과 같은 값
+var _BUS_DEV_RATIO  = 1.6;   // 기대치의 이 배수를 벗어나면 워커 값이 깨진 것으로 본다
+var _BUS_MIN_STOPS  = 3;     // 정류장이 이보다 적으면 판단하지 않는다
+
+// 이 구간이 걸릴 만한 주행시간(초) — 워커와 같은 규칙
+function _busLegExpectSec(sg){
+  var dist = _busLegDistM(sg);
+  if(dist == null || dist <= 0) return null;
+  var gaps = ((sg.stops||[]).length - 1);
+  if(gaps < 1) return null;
+  var v = _BUS_CRUISE_MPS;
+  var rt = String(sg.routeType || '');
+  if(/직행좌석|광역급행|급행|광역|좌석|공항/.test(rt)) v *= 1.4;
+  return gaps * _BUS_STOP_SEC + dist / v;
+}
+window._busLegExpectSec = _busLegExpectSec;
 
 // 정류장을 이어 만든 구간 거리(m). 좌표가 하나라도 없으면 null.
 function _busLegDistM(sg){
@@ -5585,14 +5599,15 @@ function _busLegFixSec(sg){
     if(!sg || sg.type !== 2) return null;
     var st = sg.stops || [];
     if(st.length < _BUS_MIN_STOPS) return null;
-    var kmh = _busLegKmh(sg);
-    if(kmh == null) return null;
-    if(kmh >= _BUS_KMH_LOW && kmh <= _BUS_KMH_HIGH) return null;   // 그럴듯하면 그대로
-    var dist = _busLegDistM(sg);
-    var mid  = (st.length - 2 > 0) ? (st.length - 2) : 0;
-    var fixed = (dist / (_BUS_KMH_FIX / 3.6)) + (mid * _BUS_DWELL_SEC);
-    if(!isFinite(fixed) || fixed <= 0) return null;
-    return fixed;
+    var expect = _busLegExpectSec(sg);
+    if(expect == null || expect <= 0) return null;
+    var dur = sg.dur || 0;
+    var wait = (sg.waitSec != null && isFinite(sg.waitSec)) ? Math.max(0, sg.waitSec) : 0;
+    var move = dur - wait;
+    if(move <= 0) return null;
+    var ratio = move / expect;
+    if(ratio <= _BUS_DEV_RATIO && ratio >= 1/_BUS_DEV_RATIO) return null;   // 그럴듯하면 그대로
+    return expect;
   }catch(e){ return null; }
 }
 window._busLegFixSec = _busLegFixSec;
@@ -7280,6 +7295,26 @@ function fmapDoRoute() {
     // 자체 경로엔진(route-v2): 1회 호출로 3모드(minTime/minTransfer/minWalk) 반환
     var urls = [ _routeV2Url(_coordQs + (rtw ? ('&rtw=' + encodeURIComponent(rtw)) : '')) ];
 
+    // ★ 즐겨찾기 정류장에서 타는 경로를 후보에 함께 넣는다 (2026-08-26)
+    //   주변에 정류장이 여럿이면 사람마다 늘 쓰는 곳이 있다. 예전에는
+    //   '이미 나온 후보 중에 즐겨찾기 승차가 있으면 감면'만 했기 때문에,
+    //   엔진이 그 정류장 경로를 애초에 안 내놓으면 아무 소용이 없었다.
+    //   → 즐겨찾기 정류장을 출발점으로 한 번 더 물어 후보 자체를 만든다.
+    var _favUsed = null;
+    try{
+      var _fs = (typeof _favStopsNear==='function')
+                ? _favStopsNear(start.lat, start.lng, (typeof _FAV_RADIUS_M!=='undefined' ? _FAV_RADIUS_M : 500))
+                : [];
+      if(_fs && _fs.length){
+        _favUsed = _fs[0];
+        urls.push(_routeV2Url('SX=' + _favUsed.lo + '&SY=' + _favUsed.la
+          + '&EX=' + dest.lng + '&EY=' + dest.lat
+          + (rtw ? ('&rtw=' + encodeURIComponent(rtw)) : '')));
+        console.log('[즐겨찾기] ' + _favUsed.nodenm + ' 기준 경로도 함께 탐색 (도보 '
+          + Math.round(_favUsed.d) + 'm)');
+      }
+    }catch(e){}
+
     Promise.all(urls.map(function(url) {
       return fetch(url).then(function(r){ return r.json(); }).catch(function(){ return null; });
     }))
@@ -7290,10 +7325,25 @@ function fmapDoRoute() {
 
       // 모든 path 합치기
       var allPaths = [];
-      results.forEach(function(data) {
-        if(data && data.result && data.result.path) {
-          allPaths = allPaths.concat(data.result.path);
+      results.forEach(function(data, ri) {
+        if(!(data && data.result && data.result.path)) return;
+        var ps = data.result.path;
+        // ★ 두 번째 요청은 즐겨찾기 정류장에서 출발한 경로다.
+        //   집에서 그 정류장까지 걸어가는 시간이 빠져 있으므로 더해서 공정하게 비교한다.
+        if(ri > 0 && _favUsed){
+          var walkMin = Math.max(1, Math.round((_favUsed.d || 0) / 1.2 / 60));   // 1.2m/s
+          ps = ps.map(function(p){
+            try{
+              p = JSON.parse(JSON.stringify(p));
+              p.info = p.info || {};
+              if(p.info.totalTime != null) p.info.totalTime += walkMin;
+              p._favOrigin = _favUsed.nodenm;
+              p._favWalkMin = walkMin;
+            }catch(e){}
+            return p;
+          });
         }
+        allPaths = allPaths.concat(ps);
       });
 
       // 중복 제거 (totalTime 기준)
@@ -7316,23 +7366,31 @@ function fmapDoRoute() {
       var _rankStep = _rtwDone > 0
         ? function(paths, cb){ console.log('[순위] 엔진이 실시간 반영함(' + _rtwDone + '개 노선) → 앱 재순위 생략'); cb(); }
         : _applyRealtimeWaits;
+
+      // ★ 노선도가 늦게 뜼던 이유: 재순위(_applyRealtimeWaits, 최대 3.5초)가
+      //   끝나야 비로서 그렸다. 앞단 실시간 대기 수집(1.5초)까지 합치면
+      //   경로가 다 왔는데도 화면이 5초가까이 비어 있었다.
+      //   → 기본 순위로 **먼저 그리고**, 재순위 결과가 오면 그때 다시 그린다.
+      var _drawOnce = function(first){
+        if(_routeStale()) return;
+        var _cd = { result: { path: allPaths } };
+        window._favSearchStart = start;
+        if(first) window._favToastKey = null;
+        _allRouteResults = _parseODsayAllOptions(_cd);
+        window._routeResultReady = _reqToken;
+        var tabDiv = document.getElementById('routeOptionTabs');
+        if(tabDiv) tabDiv.style.display = 'flex';
+        var fr = _allRouteResults ? _allRouteResults.fast : null;
+        var rd = fr ? { routes: [_convertSinglePathToRoute(fr)] } : _convertODsayToRoutes(_cd);
+        _renderTransitResultCard(rd, start, dest, 'route-v2');
+        return true;
+      };
+      _drawOnce(true);     // 즉시 1차 렌더 — 노선도가 바로 보인다
+
       _rankStep(allPaths, function(){
       if(_routeStale()) return;
-      // 통합 데이터로 옵션 파싱
-      var combinedData = { result: { path: allPaths } };
-      window._favSearchStart = start;          // ★ 즐겨찾기 정류장 반경 판정 기준 출발지
-      window._favToastKey = null;
-      _allRouteResults = _parseODsayAllOptions(combinedData);
-      window._routeResultReady = _reqToken;        // 결과 준비 완료 표시
-
-      // 경로 탭 표시
-      var tabDiv = document.getElementById('routeOptionTabs');
-      if(tabDiv) tabDiv.style.display = 'flex';
-
-      // 기본: 최단시간
-      var fastRoute = _allRouteResults ? _allRouteResults.fast : null;
-      var routeData = fastRoute ? { routes: [_convertSinglePathToRoute(fastRoute)] } : _convertODsayToRoutes(combinedData);
-      _renderTransitResultCard(routeData, start, dest, 'route-v2');
+      // 재순위 결과 반영 — 순서가 바뀌었을 수 있으므로 다시 그린다
+      _drawOnce(false);
 
       // ★ 미탑승 재동기화: 확정 경로였다면 같은 유형으로 다시 확정 (시각표만 다음 차편)
       if(window._relockAfterReroute){
@@ -11144,6 +11202,24 @@ window._updateTransitGps = _updateTransitGps;
 // ══════════════════════════════════════════════════════════════
 var _savedBusStops = [];  // 저장된 버스 정류장 목록
 
+// ★ 2026-08-26: 앱 시작 즉시 복원한다.
+//   예전엔 loadMapBusStops() 안에서만 복원해서, **노선도 > 버스 탭을
+//   한 번도 안 열면 _savedBusStops 가 빈 배열**이었다.
+//   그 상태로 홈에서 경로를 탐색하면 즐겨찾기 정류장이 없는 것과 같아서
+//   감면도 우선선택도 전혀 안 먹었다 — '재시작하면 풀린다'고 느낀 원인.
+function _loadSavedBusStops(){
+  try{
+    var saved = localStorage.getItem('savedBusStops');
+    if(saved){
+      var arr = JSON.parse(saved);
+      if(Array.isArray(arr)) _savedBusStops = arr;
+    }
+  }catch(e){}
+  return _savedBusStops;
+}
+window._loadSavedBusStops = _loadSavedBusStops;
+_loadSavedBusStops();
+
 // 내부 탭 전환
 function switchMapInnerTab(tab) {
   var subway = document.getElementById('mapSubwayPanel');
@@ -11186,11 +11262,8 @@ window.saveMapBusStop = saveMapBusStop;
 
 // 저장된 버스 정류장 로드
 function loadMapBusStops() {
-  // localStorage에서 복원
-  try {
-    var saved = localStorage.getItem('savedBusStops');
-    if(saved) _savedBusStops = JSON.parse(saved);
-  } catch(e) {}
+  // localStorage에서 복원 (앱 시작 시 이미 불러왔지만 다른 탭에서 바뀌었을 수 있음)
+  if(typeof _loadSavedBusStops === 'function') _loadSavedBusStops();
 
   var listEl = document.getElementById('mapBusStopList');
   if(!listEl) return;
