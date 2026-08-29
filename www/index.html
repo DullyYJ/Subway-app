@@ -6452,20 +6452,55 @@ function _applyRealBoardTime(opts){
         var target=null, best=1e9;
         stops.forEach(function(st){ var snm=(typeof _nm==='function')?_nm(st.nodenm):st.nodenm; if(snm===wantNm && st.dist<best){ best=st.dist; target=st; } });
         if(!target) return;
-        _fetchBusArrival(target.citycode, target.nodeid, function(e2, data){
-          if(e2||!data) return;
-          var items = data.items || data.arrivals || data || [];
-          if(!Array.isArray(items)) items = items ? [items] : [];
-          var sec=null;
+        // ★ 정류장 카드와 같은 경로(_busArrFetchMerged)로 조회한다.
+        //   예전엔 _fetchBusArrival(기본 정류장만)을 써서, 이웃 정류장까지 병합해
+        //   보여주는 카드와 값이 달랐다(카드는 10분, 경로는 다른 값).
+        var _tgt = { nodeId: target.nodeid, nodeid: target.nodeid,
+                     cityCode: target.citycode, citycode: target.citycode,
+                     nodenm: target.nodenm, _src: target._src };
+        var _arrP = (typeof _busArrFetchMerged === 'function')
+          ? _busArrFetchMerged(target.citycode, _tgt)
+          : new Promise(function(res){
+              _fetchBusArrival(target.citycode, target.nodeid, function(e2, data){
+                if(e2||!data){ res([]); return; }
+                var it = data.items || data.arrivals || data || [];
+                res(Array.isArray(it) ? it : (it ? [it] : []));
+              });
+            });
+
+        _arrP.then(function(items){
+          items = items || [];
+          // 같은 노선의 도착 예정을 빠른 순으로 모은다
+          var secs = [];
           items.forEach(function(a){
             var rno=String(a.routeno||a.routeNo||'').replace(/\(.*?\)/g,'').replace(/번/g,'').trim();
-            if(rno && (rno===wantNo || (wantNo && wantNo.indexOf(rno)>=0) || (rno.indexOf(wantNo)>=0))){
-              var sv=parseInt(a.arrtime||a.arrTime||0)||0; if(sv>0 && (sec==null||sv<sec)) sec=sv;
-            }
+            if(!rno) return;
+            if(!(rno===wantNo || (wantNo && wantNo.indexOf(rno)>=0) || (rno.indexOf(wantNo)>=0))) return;
+            var sv=parseInt(a.arrtime||a.arrTime||0)||0;
+            if(sv>0) secs.push(sv);
           });
-          if(sec==null) return;
-          applyDelay(nowMin + sec/60, _allowEarlier);
-        });
+          if(!secs.length) return;
+          secs.sort(function(x,y){ return x-y; });
+
+          // ★ 여기가 핵심 버그였다.
+          //   예전: applyDelay(nowMin + sec/60)
+          //   arrtime(sec)은 '지금부터 몇 초 뒤'인데, nowMin 은 도보를 반영한
+          //   '내가 정류장에 닿는 예정 시각'이다. 둘을 더하면 **도보 시간이 두 번** 들어간다.
+          //   예) 지금 20:00, 도보 5분(ETA 20:05), 버스 10분 뒤(20:10) 도착
+          //       → 20:05 + 10 = 20:15 로 표시됐다. "버스는 10분 뒤인데 출발은 15분 후".
+          //   버스 도착 시각은 언제나 **현재 시각 + arrtime** 이다.
+          var _nowReal = (typeof kstMinutesAdj==='function')
+                       ? kstMinutesAdj()
+                       : (new Date().getHours()*60 + new Date().getMinutes());
+          var _buf = (typeof _BOARD_CATCH_BUFFER_MIN !== 'undefined') ? _BOARD_CATCH_BUFFER_MIN : 0.5;
+          var pick = null;
+          for(var si=0; si<secs.length; si++){
+            var arrMin = _nowReal + secs[si]/60;
+            if(arrMin >= nowMin + _buf){ pick = arrMin; break; }   // 내가 닿기 전에 떠나는 차는 제외
+          }
+          if(pick == null) return;
+          applyDelay(pick, _allowEarlier);
+        }, function(){});
       });
     } else if(nd.isSub){
       // ★ 실시간(도착정보 제공 노선)/시각표 분기를 _boardNextDep 하나로 통일.
@@ -8125,9 +8160,23 @@ window._computeAccessLeg = _computeAccessLeg;
 // 🚇 BFS 경로 → transitResultBox 렌더 브릿지
 // S.route(BFS 결과)를 _renderTransitResultCard 포맷으로 변환해서 표시
 // ══════════════════════════════════════════════════════════════
-function _renderBfsToTransitBox(start, dest) {
+function _renderBfsToTransitBox(start, dest, _try) {
+  // ★ 2026-08-26: 예전엔 여기서 그냥 return 했다.
+  //   주석엔 '재시도 대기'라고 적혀 있었지만 **재시도하는 코드가 없었다.**
+  //   호출자는 doRoute()를 100ms 뒤에, 이 함수를 600ms 뒤에 불렀는데
+  //   경로가 길면(예: 원흥→보평 138분) BFS가 500ms 안에 안 끝나서
+  //   그대로 사라졌다 — 노선도에서 역을 골랐을 때 경로가 안 나오던 원인.
   if(!S || !S.route || !S.route.path || !S.route.path.length) {
-    console.warn('[BFS→transit] S.route 없음, 재시도 대기');
+    var t = (_try || 0) + 1;
+    if(t <= 25) {                      // 200ms 간격 최대 5초
+      setTimeout(function(){
+        if(typeof _routeStale === 'function' && _routeStale()) return;
+        _renderBfsToTransitBox(start, dest, t);
+      }, 200);
+      return;
+    }
+    console.warn('[BFS→transit] S.route 가 끝내 준비되지 않음');
+    if(typeof toast === 'function') toast('경로를 불러오지 못했어요. 다시 시도해 주세요');
     return;
   }
 
@@ -13515,22 +13564,35 @@ function _busArrFetchMerged(cityCode, stop){
       var r = {}; arr.forEach(function(x){ if(x && x.routeno) r[String(x.routeno)] = 1; });
       return Object.keys(r).length;
     };
-    if(routeCount(items) >= 4 || stop._peerDone) return items;
-    stop._peerDone = 1;
-
-    return new Promise(function(resolve){
-      // ① 인접 시 등록분(TAGO) 병합
-      _busFindPeers(stop, function(peers){
+    // ★ 2026-08-27: 같은 정류장인데 노선이 나왔다 안 나왔다 하던 원인.
+    //   예전 조건: routeCount(items) >= 4 || stop._peerDone
+    //     · _peerDone 은 한 번 병합하면 정류장 객체에 계속 남아서,
+    //       **첫 조회만 이웃 정류장까지 병합하고 이후 갱신은 기본것만** 돌렸다.
+    //       그래서 처음엔 991·77·순혰1분83 이 다 보이다가 새로고침하면 77 만 남았다.
+    //     · routeCount >= 4 도 기본 응답 개수가 회차마다 달라져 같은 불안정을 만든다.
+    //   → 이웃 정류장 **목록만 캐시**하고 병합은 매번 한다. 결과가 항상 같다.
+    var _mergePeers = function(peers){
+      return new Promise(function(resolve){
         var merged = items.slice();
-        var afterPeers = function(){ resolve(uniq(merged)); };
-        if(!peers || !peers.length){ afterPeers(); return; }
+        if(!peers || !peers.length){ resolve(uniq(merged)); return; }
         var pending = peers.length;
+        var afterPeers = function(){ resolve(uniq(merged)); };
         peers.forEach(function(p){
           _busArrFetch(p.citycode || cityCode, p.nodeid).then(function(it2){
             merged = merged.concat(it2 || []);
             if(--pending <= 0) afterPeers();
           }, function(){ if(--pending <= 0) afterPeers(); });
         });
+      });
+    };
+
+    if(stop._peersCached) return _mergePeers(stop._peers);
+
+    return new Promise(function(resolve){
+      _busFindPeers(stop, function(peers){
+        stop._peers = peers || [];       // 목록은 바뀌지 않으므로 한 번만 찾는다
+        stop._peersCached = 1;
+        _mergePeers(stop._peers).then(resolve, function(){ resolve(uniq(items)); });
       });
     });
   });
@@ -13553,7 +13615,7 @@ function _busShowEmptyRow(cardIdx, msg, stop){
       + '<span class="kbus-retry" style="color:#2f7cf6;font-weight:700;cursor:pointer;">다시 시도 ›</span>';
     empty.querySelector('.kbus-retry').addEventListener('click', function(){
       empty.remove();
-      if(stop){ stop._idFixed = 0; stop._peerDone = 0; }
+      if(stop){ stop._idFixed = 0; stop._peersCached = 0; stop._peers = null; }
       _loadMapBusArrival(stop, cardIdx, 0);
     });
     card.appendChild(empty);
@@ -35409,6 +35471,47 @@ function _resetCongToWaiting(){
 window._resetCongToWaiting = _resetCongToWaiting;
 
 // ── 경로 결과 X 닫기: 경로 설정 전 대기상태로 완전 복귀 ──
+// ★ 경로 카드를 X 로 닫으면 처음 상태로 되돌린다 (2026-08-26)
+//   예전엔 카드만 숨기고 출발지·도착지 입력값과 노선도 하이라이트가 그대로 남아서,
+//   다음 탐색 때 이전 경로가 섞여 보였다.
+function _resetRouteInputs(){
+  try{
+    // 입력창 비우기 (홈 / 노선도 양쪽)
+    ['fmapStartInp','fmapDestInp','inpStart','inpDest'].forEach(function(id){
+      var el = document.getElementById(id);
+      if(el) el.value = '';
+    });
+    // 출발/도착 표시 되돌리기
+    var vs = document.getElementById('valStart'), ss = document.getElementById('subStart');
+    var vd = document.getElementById('valDest'),  sd = document.getElementById('subDest');
+    if(vs){ vs.textContent = '-'; vs.style.opacity = '0.6'; }
+    if(ss)  ss.textContent = '위에서 역 검색';
+    if(vd){ vd.textContent = '-'; vd.style.opacity = '0.6'; }
+    if(sd)  sd.textContent = '위에서 역 검색';
+    var sc = document.getElementById('routeSummaryCard');
+    if(sc) sc.style.display = 'none';
+    var sn = document.getElementById('setupNotice');
+    if(sn) sn.style.display = '';
+    // 상태 초기화
+    _fmapStart = null; _fmapDest = null;
+    if(typeof S !== 'undefined' && S){ S.start = null; S.dest = null; S.route = null; }
+    window._preferBoardStn = null;
+    window._routeLocked = false;
+    window._lockedRouteType = null;
+    window._relockAfterReroute = null;
+    window._favSearchStart = null;
+    _allRouteResults = null;
+    // 노선도 하이라이트·다음열차 폴링 정리
+    if(typeof clearRouteHighlight === 'function') clearRouteHighlight();
+    if(typeof stopNextTrainPolling === 'function') stopNextTrainPolling();
+    var nts = document.getElementById('nextTrainSection');
+    if(nts) nts.style.display = 'none';
+    var tabDiv = document.getElementById('routeOptionTabs');
+    if(tabDiv) tabDiv.style.display = 'none';
+  }catch(e){}
+}
+window._resetRouteInputs = _resetRouteInputs;
+
 function closeTransitResult(){
   // 1) GPS 추적 타이머 정지 (이게 살아있으면 혼잡도가 3초마다 다시 채워짐)
   try { if(typeof _transitGpsTimer !== 'undefined' && _transitGpsTimer){ clearInterval(_transitGpsTimer); _transitGpsTimer = null; } } catch(e){}
@@ -35427,6 +35530,8 @@ function closeTransitResult(){
   window._lastCongNodeIdx = -1;
   try { _transitResultDest = null; _transitResultStart = null; _transitResultData = null; window._journeyFromFixed = null; window._accessLeg = null; window._metroRouteMode = false;
     window._trackSig = null; window._markerMaxProg = null; _transitStartTime = null; } catch(e){}
+  // ★ 출발지·도착지 입력과 하이라이트까지 처음 상태로
+  _resetRouteInputs();
   try { if(typeof S !== 'undefined'){ S.dest = null; S.route = null; } } catch(e){}
   var rs = document.getElementById('routeStatus'); if(rs) rs.textContent = '설정 필요';
   // 5) AI 승무원 즉시 갱신 (경로 없음 브리핑)
