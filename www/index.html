@@ -14271,6 +14271,46 @@ window._bgDiag = async function(){
   add('플러그인 Browser: ' + (P.Browser ? 'O (뉴스 원문이 인앱으로 열림)' : 'X ← 없으면 외부 브라우저로 나감'));
   add('플러그인 AppLauncher: ' + (P.AppLauncher ? 'O (쿠팡 검색이 쿠팡 앱으로 열림)' : 'X ← 없으면 웹으로 열림'));
   add('플러그인 CellInfo: ' + (P.CellInfo ? 'O (지하 기지국 보조측위 동작)' : 'X ← 없으면 기능 꺼짐'));
+
+  // ★ 2026-08-30: 껐다 켜도 유지되는지 여기서 바로 확인할 수 있게
+  try{
+    var _pj = localStorage.getItem('commPosts');
+    if(_pj){
+      var _pa = JSON.parse(_pj);
+      var _age = (_pa && _pa.length && _pa[0].time)
+                 ? Math.round((Date.now() - _pa[0].time)/60000) + '분 전'
+                 : '?';
+      add('저장된 게시글: ' + (_pa ? _pa.length : 0) + '개 (최신 ' + _age + ')');
+    } else add('저장된 게시글: 없음 ← 아직 한 번도 저장 안 됨');
+  }catch(e){ add('저장된 게시글: 읽기 실패 (' + (e && e.message) + ')'); }
+
+  try{
+    var _tj = localStorage.getItem('liveTalk');
+    if(_tj){
+      var _ta = JSON.parse(_tj);
+      var _tage = (_ta && _ta.length && _ta[_ta.length-1].time)
+                  ? Math.round((Date.now() - _ta[_ta.length-1].time)/60000) + '분 전'
+                  : '?';
+      add('저장된 대화: ' + (_ta ? _ta.length : 0) + '줄 (마지막 ' + _tage + ')');
+    } else add('저장된 대화: 없음 ← 아직 한 번도 저장 안 됨');
+  }catch(e){ add('저장된 대화: 읽기 실패 (' + (e && e.message) + ')'); }
+
+  try{
+    add('현재 화면 대화: ' + ((typeof _LIVE_TALK!=='undefined' && _LIVE_TALK) ? _LIVE_TALK.length : 0) + '줄'
+        + ' · 게시글 ' + ((typeof _AI_POSTS!=='undefined' && _AI_POSTS) ? _AI_POSTS.length : 0) + '개');
+  }catch(e){}
+
+  try{
+    var _sc = localStorage.getItem('shopDataCache');
+    if(_sc){
+      var _so = JSON.parse(_sc), _cnt = 0;
+      ['WEEKDAY','WEEKEND'].forEach(function(k){
+        ((_so.data||{})[k]||[]).forEach(function(sl){ _cnt += (sl.items||[]).length; });
+      });
+      add('쇼핑 서버 상품: ' + _cnt + '개 (v' + (_so.version||'?') + ')');
+    } else add('쇼핑 서버 상품: 아직 못 받음 (내장 기본값 사용 중)');
+  }catch(e){}
+
   try{
     var _cm = (typeof _cellMap === 'function') ? _cellMap() : {};
     var _ck = Object.keys(_cm), _cr = _ck.filter(function(k){ return (_cm[k].n||0) >= _CELL_MIN_HITS; });
