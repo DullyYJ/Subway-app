@@ -7330,28 +7330,84 @@ function fmapDoRoute() {
     // 자체 경로엔진(route-v2): 1회 호출로 3모드(minTime/minTransfer/minWalk) 반환
     var urls = [ _routeV2Url(_coordQs + (rtw ? ('&rtw=' + encodeURIComponent(rtw)) : '')) ];
 
-    // ★ 즐겨찾기 정류장에서 타는 경로를 후보에 함께 넣는다 (2026-08-26)
-    //   주변에 정류장이 여럿이면 사람마다 늘 쓰는 곳이 있다. 예전에는
-    //   '이미 나온 후보 중에 즐겨찾기 승차가 있으면 감면'만 했기 때문에,
-    //   엔진이 그 정류장 경로를 애초에 안 내놓으면 아무 소용이 없었다.
-    //   → 즐겨찾기 정류장을 출발점으로 한 번 더 물어 후보 자체를 만든다.
-    var _favUsed = null;
+    // ★ 주변 정류장별로 후보를 넓힌다 (2026-08-27)
+    //   route-v2 는 Dijkstra 라 모드당 최적해 **하나씩**만 돌려주고,
+    //   승차 후보 정류장도 최근접 위주로 좀혀놓는다.
+    //   그래서 최단시간·최소환승이 결국 같은 경로로 나왔다.
+    //   카카오처럼 서로 다른 안을 보여주려면 **다른 정류장에서 타는 경로**를
+    //   같이 가져와야 한다 — 주변 정류장 몇 곳을 출발점으로 더 물어본다.
+    var _altOrigins = [];
     try{
+      // 즐겨찾기 정류장은 무조건 포함(사람마다 늘 쓰는 곳이 있다)
       var _fs = (typeof _favStopsNear==='function')
                 ? _favStopsNear(start.lat, start.lng, (typeof _FAV_RADIUS_M!=='undefined' ? _FAV_RADIUS_M : 500))
                 : [];
-      if(_fs && _fs.length){
-        _favUsed = _fs[0];
-        urls.push(_routeV2Url('SX=' + _favUsed.lo + '&SY=' + _favUsed.la
+      (_fs || []).slice(0, 1).forEach(function(f){
+        _altOrigins.push({ name: f.nodenm, la: f.la, lo: f.lo, d: f.d, fav: true });
+      });
+      // 그 밖에 반경 안의 정류장을 거리순으로 추가
+      // ★ 버스 탭에 뜨는 정류장 목록을 그대로 쓴다(사용자가 보는 것과 같아야 한다).
+      //   없으면 _collectRTW 가 채워둔 캐시로 폴백.
+      var _nc = window._nearStopsCache;
+      var _cached = (window._nearOrderedStops && window._nearOrderedStops.length)
+                    ? window._nearOrderedStops
+                    : ((_nc && _nc.stops) ? _nc.stops : []);
+      _cached.slice().sort(function(a,b){ return (a.dist||9e9)-(b.dist||9e9); }).forEach(function(st){
+        if(_altOrigins.length >= _ALT_ORIGIN_POOL) return;   // 모으는 단계 상한(재정렬 뒤 MAX 로 자른다)
+        var la = parseFloat(st.gpslati != null ? st.gpslati
+                  : (st.lat != null ? st.lat : st.gpsLati));
+        var lo = parseFloat(st.gpslong != null ? st.gpslong
+                  : (st.lng != null ? st.lng : (st.lon != null ? st.lon : st.gpsLong)));
+        if(!isFinite(la) || !isFinite(lo)) return;
+        var d = (typeof haversineM==='function') ? haversineM(start.lat, start.lng, la, lo) : 9e9;
+        if(d > _ALT_ORIGIN_RADIUS_M) return;
+        // ★ 중복 판정은 '정류장 신원'으로 한다.
+        //   거리로 묶으면(예: 80m) 길 건너 반대방향 정류장이 통째로 빠진다.
+        //   그 둘은 가는 방향이 달라서 경로가 완전히 달라지므로 반드시 각각 봐야 한다.
+        //   같은 ID이거나, 이름이 같으면서 25m 안일 때만 같은 곳으로 본다.
+        var _id = String(st.nodeid || st.nodeId || '');
+        var _nm2 = String(st.nodenm || st.nodeName || st.name || '').replace(/\s+/g,'');
+        for(var k=0;k<_altOrigins.length;k++){
+          var o = _altOrigins[k];
+          if(_id && o.id && _id === o.id) return;
+          if(_nm2 && o.nm === _nm2
+             && (typeof haversineM==='function' ? haversineM(o.la, o.lo, la, lo) : 9e9) < 25) return;
+        }
+        _altOrigins.push({ name: st.nodenm || st.nodeName || st.name || '',
+                           id: _id, nm: _nm2, la: la, lo: lo, d: d, fav: false });
+      });
+      // ★ 같은 이름(상·하행 쌍)은 방향이 맞아 보이는 쪽을 먼저 물어본다
+      _altOrigins = _orderByDirection(_altOrigins, start, dest);
+      if(_altOrigins.length > _ALT_ORIGIN_MAX) _altOrigins = _altOrigins.slice(0, _ALT_ORIGIN_MAX);
+      _altOrigins.forEach(function(o){
+        urls.push(_routeV2Url('SX=' + o.lo + '&SY=' + o.la
           + '&EX=' + dest.lng + '&EY=' + dest.lat
           + (rtw ? ('&rtw=' + encodeURIComponent(rtw)) : '')));
-        console.log('[즐겨찾기] ' + _favUsed.nodenm + ' 기준 경로도 함께 탐색 (도보 '
-          + Math.round(_favUsed.d) + 'm)');
+      });
+      if(_altOrigins.length){
+        console.log('[다양화] 주변 정류장 ' + _altOrigins.length + '곳 기준 경로도 함께 탐색: '
+          + _altOrigins.map(function(o){ return o.name + '(' + Math.round(o.d) + 'm' + (o.fav?',★':'') + ')'; }).join(', '));
       }
     }catch(e){}
 
-    Promise.all(urls.map(function(url) {
-      return fetch(url).then(function(r){ return r.json(); }).catch(function(){ return null; });
+    // ★ 요청마다 타임아웃을 건다 (2026-08-27)
+    //   예전엔 fetch 에 타임아웃이 없어서, 주변 정류장까지 여러 곳을 물을 때
+    //   **하나만 응답이 안 와도 Promise.all 이 영영 안 끝났다.**
+    //   그러면 카드가 안 그려지고, 6초 워치독이 재탐색을 걸어 요청이 배로 늘었다.
+    //   내 위치 기준(첫 번째)은 넉넉히, 주변 정류장 대안은 짧게 — 늦으면 그냥 뺀다.
+    var _fetchJson = function(url, ms){
+      return new Promise(function(res){
+        var done = false;
+        var t = setTimeout(function(){ if(!done){ done = true; res(null); } }, ms);
+        fetch(url).then(function(r){ return r.json(); }).then(function(j){
+          if(done) return; done = true; clearTimeout(t); res(j);
+        }).catch(function(){
+          if(done) return; done = true; clearTimeout(t); res(null);
+        });
+      });
+    };
+    Promise.all(urls.map(function(url, ui) {
+      return _fetchJson(url, ui === 0 ? _ROUTE_MAIN_TIMEOUT : _ROUTE_ALT_TIMEOUT);
     }))
     .then(function(results) {
       // ★ 더 새로운 결과가 이미 그려졌으면 이 응답은 버린다 (오래된 경로 표시 방지)
@@ -7363,23 +7419,28 @@ function fmapDoRoute() {
       results.forEach(function(data, ri) {
         if(!(data && data.result && data.result.path)) return;
         var ps = data.result.path;
-        // ★ 두 번째 요청은 즐겨찾기 정류장에서 출발한 경로다.
-        //   집에서 그 정류장까지 걸어가는 시간이 빠져 있으므로 더해서 공정하게 비교한다.
-        if(ri > 0 && _favUsed){
-          var walkMin = Math.max(1, Math.round((_favUsed.d || 0) / 1.2 / 60));   // 1.2m/s
+        // ★ 첫 번째는 내 위치 기준, 나머지는 주변 정류장 기준이다.
+        //   그 정류장까지 걸어가는 시간이 빠져 있으므로 더해야 공정하게 비교된다.
+        var org = (ri > 0) ? _altOrigins[ri - 1] : null;
+        if(org){
+          var walkMin = Math.max(1, Math.round((org.d || 0) / 1.2 / 60));   // 1.2m/s
           ps = ps.map(function(p){
             try{
               p = JSON.parse(JSON.stringify(p));
               p.info = p.info || {};
               if(p.info.totalTime != null) p.info.totalTime += walkMin;
-              p._favOrigin = _favUsed.nodenm;
-              p._favWalkMin = walkMin;
+              p._altOrigin = org.name;
+              p._altWalkMin = walkMin;
+              if(org.fav) p._favOrigin = org.name;
             }catch(e){}
             return p;
           });
         }
         allPaths = allPaths.concat(ps);
       });
+
+      // ★ 같은 경로가 여러 번 들어오므로 중복을 개다 (노선·승하차 조합이 같으면 한 개)
+      allPaths = _dedupPaths(allPaths);
 
       // 중복 제거 (totalTime 기준)
       var seen = {};
@@ -7415,6 +7476,8 @@ function fmapDoRoute() {
         window._routeResultReady = _reqToken;
         var tabDiv = document.getElementById('routeOptionTabs');
         if(tabDiv) tabDiv.style.display = 'flex';
+        // ★ 처음 그릴 때도 현재 보고 있는 탭을 표시
+        try{ _highlightRouteTab(window._pendingRouteType || 'fast'); }catch(e){}
         var fr = _allRouteResults ? _allRouteResults.fast : null;
         var rd = fr ? { routes: [_convertSinglePathToRoute(fr)] } : _convertODsayToRoutes(_cd);
         _renderTransitResultCard(rd, start, dest, 'route-v2');
@@ -7597,6 +7660,118 @@ function _rtwBuild(bag){
 window._collectRTW = _collectRTW;
 window._rtwBuild   = _rtwBuild;
 
+// ★ 같은 이름 정류장의 방향 가리기 (2026-08-27)
+//   같은 이름이 둘 있으면 대개 상·하행 쌍이다. 목적지 반대편으로 가는 쪽까지
+//   경로를 물어보는 건 낭비다. 그렇다고 무조건 하나를 버리면,
+//   **같은 이름인데 실제로는 같은 방향인 경우**(연속 정류장·회차 구간)를 놓친다.
+//   → 버리지 않고 '순서'를 정한다. 방향이 맞아 보이는 쪽을 먼저 물어보고,
+//     남은 형제는 요청 여력이 있을 때만 뒤에 붙인다.
+//
+//   판정 근거(있는 것부터):
+//     ① updowncd (상행0/하행1) — 노선 경유정류소에서 올 때만 있다
+//     ② 도착정보의 방면 이름(dirName)이 목적지 이름과 겹치는가
+//     ③ 기하: 형제 정류장 대비 목적지 쪽으로 치우친 쪽
+//        (왕복 노선은 도로 양옆에 서므로, 목적지 방향으로 밀린 쪽이 대체로 맞다)
+function _stopDirScore(st, sibling, start, dest){
+  var sc = 0;
+  try{
+    // ② 방면 라벨에 목적지 이름이 들어 있으면 강한 신호
+    var dn = String(st.dirName || st._dirName || '').replace(/\s+/g,'');
+    var dnm = String((dest && (dest.name || dest.nodenm)) || '').replace(/\s+/g,'').replace(/역$/,'');
+    //   라벨은 실제 운행 방향이라 기하 추정보다 훨씬 믿을 만하다 → 결정적 가중치
+    if(dn && dnm && dn.indexOf(dnm) >= 0) sc += 1000;
+
+    if(!sibling || !start || !dest) return sc;
+
+    // ③ 기하: start→dest 방향 벡터에, (형제→나) 벡터를 투영
+    //   결과 단위는 대략 '목적지 쪽으로 밀린 미터'다. 상·하행 쌍은 보통 수십 m라
+    //   ±300 으로 잘라 둔다 — 안 자르면 멀리 떨어진 동명 정류장의 기하 점수가
+    //   ②의 방면 라벨을 덮어써서, 라벨이 있는데도 엉뚱한 쪽이 먼저 뽑힌다.
+    var kx = Math.cos(start.lat * Math.PI / 180);
+    var vx = (dest.lng - start.lng) * kx, vy = (dest.lat - start.lat);
+    var vlen = Math.sqrt(vx*vx + vy*vy) || 1;
+    var wx = (st.lo - sibling.lo) * kx, wy = (st.la - sibling.la);
+    var geo = ((vx*wx + vy*wy) / vlen) * 1e5 / 0.9;   // ≈ 미터
+    sc += Math.max(-300, Math.min(300, geo));
+  }catch(e){}
+  return sc;
+}
+window._stopDirScore = _stopDirScore;
+
+// 후보 목록을 '이름 그룹당 대표 먼저, 형제는 뒤로' 순서로 재배열한다.
+function _orderByDirection(list, start, dest){
+  try{
+    var groups = {}, order = [];
+    list.forEach(function(o){
+      var key = o.nm || o.name || ('#' + order.length);
+      if(!groups[key]){ groups[key] = []; order.push(key); }
+      groups[key].push(o);
+    });
+    var firsts = [], rest = [];
+    order.forEach(function(key){
+      var g = groups[key];
+      if(g.length === 1){ firsts.push(g[0]); return; }
+      // 같은 이름이 여럿 — 방향 점수가 높은 순으로
+      g.forEach(function(o){
+        var sib = g.find(function(x){ return x !== o; }) || null;
+        o._dirScore = _stopDirScore(o, sib, start, dest);
+      });
+      g.sort(function(a,b){
+        var d = (b._dirScore||0) - (a._dirScore||0);
+        if(d) return d;
+        return (a.d||0) - (b.d||0);
+      });
+      // 즐겨찾기는 방향과 무관하게 대표로 (사용자가 늘 쓰는 곳)
+      var favIdx = g.findIndex(function(x){ return x.fav; });
+      if(favIdx > 0){ var f = g.splice(favIdx,1)[0]; g.unshift(f); }
+      firsts.push(g[0]);
+      for(var i=1;i<g.length;i++) rest.push(g[i]);
+    });
+    firsts.sort(function(a,b){ return (a.d||0) - (b.d||0); });
+    rest.sort(function(a,b){ return (a.d||0) - (b.d||0); });
+    return firsts.concat(rest);
+  }catch(e){ return list; }
+}
+window._orderByDirection = _orderByDirection;
+
+// ★ 후보 다양화 설정 (2026-08-27)
+//   기준은 **버스 탭에 실제로 뜨는 주변 정류장 전부**다(window._nearOrderedStops).
+//   그게 사용자가 눈으로 보는 목록이고, 거기서 타는 경로가 다 나와야 한다.
+var _ALT_ORIGIN_MAX      = 8;     // 안전 상한(요청 수 폭주 방지) — 보통 목록이 6개 안팎
+var _ALT_ORIGIN_POOL     = 16;    // 방향 판정 전에 모아두는 후보 수
+var _ALT_ORIGIN_RADIUS_M = 1200;  // 버스 탭 목록이 잡는 범위를 덮는 값
+var _ROUTE_MAIN_TIMEOUT  = 9000;  // 내 위치 기준 경로 — 이건 기다린다
+var _ROUTE_ALT_TIMEOUT   = 4500;  // 주변 정류장 대안 — 늦으면 빼고 진행
+
+// 경로 서명 — 이용 노선과 승·하차 지점이 같으면 같은 경로로 본다
+function _pathSig(p){
+  try{
+    return (p.subPath || []).filter(function(sp){ return sp.trafficType !== 3; })
+      .map(function(sp){
+        var lane = (sp.lane && sp.lane[0]) || {};
+        var no = lane.busNo || lane.name || lane.subwayCode || '';
+        return sp.trafficType + ':' + no + ':' + (sp.startName||'') + '>' + (sp.endName||'');
+      }).join('|');
+  }catch(e){ return Math.random().toString(); }
+}
+window._pathSig = _pathSig;
+
+// 같은 서명이면 총 소요시간이 짧은 쪽만 남긴다
+function _dedupPaths(paths){
+  try{
+    var best = {}, order = [];
+    (paths || []).forEach(function(p){
+      var sig = _pathSig(p);
+      var t = ((p.info||{}).totalTime != null) ? p.info.totalTime : 9999;
+      if(!(sig in best)){ best[sig] = p; order.push(sig); return; }
+      var bt = ((best[sig].info||{}).totalTime != null) ? best[sig].info.totalTime : 9999;
+      if(t < bt) best[sig] = p;
+    });
+    return order.map(function(sig){ return best[sig]; });
+  }catch(e){ return paths || []; }
+}
+window._dedupPaths = _dedupPaths;
+
 function _parseODsayAllOptions(odsayData) {
   var paths = (odsayData.result || {}).path || [];
   if(!paths.length) return null;
@@ -7735,6 +7910,10 @@ function selectRouteOption(type) {
   // 팝업 없이 바로 경로 표시 (미확정 상태 — 확정은 세부경로의 '경로 확정' 버튼)
   window._pendingRouteType = type;   // 현재 보고 있는 경로 타입
   window._lastCongNodeIdx = -1;      // 혼잡도 추적 리셋
+  // ★ 2026-08-27: 누른 탭을 표시한다.
+  //   _highlightRouteTab 은 있었지만 여기서 부르지 않아서,
+  //   사용자가 탭을 눌러도 어떤 경로를 보고 있는지 구분이 안 됐다.
+  try{ _highlightRouteTab(type); }catch(e){}
   _doSelectRouteOption(type);
 }
 window.selectRouteOption = selectRouteOption;
