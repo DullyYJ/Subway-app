@@ -10030,6 +10030,18 @@ var _tileFallback = false;   // 한 번 실패하면 이후 지도는 모두 OSM
 function _cartoKey(){
   try{ return (localStorage.getItem('cartoKey')||'').trim(); }catch(e){ return ''; }
 }
+function _saveShopApi(){
+  try{
+    var el = document.getElementById('shopApiInput');
+    var v  = el ? (el.value||'').trim().replace(/\/+$/,'') : '';
+    localStorage.setItem('shopApiUrl', v);
+    try{ localStorage.removeItem('shopDataCache'); }catch(e){}   // 서버가 바뀌면 캐시도 버린다
+    if(typeof _shopFetch==='function') _shopFetch(true);
+    if(typeof toast==='function') toast(v ? '쇼핑 서버를 저장했어요' : '기본 쇼핑 서버로 돌아갔어요');
+  }catch(e){}
+}
+window._saveShopApi = _saveShopApi;
+
 function _saveCartoKey(){
   try{
     var el = document.getElementById('cartoKeyInput');
@@ -13136,6 +13148,10 @@ window._saveBusProxy = _saveBusProxy;
       var ck = document.getElementById('cartoKeyInput');
       if(ck) ck.value = (typeof _cartoKey === 'function') ? _cartoKey() : '';
     } catch(e){}
+    try {
+      var sa = document.getElementById('shopApiInput');
+      if(sa) sa.value = localStorage.getItem('shopApiUrl') || '';
+    } catch(e){}
   }, 1500);
 })();
 function _busDiagEl(txt, clear){
@@ -15054,6 +15070,16 @@ window.addEventListener('unhandledrejection', function(e) {
         <p style="font-size:12px;color:var(--sub);margin-bottom:12px;">도착정보가 안 뜨는 정류장의 원인을 확인해요. (노선도 &gt; 버스 탭을 먼저 연 뒤 실행)</p>
         <button onclick="_busDiag()" style="width:100%;padding:11px;border-radius:10px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:var(--gold);color:#121214;font-family:inherit;margin-bottom:10px;">진단 실행</button>
         <div style="margin-bottom:10px;">
+          <div style="font-size:11.5px;color:var(--sub);margin-bottom:6px;">쇼핑 상품 서버 (비워두면 기본 서버 사용)</div>
+          <div style="display:flex;gap:6px;margin-bottom:6px;">
+            <input id="shopApiInput" type="text" placeholder="https://...workers.dev"
+              style="flex:1;min-width:0;padding:9px 10px;border-radius:9px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-family:inherit;">
+            <button onclick="_saveShopApi()" style="padding:9px 14px;border-radius:9px;border:none;cursor:pointer;font-size:12px;font-weight:800;background:#2f7cf6;color:#fff;font-family:inherit;">저장</button>
+          </div>
+          <div style="font-size:11px;color:var(--sub);line-height:1.5;margin-bottom:12px;">
+            상품 목록은 서버에서 받아와요. 서버에서 바꾸면 앱 업데이트 없이 바로 반영돼요.
+          </div>
+
           <div style="font-size:11.5px;color:var(--sub);margin-bottom:6px;">지도 타일 키 (CARTO, 비워두면 기본 지도 사용)</div>
           <div style="display:flex;gap:6px;margin-bottom:6px;">
             <input id="cartoKeyInput" type="text" placeholder="CARTO API 키 (선택)"
@@ -35982,6 +36008,75 @@ window.initChart24Scroll = initChart24Scroll;
 // ── 쇼핑 시스템 ─────────────────────────────────────────────
 // ── 쿠팡 파트너스 시간대별 추천 (2시간 단위 · 요일별 · 날씨반영 · 엑셀 연동) ──
 var SHOP_EMOJI={'다이어트':'🥗','대량구매':'📦','브런치':'🥐','사무용품':'🖇️','생필품':'🧻','셀프케어':'🧴','신선식품마감':'🥬','아침대용식':'🥣','야식':'🌙','우천대비':'☂️','자기계발':'📚','저녁식재료':'🥘','정육':'🥩','출근룩소품':'👔','취미스포츠':'⚽','캠핑나들이':'⛺','커피음료':'☕','홈파티':'🎉'};
+// ══════════════════════════════════════════════════════════════════
+// ★ 쇼핑 상품은 서버에서 받는다 (2026-08-27)
+//   예전엔 아래 SHOP_DATA 가 앱에 하드코딩돼 있어서, 상품 하나를 바꾸려면
+//   앱을 새로 빌드해 배포하고 사용자가 업데이트를 받아야 했다.
+//   → 이제 서버(/shop)에서 받아 쓰고, 아래 데이터는 **첫 실행·오프라인·
+//     서버 장애 때 쓰는 기본값**으로만 남긴다. 상품 교체는 서버 업로드로 끝.
+var _SHOP_URL_DEFAULT = 'https://gildongmu-shop.phg0643.workers.dev';
+function _shopUrl(){
+  try{ var v=(localStorage.getItem('shopApiUrl')||'').trim(); if(v) return v.replace(/\/+$/,''); }catch(e){}
+  return _SHOP_URL_DEFAULT;
+}
+var _SHOP_CACHE_KEY = 'shopDataCache';
+var _SHOP_TTL       = 6*3600*1000;    // 6시간마다 새로 확인
+var _SHOP_TIMEOUT   = 6000;
+
+// 저장해 둔 서버 데이터를 즉시 얹는다(있으면). 네트워크를 기다리지 않는다.
+function _shopHydrate(){
+  try{
+    var raw = localStorage.getItem(_SHOP_CACHE_KEY);
+    if(!raw) return false;
+    var c = JSON.parse(raw);
+    if(!c || !c.data || !c.data.WEEKDAY || !c.data.WEEKDAY.length) return false;
+    SHOP_DATA = c.data;
+    _shopThemeCache = null;                 // 테마 매핑 다시 만들게
+    console.log('[쇼핑] 저장된 서버 상품 적용 (v' + (c.version||'?') + ')');
+    return true;
+  }catch(e){ return false; }
+}
+window._shopHydrate = _shopHydrate;
+
+// 서버에서 최신 상품을 받아 캐시에 넣고, 바뀌었으면 화면을 다시 그린다.
+function _shopFetch(force){
+  try{
+    var raw = null;
+    try{ raw = JSON.parse(localStorage.getItem(_SHOP_CACHE_KEY)||'null'); }catch(e){}
+    if(!force && raw && raw.ts && (Date.now()-raw.ts) < _SHOP_TTL) return;
+
+    var done = false;
+    var t = setTimeout(function(){ done = true; }, _SHOP_TIMEOUT);
+    fetch(_shopUrl() + '/shop', { cache:'no-cache' })
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if(done) return; done = true; clearTimeout(t);
+        if(!j || !j.ok || !j.data) return;
+        var d = j.data;
+        if(!d.WEEKDAY || !d.WEEKDAY.length) return;    // 깨진 응답이면 기본값 유지
+        var changed = !raw || raw.version !== j.version;
+        try{
+          localStorage.setItem(_SHOP_CACHE_KEY, JSON.stringify({
+            ts: Date.now(), version: j.version, data: d
+          }));
+        }catch(e){}
+        SHOP_DATA = d;
+        _shopThemeCache = null;
+        var cnt = 0;
+        ['WEEKDAY','WEEKEND'].forEach(function(k){
+          (d[k]||[]).forEach(function(sl){ cnt += (sl.items||[]).length; });
+        });
+        console.log('[쇼핑] 서버 상품 ' + cnt + '개 적용 (v' + j.version + ')');
+        if(changed && typeof _renderShopGrid === 'function'){
+          try{ _renderShopGrid(); }catch(e){}
+        }
+      })
+      .catch(function(){ if(!done){ done = true; clearTimeout(t); } });
+  }catch(e){}
+}
+window._shopFetch = _shopFetch;
+
+// 기본값(첫 실행·오프라인용) — 서버 데이터가 오면 덮인다
 var SHOP_DATA={
  WEEKDAY:[
   {h1:5,h2:7,time:'05:00~07:00',label:'새벽 출근 준비',items:[
@@ -40593,6 +40688,9 @@ window.addEventListener('load', function(){
   setTimeout(function(){
     // 뉴스 미리 로드 (공개 데이터, 권한 무관)
     try { if(typeof _fetchNewsFeed==='function') _fetchNewsFeed(); } catch(e){}
+    // ★ 쇼핑 상품: 저장본을 먼저 얹고(즉시), 뒤에서 최신 확인
+    try { if(typeof _shopHydrate==='function') _shopHydrate(); } catch(e){}
+    try { if(typeof _shopFetch==='function') _shopFetch(); } catch(e){}
     // ★ 시작 시 GPS 확보 시작 → 잡히는 즉시 주변 정류장 프리페치 (권한 이미 있으면 프롬프트 없음)
     try { if(typeof _startTransitWatch==='function') _startTransitWatch(); } catch(e){}
     // 주변 정류장: 이미 확보된 GPS 좌표가 있으면 즉시 데우기
