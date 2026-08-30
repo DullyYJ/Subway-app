@@ -3554,7 +3554,9 @@ function _renderHomeConductorBrief(fromName, toName, hour, congPct, serverMsg){
       } else if(mins>0){
         // (실시간 추적 모드) 도착 예정 시각 — 남은시간 갱신에 따라 실시간 업데이트
         try {
-          var arr=new Date(Date.now()+mins*60000); var pad2=function(n){return(n<10?'0':'')+n;};
+          // ★ 타임라인과 같은 값을 쓴다(없으면 종전처럼 계산)
+          var _am = (typeof _routeArriveMs==='function') ? _routeArriveMs() : null;
+          var arr=new Date(_am || (Date.now()+mins*60000)); var pad2=function(n){return(n<10?'0':'')+n;};
           ps.push('<span id="homeAiArr">도착은 <b>' + pad2(arr.getHours()) + ':' + pad2(arr.getMinutes()) + '</b>경으로 예상됩니다.</span>');
         } catch(e){}
       }
@@ -7477,7 +7479,11 @@ function fmapDoRoute() {
         var tabDiv = document.getElementById('routeOptionTabs');
         if(tabDiv) tabDiv.style.display = 'flex';
         // ★ 처음 그릴 때도 현재 보고 있는 탭을 표시
-        try{ _highlightRouteTab(window._pendingRouteType || 'fast'); }catch(e){}
+        //   렌더 직후에 한 번 더 걸어 둔다 — 카드를 다시 그리는 과정에서
+        //   버튼 스타일이 초기값으로 돌아가는 경우가 있다.
+        var _ht = window._pendingRouteType || 'fast';
+        try{ _highlightRouteTab(_ht); }catch(e){}
+        setTimeout(function(){ try{ _highlightRouteTab(_ht); }catch(e){} }, 0);
         var fr = _allRouteResults ? _allRouteResults.fast : null;
         var rd = fr ? { routes: [_convertSinglePathToRoute(fr)] } : _convertODsayToRoutes(_cd);
         _renderTransitResultCard(rd, start, dest, 'route-v2');
@@ -7905,15 +7911,20 @@ function _parseODsayAllOptions(odsayData) {
 
 // 경로 옵션 탭 선택
 function selectRouteOption(type) {
-  if(!_allRouteResults) return;
+  // ★ 2026-08-27: 하이라이트를 먼저 한다.
+  //   예전엔 `if(!_allRouteResults) return;` 이 첫 줄이라,
+  //   경로 데이터가 아직이면 **버튼을 눌러도 아무 반응이 없었다.**
+  //   누른 것은 언제나 바로 보이게 하고, 데이터는 그다음에 따진다.
+  try{ _highlightRouteTab(type); }catch(e){}
+  window._pendingRouteType = type;
+  if(!_allRouteResults){
+    if(typeof toast==='function') toast('경로를 불러오는 중이에요');
+    return;
+  }
 
   // 팝업 없이 바로 경로 표시 (미확정 상태 — 확정은 세부경로의 '경로 확정' 버튼)
   window._pendingRouteType = type;   // 현재 보고 있는 경로 타입
   window._lastCongNodeIdx = -1;      // 혼잡도 추적 리셋
-  // ★ 2026-08-27: 누른 탭을 표시한다.
-  //   _highlightRouteTab 은 있었지만 여기서 부르지 않아서,
-  //   사용자가 탭을 눌러도 어떤 경로를 보고 있는지 구분이 안 됐다.
-  try{ _highlightRouteTab(type); }catch(e){}
   _doSelectRouteOption(type);
 }
 window.selectRouteOption = selectRouteOption;
@@ -8190,6 +8201,35 @@ function _doSelectRouteOption(type) {
 window._doSelectRouteOption = _doSelectRouteOption;
 
 // 경로 탭 하이라이트 (활성/비활성 스타일)
+// ★ 경로 타임라인의 '마지막 도착 시각'(ms) — AI 안내와 값을 맞추기 위한 단일 기준
+//   예전엔 타임라인은 실제 도착 노드 시각을 쓰고, AI 승무원은
+//   `현재시각 + 남은분`을 따로 계산해서 반올림 차이로 1분씩 어긋났다.
+//   (타임라인 10:51 · AI 10:52)
+function _routeArriveMs(){
+  try{
+    var nodes = window._lastHtlNodes || _transitNodeData;
+    if(nodes && nodes.length){
+      for(var i=nodes.length-1;i>=0;i--){
+        var t = nodes[i]._arrMs || nodes[i].arrMs;
+        if(t) return t;
+        var a = nodes[i].arrTime;
+        if(a && /^\d{1,2}:\d{2}$/.test(a)){
+          var p = a.split(':');
+          var _h = parseInt(p[0],10), _mi = parseInt(p[1],10);
+          if(!(_h>=0 && _h<=23 && _mi>=0 && _mi<=59)) continue;   // 99:99 같은 값 걸러냄
+          var d = new Date(); d.setSeconds(0,0);
+          d.setHours(_h, _mi);
+          // 자정 넘김 보정
+          if(d.getTime() < Date.now() - 6*3600000) d = new Date(d.getTime() + 86400000);
+          return d.getTime();
+        }
+      }
+    }
+  }catch(e){}
+  return null;
+}
+window._routeArriveMs = _routeArriveMs;
+
 function _highlightRouteTab(type){
   ['fast','less','sub','bus'].forEach(function(t) {
     var btn = document.getElementById('routeTab' + t.charAt(0).toUpperCase() + t.slice(1));
@@ -10719,7 +10759,9 @@ function _syncHomeBriefRemaining(rem){
     }
     var arrEl = document.getElementById('homeAiArr');
     if(arrEl && rem != null && rem >= 0){
-      var arr = new Date(Date.now() + rem*60000);
+      // ★ 갱신할 때도 타임라인 기준을 우선한다
+      var _am2 = (typeof _routeArriveMs==='function') ? _routeArriveMs() : null;
+      var arr = new Date(_am2 || (Date.now() + rem*60000));
       var pad = function(n){ return (n<10?'0':'')+n; };
       arrEl.innerHTML = '도착은 <b>' + pad(arr.getHours()) + ':' + pad(arr.getMinutes()) + '</b>경으로 예상됩니다.';
     }
@@ -15503,12 +15545,12 @@ window.addEventListener('unhandledrejection', function(e) {
 
   <!-- 내부 탭: 지하철 / 버스 -->
   <div class="map-inner-tabs">
-    <div class="map-itab on" id="mapItabSubway" onclick="switchMapInnerTab('subway')">🚇 지하철</div>
-    <div class="map-itab"   id="mapItabBus"    onclick="switchMapInnerTab('bus')">🚌 버스</div>
+    <div class="map-itab on" id="mapItabBus"    onclick="switchMapInnerTab('bus')">🚌 버스</div>
+    <div class="map-itab"   id="mapItabSubway" onclick="switchMapInnerTab('subway')">🚇 지하철</div>
   </div>
 
   <!-- 지하철 패널 -->
-  <div id="mapSubwayPanel" style="flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;">
+  <div id="mapSubwayPanel" style="flex:1;min-height:0;overflow:hidden;display:none;flex-direction:column;">
 
   <!-- 지역 선택 탭 -->
   <div class="region-tabs" style="flex-shrink:0;">
@@ -26673,7 +26715,104 @@ var _autoPostTimer=null;
 // [정리] 중복 정의 제거: scheduleAutoPost (아래쪽 정의 사용)
 
 // ── 초기 게시글 생성 ──────────────────────────────────────
+
+// ══════════════════════════════════════════════════════════════════
+// ★ 게시글·실시간대화 영속 저장 (2026-08-27)
+//   문제: 앱을 껐다 켜면 게시판에 글이 한두 개만 남고 실시간소통은 텅 비었다.
+//   원인: **글과 대화를 저장하는 곳이 아예 없었다.** localStorage 에는
+//   'postTopicLog'·'ltTopicLog'(6개월 중복 방지 원장)만 있고 결과물은 없다.
+//   그래서 재시작하면 _AI_POSTS 가 비고, initCommunityPosts 가 200개를 다시
+//   만들려 해도 **원장에 이미 쓴 주제로 기록돼 있어 게이트에서 전부 걸러진다.**
+//   원장은 남았는데 글은 안 남아서, 새로 만들지도 못하고 복원도 못 하는 상태.
+//   → 만든 글과 오간 대화를 그대로 저장하고 시작할 때 되살린다.
+var _POSTS_KEY     = 'commPosts';
+var _POSTS_MAX     = 220;              // 저장 개수 상한
+var _POSTS_TTL     = 7*24*3600*1000;   // 7일 지난 글은 버린다
+var _TALK_KEY      = 'liveTalk';
+var _TALK_MAX      = 100;
+var _TALK_TTL      = 12*3600*1000;     // 실시간 대화는 반나절
+
+function _savePosts(){
+  try{
+    var now = Date.now();
+    var arr = (_AI_POSTS || [])
+      .filter(function(p){ return p && p.time && (now - p.time) < _POSTS_TTL; })
+      .slice(0, _POSTS_MAX)
+      .map(function(p){
+        return { id:p.id, cat:p.cat, title:p.title, body:p.body, nick:p.nick,
+                 time:p.time, views:p.views, likes:p.likes, kk:p.kk, sad:p.sad,
+                 cmts:(p.cmts||[]).slice(0,8) };
+      });
+    localStorage.setItem(_POSTS_KEY, JSON.stringify(arr));
+  }catch(e){
+    // 용량 초과 등 — 절반만 다시 시도
+    try{
+      var half = (_AI_POSTS||[]).slice(0, Math.floor(_POSTS_MAX/2));
+      localStorage.setItem(_POSTS_KEY, JSON.stringify(half));
+    }catch(e2){}
+  }
+}
+window._savePosts = _savePosts;
+
+function _loadPosts(){
+  try{
+    var raw = localStorage.getItem(_POSTS_KEY);
+    if(!raw) return null;
+    var arr = JSON.parse(raw);
+    if(!Array.isArray(arr) || !arr.length) return null;
+    var now = Date.now();
+    arr = arr.filter(function(p){ return p && p.time && (now - p.time) < _POSTS_TTL; });
+    if(!arr.length) return null;
+    arr.forEach(function(p){
+      p.cmts = Array.isArray(p.cmts) ? p.cmts : [];
+      if(p.id != null && typeof _POST_ID !== 'undefined' && p.id >= _POST_ID) _POST_ID = p.id + 1;
+    });
+    arr.sort(function(a,b){ return b.time - a.time; });
+    return arr;
+  }catch(e){ return null; }
+}
+window._loadPosts = _loadPosts;
+
+// ★ _LIVE_TALK 은 다른 script 블록에 있어 여기서 직접 못 본다. 인자로 받는다.
+function _saveTalk(list){
+  try{
+    var src = list || window._LIVE_TALK || [];
+    var now = Date.now();
+    var arr = (src || [])
+      .filter(function(m){ return m && m.time && (now - m.time) < _TALK_TTL; })
+      .slice(-_TALK_MAX)
+      .map(function(m){ return { nick:m.nick, text:m.text, time:m.time, mine:!!m.mine }; });
+    localStorage.setItem(_TALK_KEY, JSON.stringify(arr));
+  }catch(e){}
+}
+window._saveTalk = _saveTalk;
+
+function _loadTalk(){
+  try{
+    var raw = localStorage.getItem(_TALK_KEY);
+    if(!raw) return null;
+    var arr = JSON.parse(raw);
+    if(!Array.isArray(arr) || !arr.length) return null;
+    var now = Date.now();
+    arr = arr.filter(function(m){ return m && m.time && (now - m.time) < _TALK_TTL; });
+    return arr.length ? arr.slice(-_TALK_MAX) : null;
+  }catch(e){ return null; }
+}
+window._loadTalk = _loadTalk;
+
 function initCommunityPosts(){
+  // ★ 저장된 글이 있으면 그대로 되살린다 (재시작해도 게시판이 비지 않는다)
+  var saved = _loadPosts();
+  if(saved && saved.length){
+    _AI_POSTS = saved;
+    console.log('[커뮤니티] 저장된 글 ' + saved.length + '개 복원');
+    renderCommList();
+    _scheduleAutoComment();
+    _scheduleNewPost();
+    // 너무 적으면(오래돼 많이 버려졌으면) 뒤에서 조용히 채운다
+    if(_AI_POSTS.length < 30) setTimeout(function(){ _topUpPosts(200 - _AI_POSTS.length); }, 1200);
+    return;
+  }
   _AI_POSTS=[];
   //   200개 목표. 6개월 중복 게이트를 통과해야 하므로 시도 횟수도 넉넉히 준다.
   var count=200;
@@ -26685,10 +26824,35 @@ function initCommunityPosts(){
     _AI_POSTS.push(p);
     i++;
   }
+  _savePosts();                 // ★ 만든 글을 그대로 남긴다
   renderCommList();
   _scheduleAutoComment();
   _scheduleNewPost();  // ★ 3-10분 주기 새 글 자동 추가 시작
 }
+
+// 복원했는데 수가 적을 때 몰래 채우기
+function _topUpPosts(n){
+  try{
+    if(!(n > 0)) return;
+    var added = 0;
+    for(var i=0, tries=0; i<n && tries<n*8; tries++){
+      var p = _generatePost();
+      if(!_postAccept(p)) continue;
+      p.time = Date.now() - _rndInt(i*5*60000, (i+1)*12*60000);
+      p.cmts = _initCmts(p.time, p);
+      _AI_POSTS.push(p);
+      i++; added++;
+    }
+    if(added){
+      _AI_POSTS.sort(function(a,b){ return b.time - a.time; });
+      _savePosts();
+      if(typeof _commBusyReading==='function' && _commBusyReading()) window._commPendingRender = true;
+      else renderCommList();
+      console.log('[커뮤니티] 글 ' + added + '개 보충');
+    }
+  }catch(e){}
+}
+window._topUpPosts = _topUpPosts;
 window.initCommunityPosts=initCommunityPosts;
 
 // ── ★ 3~10분 주기로 새 게시글 자동 추가 ──────────────────────
@@ -26711,7 +26875,8 @@ function _scheduleNewPost(){
       // 새 글은 댓글 적게 시작 (방금 올라왔으므로)
       if(p.cmts.length > 2) p.cmts = p.cmts.slice(0, _rndInt(0, 2));
       _AI_POSTS.unshift(p);             // 최상단에 추가
-      if(_AI_POSTS.length > 60) _AI_POSTS.pop();  // 메모리 관리
+      if(_AI_POSTS.length > _POSTS_MAX) _AI_POSTS.pop();   // 메모리 관리
+      _savePosts();
       // 커뮤니티 탭이 열려있으면 즉시 갱신
       // ★ 단, 글을 펼쳐 읽고 있거나 댓글을 쓰는 중이면 건드리지 않는다.
       //   예전엔 20초마다 목록을 통째로 다시 그려서, 글을 열자마자
@@ -30230,7 +30395,7 @@ function safeSetItem(key, val){
   </div><!-- /mapSubwayPanel -->
 
   <!-- 버스 패널 (카카오버스 스타일) -->
-  <div id="mapBusPanel" style="display:none;flex:1;min-height:0;flex-direction:column;">
+  <div id="mapBusPanel" style="display:flex;flex:1;min-height:0;flex-direction:column;">
     <!-- 주변/즐겨찾기 토글 -->
     <div class="busv-toggle">
       <button class="busv-tab on" id="busvTabNear" onclick="switchBusView('near')">📍 주변 정류장</button>
@@ -37553,6 +37718,27 @@ window._etaBus = _etaBus;
 // 동일 배열(_LIVE_TALK)을 공유하여 양쪽이 실시간 동기화
 // ══════════════════════════════════════════════════════════════
 var _LIVE_TALK = [];
+window._LIVE_TALK = _LIVE_TALK;
+
+// ★ 앱을 켤 때 지난 대화를 되살린다 (2026-08-27)
+//   예전엔 저장 자체가 없어서 재시작하면 실시간소통이 완전히 비어 있었다.
+(function _restoreLiveTalk(){
+  try{
+    // 블록이 달라 직접 참조가 안 될 수 있으므로 window 경유로 부른다
+    var _lt = window._loadTalk;
+    var prev = (typeof _lt === 'function') ? _lt() : null;
+    if(prev && prev.length){
+      _LIVE_TALK = prev;
+      window._LIVE_TALK = _LIVE_TALK;
+      console.log('[실시간소통] 지난 대화 ' + prev.length + '줄 복원');
+      // 렌더 함수가 아직 정의되기 전일 수 있어 다음 틱에 그린다
+      setTimeout(function(){
+        try{ if(typeof _renderLiveTalk==='function') _renderLiveTalk(); }catch(e){}
+        try{ if(typeof _renderChatTab==='function') _renderChatTab(); }catch(e){}
+      }, 0);
+    }
+  }catch(e){}
+})();
 
 // ══════════════════════════════════════════════════════════════
 // ★ 서버 연동 (Cloudflare Worker + D1) — 톡/게시글 공유
@@ -37792,7 +37978,8 @@ function _ltAdd(msg){
   if(msg && !msg.mine && typeof _ltIsBanned==='function' && _ltIsBanned(msg.text)) return;
   if(msg && !msg.mine && msg.text != null) msg.text = _ltTidyText(msg.text);
   _LIVE_TALK.push(msg);
-  if(_LIVE_TALK.length > 100) _LIVE_TALK.shift();
+  if(_LIVE_TALK.length > _TALK_MAX) _LIVE_TALK.shift();
+  if(typeof window._saveTalk === 'function') window._saveTalk(_LIVE_TALK);   // ★ 재시작해도 남도록
   _renderLiveTalk(); _renderChatTab();
 }
 
@@ -40184,7 +40371,8 @@ document.addEventListener('DOMContentLoaded', function() {
 .map-itab.on{color:var(--text);border-bottom-color:var(--gold);}
 .map-bus-panel{flex:1;min-height:0;overflow-y:auto;background:var(--bg);-webkit-overflow-scrolling:touch;}
 /* ★ 주변 정류장 지도 — 패널 상단 고정, 스크롤은 아래 목록에서만 */
-#mapBusMapWrap{flex:0 0 auto;position:relative;height:34vh;min-height:196px;max-height:330px;
+/* ★ 2026-08-27: 지도 높이를 기존의 70%로 (34vh→24vh, 196→137, 330→231) */
+#mapBusMapWrap{flex:0 0 auto;position:relative;height:24vh;min-height:137px;max-height:231px;
   border-bottom:1px solid var(--border);background:#e8eef2;overflow:hidden;}
 #mapBusMapCanvas{width:100%;height:100%;display:block;background:#e8eef2;}
 #mapBusMapHint{position:absolute;left:0;right:0;bottom:0;z-index:500;pointer-events:none;
@@ -40376,6 +40564,19 @@ document.addEventListener('DOMContentLoaded', function() {
       var busPanel = document.getElementById('mapBusPanel');
       if(busPanel && busPanel.parentElement !== tabMap){
         tabMap.appendChild(busPanel);
+      }
+      // ★ 2026-08-27: 노선도 탭은 '버스'로 시작한다.
+      //   마크업 기본값만 바꾸면 정류장 목록이 아직 안 채워져 빈 화면이 보이므로,
+      //   탭이 실제로 열릴 때 한 번 버스 화면을 준비시킨다.
+      if(!window._mapInnerInit){
+        window._mapInnerInit = 1;
+        var _mo = new MutationObserver(function(){
+          if(tabMap.style.display !== 'none' && !window._mapBusOpened){
+            window._mapBusOpened = 1;
+            try{ if(typeof switchMapInnerTab==='function') switchMapInnerTab('bus'); }catch(e){}
+          }
+        });
+        try{ _mo.observe(tabMap, { attributes:true, attributeFilter:['style'] }); }catch(e){}
       }
     }catch(e){ console.warn('fixMapTabStructure', e); }
   }
