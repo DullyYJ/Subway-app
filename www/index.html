@@ -14296,9 +14296,35 @@ window._bgDiag = async function(){
   }catch(e){ add('저장된 대화: 읽기 실패 (' + (e && e.message) + ')'); }
 
   try{
-    add('현재 화면 대화: ' + ((typeof _LIVE_TALK!=='undefined' && _LIVE_TALK) ? _LIVE_TALK.length : 0) + '줄'
-        + ' · 게시글 ' + ((typeof _AI_POSTS!=='undefined' && _AI_POSTS) ? _AI_POSTS.length : 0) + '개');
-  }catch(e){}
+    var _lv = (typeof _LIVE_TALK!=='undefined' && _LIVE_TALK) ? _LIVE_TALK : (window._LIVE_TALK || null);
+    var _ap = (typeof _AI_POSTS!=='undefined' && _AI_POSTS) ? _AI_POSTS : (window._AI_POSTS || null);
+    add('현재 화면 대화: ' + (_lv ? _lv.length : '읽을 수 없음') + '줄'
+        + ' · 게시글 ' + (_ap ? _ap.length : '읽을 수 없음') + '개');
+
+    // ★ 저장이 되는지 지금 직접 확인한다 (원인을 한 번에 가리기 위해)
+    if(typeof window._saveTalk !== 'function'){
+      add('대화 저장 함수: 없음 ← 저장 자체가 불가능');
+    } else if(!_lv){
+      add('대화 저장 시험: 대화 배열을 못 읽어 건너뜀');
+    } else if(!_lv.length){
+      add('대화 저장 시험: 화면에 대화가 0줄이라 저장할 것이 없음');
+    } else {
+      var _before = localStorage.getItem('liveTalk');
+      try{
+        window._saveTalk(_lv);
+        var _after = localStorage.getItem('liveTalk');
+        if(!_after){
+          add('대화 저장 시험: 실패 ← 함수는 돌았는데 아무것도 안 남음');
+        } else {
+          var _n = 0; try{ _n = (JSON.parse(_after)||[]).length; }catch(e2){}
+          add('대화 저장 시험: 성공 (' + _n + '줄 저장됨)'
+              + (_n === 0 ? ' ← 0줄이면 시간 필드나 12시간 만료를 확인' : ''));
+        }
+      }catch(_se){
+        add('대화 저장 시험: 예외 ← ' + (_se && _se.message));
+      }
+    }
+  }catch(e){ add('저장 점검 실패: ' + (e && e.message)); }
 
   try{
     var _sc = localStorage.getItem('shopDataCache');
@@ -38118,8 +38144,9 @@ function _ltAdd(msg){
   if(msg && !msg.mine && typeof _ltIsBanned==='function' && _ltIsBanned(msg.text)) return;
   if(msg && !msg.mine && msg.text != null) msg.text = _ltTidyText(msg.text);
   _LIVE_TALK.push(msg);
-  if(_LIVE_TALK.length > _TALK_MAX) _LIVE_TALK.shift();
-  if(typeof window._saveTalk === 'function') window._saveTalk(_LIVE_TALK);   // ★ 재시작해도 남도록
+  // 상한은 리터럴로 둔다(다른 블록 상수에 의존하지 않게)
+  if(_LIVE_TALK.length > 100) _LIVE_TALK.shift();
+  try{ if(typeof window._saveTalk === 'function') window._saveTalk(_LIVE_TALK); }catch(e){}
   _renderLiveTalk(); _renderChatTab();
 }
 
