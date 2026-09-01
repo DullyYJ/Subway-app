@@ -6970,7 +6970,7 @@ function _htlWaitArrived(d){
     var msg = '🚉 ' + ((nd && nd.name) ? nd.name : '승차역') + ' 도착'
             + ((nd && nd.arrTime) ? (' · 다음 열차 ' + nd.arrTime) : '');
     if(typeof toast === 'function') toast(msg);
-    try { if('vibrate' in navigator) navigator.vibrate([180, 90, 180]); } catch(e){}
+    _vibrateFor('arrive', [180, 90, 180]);   // 승차 안내 1회
     if(before !== after) console.log('[대기모드] 승차역 도착 → 시각표 재계산', before, '→', after);
     // 마커를 승차역으로 이동
     if(bi >= 0 && _transitNodeData[bi] && typeof _placeGpsMarkerSmooth === 'function'){
@@ -9092,7 +9092,7 @@ function _fireTransitAlert(tg, remain){
     else if(remain===1){ title='곧 하차'; body='다음 정거장 '+tg.name+' — 내릴 준비하세요'; vib=[300,100,300,100,300]; }
     else { title='목적지 도착'; body=tg.name+'에 도착했습니다. 수고하셨어요'; vib=[300,100,300,100,300]; }
   }
-  try { if('vibrate' in navigator) navigator.vibrate(vib); } catch(e){}
+  _vibrateFor('arrive', vib);
   if(typeof showNotification==='function') showNotification(title, body, { vibrate:vib, type:'arrive' });
   else if(typeof toast==='function') toast(title + ' · ' + body);
 }
@@ -15233,6 +15233,38 @@ window.addEventListener('unhandledrejection', function(e) {
   var r = e.reason;
   window.onerror('Promise: ' + ((r && r.message) || r), '', 0, 0, r);
 });
+
+/* ★ 2026-08-31: '검은 화면' 감시
+   앱이 오래 돌면 화면이 통째로 비고 아무것도 눌리지 않는 일이 있었다.
+   메모리 압박으로 렌더가 사라지거나, 탭 컨테이너가 모두 숨겨진 상태다.
+   10초마다 '보이는 탭이 하나라도 있는지' 확인하고, 없으면 홈으로 되돌린다.
+   (완전한 렌더러 크래시는 JS도 함께 죽으므로 이 감시로도 못 살린다.
+    그건 위의 메모리 상한으로 애초에 일어나지 않게 막는 쪽이 맞다) */
+(function(){
+  var _blankHits = 0;
+  setInterval(function(){
+    try{
+      if(document.hidden) return;
+      var tabs = document.querySelectorAll('[id^="tab-"]');
+      if(!tabs.length) return;
+      var anyVisible = false;
+      for(var i=0;i<tabs.length;i++){
+        var t = tabs[i];
+        if(t.offsetParent !== null && t.offsetHeight > 40){ anyVisible = true; break; }
+      }
+      if(anyVisible){ _blankHits = 0; return; }
+      _blankHits++;
+      if(_blankHits < 2) return;          // 두 번 연속일 때만 (전환 중 오탐 방지)
+      _blankHits = 0;
+      console.warn('[화면감시] 보이는 탭이 없음 → 홈으로 복구');
+      if(typeof switchTab === 'function') switchTab('home');
+      else {
+        var home = document.getElementById('tab-home');
+        if(home){ home.style.display = ''; home.style.height = ''; home.style.maxHeight = ''; }
+      }
+    }catch(e){}
+  }, 10000);
+})();
 </script>
 </head>
 <body>
@@ -24332,21 +24364,29 @@ async function resolveRealtimeDepartMs() {
 
 
 /* ══ 진동 알림 ══ */
+// ★ 진동 헬퍼도 정책을 거친다(_vibrateFor 는 아래에서 정의되므로 지연 참조)
+function _vib(type, pat){
+  try{
+    if(typeof _vibrateFor === 'function') return _vibrateFor(type, pat);
+    if('vibrate' in navigator) navigator.vibrate(pat);
+  }catch(e){}
+}
 function vibrateArrive(){
   // 목적지 도착: 강하게 3번 (도착 패턴)
-  if('vibrate' in navigator) navigator.vibrate([300,100,300,100,300]);
+  _vib('arrive', [300,100,300,100,300]);
 }
 function vibratePass(){
-  // 중간 역 통과: 짧게 1번
-  if('vibrate' in navigator) navigator.vibrate(100);
+  // ★ 중간 역 통과 진동은 쓰지 않는다 (2026-08-31)
+  //   역마다 울려서 성가시다는 피드백. 하차·환승 임박에만 진동한다.
+  //   함수는 호출부 호환을 위해 남겨 두고 동작만 없앤다.
 }
 function vibrateTransfer(){
   // 환승 알림: 2번
-  if('vibrate' in navigator) navigator.vibrate([200,100,200,100,200]);
+  _vib('transfer', [200,100,200,100,200]);
 }
 function vibrateWarning(){
   // 도착 2정거장 전 경고: 길게 2번
-  if('vibrate' in navigator) navigator.vibrate([400,150,400]);
+  _vib('near_arrive2', [400,150,400]);
 }
 
 /* ══ 브라우저 푸시 알림 ══ */
@@ -24361,9 +24401,27 @@ var _notifId = 1000;
 //   arrive_reco  = 하차 10분 전 추천 알림
 //   commute_brief= 출퇴근 브리핑 알림(설정에서 켠 경우만 발생) — 탭하면 팝업+경로탐색 버튼
 //   fg_service   = 이동 중 상주 알림(현재역 · 남은시간) — 잠금화면/알림창에서 확인
-var _NOTIF_ALLOW = { arrive_reco:1, commute_brief:1, fg_service:1 };
+//   arrive/near_arrive/transfer = 하차·환승 임박 (2정거장·1정거장·도착에서만)
+var _NOTIF_ALLOW = { arrive_reco:1, commute_brief:1, fg_service:1,
+                     arrive:1, near_arrive:1, near_arrive2:1,
+                     transfer:1, transfer2:1, arrival:1 };
 function _notifAllowed(type){ return !!_NOTIF_ALLOW[String(type||'')]; }
 window._notifAllowed = _notifAllowed;
+
+// ★ 2026-08-31: 진동을 알림 정책 안으로 넣는다.
+//   증상: 역을 지날 때마다 진동이 울린다.
+//   원인: navigator.vibrate() 호출이 _notifAllowed() 바깥에 흩어져 있었다.
+//   알림은 정책에 막혀도 진동은 그대로 통과해서, 화면엔 아무것도 안 뜨는데
+//   진동만 계속 울리는 상태였다.
+//   → 모든 경로 진동은 이 함수를 거친다. 허용되지 않은 종류는 울리지 않는다.
+function _vibrateFor(type, pattern){
+  try{
+    if(!_notifAllowed(type)) return false;
+    if('vibrate' in navigator) navigator.vibrate(pattern);
+    return true;
+  }catch(e){ return false; }
+}
+window._vibrateFor = _vibrateFor;
 
 function showNotification(title, body, opts){
   opts = opts || {};
@@ -27568,6 +27626,16 @@ var _cmtAutoTimer=null;
 //   무작위로 고른 글에 30~90초마다 댓글이 하나씩 붙는 동작이 'AI 티'의 핵심이었다
 //   (읽고 있는 도중에 관련 없는 댓글이 계속 늘어남). 함수는 남겨 두되 아무것도 하지 않는다.
 var _CMT_AUTO_ENABLED = false;
+// ★ 메모리 상한 (2026-08-31)
+//   증상: 앱을 한참 쓰다 보면 화면이 통째로 검게 변하고 멈춘다.
+//   원인: 게시글 수에는 상한이 있었지만 **댓글·대댓글에는 없었다.**
+//   자동 댓글이 20초마다 붙으면서 한 글에 수백 개가 쌓이고,
+//   그 배열이 매번 저장·렌더되면서 WebView 메모리를 밀어냈다.
+//   메모리가 임계를 넘으면 안드로이드가 렌더러를 죽이는데,
+//   그때 화면이 '검은 채로 아무것도 안 눌리는' 상태가 된다.
+var _CMT_MAX = 30;         // 글당 댓글
+var _CMT_REPLY_MAX = 8;    // 댓글당 대댓글
+
 function _scheduleAutoComment(){
   clearTimeout(_cmtAutoTimer);
   if(!_CMT_AUTO_ENABLED) return;
@@ -27591,11 +27659,16 @@ function _scheduleAutoComment(){
       };
       targetCmt.replies=targetCmt.replies||[];
       targetCmt.replies.push(reply);
+      // ★ 2026-08-31: 대댓글 상한. 없으면 한 댓글에 수백 개가 쌓여
+      //   게시글 객체가 계속 커지고, 결국 WebView 메모리가 터진다.
+      if(targetCmt.replies.length > _CMT_REPLY_MAX) targetCmt.replies.shift();
     } else {
       // 새 댓글 추가 (주제 기반)
       var newCmt=_makeCmt(_rndInt(0,60000), _tp, []);
       newCmt.time=Date.now()-_rndInt(0,30000);
       post.cmts.push(newCmt);
+      // ★ 댓글 상한 (오래된 것부터 정리)
+      if(post.cmts.length > _CMT_MAX) post.cmts.shift();
     }
 
     // 현재 열린 게시글이면 즉시 갱신
@@ -27648,14 +27721,25 @@ function _savePosts(){
       .map(function(p){
         return { id:p.id, cat:p.cat, title:p.title, body:p.body, nick:p.nick,
                  time:p.time, views:p.views, likes:p.likes, kk:p.kk, sad:p.sad,
-                 cmts:(p.cmts||[]).slice(0,8) };
+                 // ★ 댓글 8개까지, 각 댓글의 대댓글도 3개까지만 저장한다.
+                 //   예전엔 대댓글을 통째로 실어서, 한 댓글에 수십 개가 붙으면
+                 //   저장 용량이 폭증하고 매번 그걸 직렬화하느라 느려졌다.
+                 cmts:(p.cmts||[]).slice(0,8).map(function(c){
+                   if(!c) return c;
+                   return { id:c.id, nick:c.nick, text:c.text, time:c.time,
+                            replies:(c.replies||[]).slice(0,3) };
+                 }) };
       });
     localStorage.setItem(_POSTS_KEY, JSON.stringify(arr));
   }catch(e){
-    // 용량 초과 등 — 절반만 다시 시도
+    // 용량 초과 등 — 개수를 줄이고 댓글은 떼고 다시 시도
     try{
-      var half = (_AI_POSTS||[]).slice(0, Math.floor(_POSTS_MAX/2));
+      var half = (_AI_POSTS||[]).slice(0, Math.floor(_POSTS_MAX/2)).map(function(p){
+        return { id:p.id, cat:p.cat, title:p.title, body:p.body, nick:p.nick,
+                 time:p.time, views:p.views, likes:p.likes, kk:p.kk, sad:p.sad, cmts:[] };
+      });
       localStorage.setItem(_POSTS_KEY, JSON.stringify(half));
+      console.warn('[커뮤니티] 저장 용량 초과 → 댓글 없이 ' + half.length + '개만 보관');
     }catch(e2){}
   }
 }
@@ -29226,7 +29310,7 @@ function _bgArrivalNotify(idx){
         }]});
       }
     } catch(e){}
-    try { if('vibrate' in navigator) navigator.vibrate(vib); } catch(e){}
+    _vibrateFor('arrival', vib);
     // 포그라운드면 인앱 토스트도
     try { if(!document.hidden && typeof toast === 'function') toast(body); } catch(e){}
     console.log('[도착알림]', key, body);
@@ -29266,6 +29350,8 @@ function _checkRouteProximityAlert(lat, lng) {
 
     var dist = haversineM(lat, lng, stn.lat, stn.lng);
     if(dist <= 300) {
+      // 경로가 길면 Set 도 커지므로 상한을 둔다(경로 역 수 이상은 쌓일 일이 없다)
+      if(_proximityFired.size > 300) _proximityFired.clear();
       _proximityFired.add(stnName);
 
       var isDestination = (i === path.length - 1);
@@ -29312,7 +29398,7 @@ function _checkRouteProximityAlert(lat, lng) {
             // Android: 탭하면 앱 포그라운드로 복귀
             actionTypeId: 'OPEN_APP'
           }]});
-          if('vibrate' in navigator) navigator.vibrate([200, 100, 200]);
+          _vibrateFor('proximity', [200, 100, 200]);
           console.log('[PROX] 알림 발송:', stnName, Math.round(dist) + 'm');
         }
       } catch(e) { console.warn('[PROX] 알림 오류:', e); }
@@ -39095,6 +39181,8 @@ function _ltTidyText(t){
   return t;
 }
 function _ltAdd(msg){
+  // ★ 빈 메시지는 넣지 않는다 (화면에 안 보이는 유령 줄 방지)
+  if(!msg || msg.text == null || !String(msg.text).trim()) return;
   // ★ 정치·사회 분쟁 소재는 표시하지 않음 (내가 쓴 글은 그대로)
   if(msg && !msg.mine && typeof _ltIsBanned==='function' && _ltIsBanned(msg.text)) return;
   if(msg && !msg.mine && msg.text != null) msg.text = _ltTidyText(msg.text);
@@ -39751,13 +39839,43 @@ function _ltGenerate(){
   while((_ltRecentTexts.indexOf(text) >= 0 || (typeof _ltIsBanned==='function' && _ltIsBanned(text))) && t2++ < 25){
     text = _ltPickFresh();
   }
+
+  // ★ 2026-08-31: 여기서 대화가 멈추던 원인.
+  //   _ltPickFresh() 는 풀이 비거나 전부 소진되면 '' 를 돌려줄 수 있고,
+  //   최근 20개와 계속 겹치면 25번을 돌고도 같은 값이 남는다.
+  //   그런데 빈 값 검사가 없어서 _ltAdd({text:''}) 가 그대로 들어갔고,
+  //   화면에는 아무것도 안 보이는 채로 '한 줄 생성됨'으로 처리돼
+  //   **새 글이 영영 안 올라오는 것처럼** 보였다.
+  //   → 비었으면 대화 스레드에서 한 줄 꺼내 반드시 채운다.
+  if(!text || !String(text).trim()){
+    try{
+      if(typeof _ltStartConvo==='function' && _ltStartConvo()){
+        var _cv2 = _ltConvoNext();
+        if(_cv2 && _cv2.text){
+          _ltLastNick = _cv2.nick;
+          _ltRecentTexts.push(_cv2.text);
+          if(_ltRecentTexts.length > 20) _ltRecentTexts.shift();
+          _ltAdd({ nick:_cv2.nick, text:_cv2.text, time:Date.now(), mine:false });
+          return;
+        }
+      }
+      // 스레드도 없으면 풀에서 아무거나 (중복이라도 침묵보다 낫다)
+      var _pool = (typeof _ltPickPool==='function') ? (_ltPickPool() || []) : [];
+      if(_pool.length) text = _rnd(_pool);
+    }catch(e){}
+  }
+  if(!text || !String(text).trim()) return;
   if(typeof _ltIsBanned==='function' && _ltIsBanned(text)) return;
   // 이 멘트를 6개월 원장에 기록
   try{ if(typeof _ltTopicMark==='function') _ltTopicMark('say_' + _ltKeySlug(text)); }catch(e){}
 
   _ltLastNick = nick;
   _ltRecentTexts.push(text);
-  if(_ltRecentTexts.length > 20) _ltRecentTexts.shift();  // 최근 20개 유지
+  // ★ 최근 목록이 풀보다 크면 모든 후보가 '최근'에 걸려 뽑을 게 없어진다.
+  //   풀 크기의 절반을 넘지 않게 유지한다.
+  var _poolN = 20;
+  try{ var _p = (typeof _ltPickPool==='function') ? (_ltPickPool()||[]) : []; if(_p.length) _poolN = Math.max(5, Math.min(20, Math.floor(_p.length/2))); }catch(e){}
+  while(_ltRecentTexts.length > _poolN) _ltRecentTexts.shift();
   _ltAdd({ nick: nick, text: text, time: Date.now(), mine: false });
 }
 function _renderLiveTalk(){
@@ -39838,10 +39956,12 @@ function _scheduleLiveTalk(){
   // 실제 채팅 리듬: Gemini 대화 큐가 있으면 8~16초(활발), 폴백이면 15~26초(잔잔)
   var _d = (typeof _ltAiQueue!=='undefined' && _ltAiQueue.length) ? _rndInt(8000,16000) : _rndInt(15000,26000);
   _ltTimer = setTimeout(function(){
-    // 서버 대본이 최근 90초 내에 온 경우에만 로컬 생성 보류.
-    // 서버가 조용하면(대본 소진 등) 로컬 생성으로 대화를 계속 이어감 → 멈춤 방지
-    var serverFresh = window._serverTalksActive && (Date.now() - (window._lastServerTalkAt||0) < 90000);
-    if(!serverFresh) _ltGenerate();
+    // ★ 2026-08-31: 생성 중 예외가 나면 다음 예약까지 못 가서 대화가 영영 멈췄다.
+    //   생성은 실패할 수 있어도 '다음 예약'은 반드시 걸리도록 분리한다.
+    try{
+      var serverFresh = window._serverTalksActive && (Date.now() - (window._lastServerTalkAt||0) < 90000);
+      if(!serverFresh) _ltGenerate();
+    }catch(e){ console.warn('[실시간소통] 생성 실패:', e && e.message); }
     _scheduleLiveTalk();
   }, _d);
 }
