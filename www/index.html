@@ -15143,6 +15143,24 @@ window._bgDiag = async function(){
           + (_q != null && _q > 180 ? ' ← 멈춤 의심' : ''));
       add('서버 대화 모드: ' + (window._serverTalksActive ? '켜짐(로컬 생성 보류)' : '꺼짐(로컬 생성)'));
       add('대화 타이머: ' + (window._ltWatchdog ? '감시 중' : '없음'));
+    // ★ 지난 실행에서 멈춘 흔적
+    try{
+      var _st = JSON.parse(localStorage.getItem('lastStall') || 'null');
+      if(_st && _st.at){
+        var _ago = Math.round((Date.now() - _st.at)/60000);
+        add('지난 멈춤: ' + _ago + '분 전, ' + Math.round(_st.gap/1000) + '초간 정지');
+      } else add('지난 멈춤: 기록 없음');
+    }catch(e){}
+    // 최근 오류 3건
+    try{
+      var _el = JSON.parse(localStorage.getItem('gdm_err_log') || '[]');
+      if(_el.length){
+        add('최근 오류 ' + _el.length + '건:');
+        _el.slice(-3).forEach(function(e2){
+          add('  · ' + (e2.t || '') + ' ' + String(e2.m || '').slice(0, 60));
+        });
+      } else add('최근 오류: 없음');
+    }catch(e){}
     }catch(e){}
 
     // ★ 저장이 되는지 지금 직접 확인한다 (원인을 한 번에 가리기 위해)
@@ -15356,6 +15374,35 @@ window.addEventListener('unhandledrejection', function(e) {
   var r = e.reason;
   window.onerror('Promise: ' + ((r && r.message) || r), '', 0, 0, r);
 });
+
+/* ★ 2026-08-31: JS 스레드 멈춤 감시 (심박)
+   증상: 마퀴(CSS 애니메이션)만 움직이고 화면이 전혀 안 눌린다.
+        마퀴는 JS 와 무관하게 도니, 이 조합은 **JS 스레드가 멈췄다**는 뜻이다.
+        (무한 루프거나 아주 무거운 동기 작업)
+   화면이 안 눌리면 진단도 못 열기 때문에, 멈추기 직전 상황을 남겨 둔다.
+     · 1초마다 심박을 찍고 마지막 시각을 localStorage 에 저장
+     · 다음 실행 때 그 값을 보고 '얼마나 멈춰 있었는지'를 진단에 표시
+   심박이 멈춘 뒤에는 아무것도 실행되지 않으므로, 기록은 '멈추기 직전'까지다. */
+(function(){
+  var HB_KEY = 'lastHeartbeat';
+  var STALL_KEY = 'lastStall';
+  try{
+    // 지난 실행에서 멈춘 흔적이 있으면 기록해 둔다
+    var prev = parseInt(localStorage.getItem(HB_KEY) || '0', 10);
+    if(prev > 0){
+      var gap = Date.now() - prev;
+      // 5초 넘게 심박이 끊겼다 = 앱이 죽었거나 스레드가 멈췄다
+      if(gap > 5000 && gap < 7*24*3600*1000){
+        var rec = { at: prev, gap: gap };
+        localStorage.setItem(STALL_KEY, JSON.stringify(rec));
+        console.warn('[심박] 지난 실행이 ' + Math.round(gap/1000) + '초 전에 멈춤');
+      }
+    }
+  }catch(e){}
+  setInterval(function(){
+    try{ localStorage.setItem(HB_KEY, String(Date.now())); }catch(e){}
+  }, 1000);
+})();
 
 /* ★ 2026-08-31: '검은 화면' 감시
    앱이 오래 돌면 화면이 통째로 비고 아무것도 눌리지 않는 일이 있었다.
@@ -26937,6 +26984,17 @@ function renderCommList(){
   var list=document.getElementById('commList');
   var empty=document.getElementById('commEmpty');
   if(!list) return;
+  // ★ 2026-08-31: 화면에 안 보이면 그리지 않는다.
+  //   게시글이 200개를 넘으면 목록을 통째로 다시 만드는 데 수백 ms 가 걸린다.
+  //   그게 4초마다, 커뮤니티 탭이 아닐 때도 돌면서 JS 스레드를 계속 붙잡았다.
+  //   (마퀴만 움직이고 아무것도 안 눌리던 증상의 정체)
+  //   보이지 않으면 예약만 해 두고, 탭에 들어올 때 그린다.
+  try{
+    if(list.offsetParent === null){
+      window._commPendingRender = true;
+      return;
+    }
+  }catch(e){}
 
   // 서버에서 최신 게시글 로드 (캐시 있으면 즉시 렌더 + 백그라운드 갱신)
   if(_AI_POSTS.length === 0 || (typeof _commNeedRefresh !== 'undefined' && _commNeedRefresh)) {
@@ -26970,7 +27028,39 @@ function renderCommList(){
   if(!visible.length){ if(empty) empty.style.display='block'; return; }
   if(empty) empty.style.display='none';
   visible.sort(function(a,b){return b.time-a.time;});
-  visible.forEach(function(post){ list.appendChild(_renderPost(post)); });
+  // ★ 한 번에 다 그리지 않는다. 화면에 보이는 만큼만 먼저 그리고,
+  //   스크롤이 끝에 닿으면 이어서 붙인다(219개를 한 번에 만들면 화면이 멈춘다).
+  var _CHUNK = 30;
+  window._commAll = visible;
+  window._commShown = 0;
+  var _appendChunk = function(){
+    var arr = window._commAll || [];
+    var from = window._commShown || 0;
+    var to = Math.min(arr.length, from + _CHUNK);
+    var frag = document.createDocumentFragment();
+    for(var i=from;i<to;i++) frag.appendChild(_renderPost(arr[i]));
+    list.appendChild(frag);
+    window._commShown = to;
+    return to < arr.length;
+  };
+  window._commAppendChunk = _appendChunk;
+  _appendChunk();
+
+  // 스크롤이 바닥 근처면 다음 묶음
+  if(!list.__moreBound){
+    list.__moreBound = 1;
+    var _sc = list.closest ? (list.closest('.tab-body') || list.parentElement) : list.parentElement;
+    var _onScroll = function(){
+      try{
+        var el = _sc || document.scrollingElement;
+        if(!el) return;
+        if(el.scrollTop + el.clientHeight >= el.scrollHeight - 400){
+          if(window._commAppendChunk) window._commAppendChunk();
+        }
+      }catch(e){}
+    };
+    try{ (_sc || window).addEventListener('scroll', _onScroll, { passive:true }); }catch(e){}
+  }
 }
 window.renderCommList=renderCommList;
 
@@ -27843,7 +27933,21 @@ var _TALK_KEY      = 'liveTalk';
 var _TALK_MAX      = 100;
 var _TALK_TTL      = 12*3600*1000;     // 실시간 대화는 반나절
 
+// ★ 2026-08-31: 저장은 묶어서 한 번만 한다.
+//   글이 추가될 때마다 200개를 직렬화하면(각 글에 댓글까지) 수십~수백 ms 가 걸리고,
+//   그게 짧은 간격으로 반복되면 JS 스레드가 계속 붙잡힌다.
+//   3초 안에 여러 번 불려도 실제 저장은 한 번만 한다.
+var _savePostsTimer = null;
 function _savePosts(){
+  if(_savePostsTimer) return;
+  _savePostsTimer = setTimeout(function(){
+    _savePostsTimer = null;
+    _savePostsNow();
+  }, 3000);
+}
+window._savePosts = _savePosts;
+
+function _savePostsNow(){
   try{
     var now = Date.now();
     var arr = (_AI_POSTS || [])
@@ -27874,7 +27978,7 @@ function _savePosts(){
     }catch(e2){}
   }
 }
-window._savePosts = _savePosts;
+window._savePostsNow = _savePostsNow;
 
 function _loadPosts(){
   try{
