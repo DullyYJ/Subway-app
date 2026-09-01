@@ -9246,9 +9246,24 @@ function _recalcArrivalsFrom(anchorIdx){
   // ★ 역간 소요는 실측(_REAL_SEG 기반 _schedMin)을 고정 유지 — pace 배율 없이 '시각만 이동'
   //   (관측 속도로 역간 시간을 늘리거나 줄이지 않음 → 계양-아라 4분 등 하드코딩 값 보존)
   var anchorMs = anchor.ms;
-  // 앵커(최근 실측 통과) 기준으로 앞·뒤 모든 노드를 재계산 → 순서 꼬임 방지, 전체 일관
+  // ★ 2026-08-31: 아직 타지 않았으면 승차역부터 뒤는 건드리지 않는다.
+  //   열차·버스 출발 시각은 시각표(또는 실시간 도착정보)로 정해져 있다.
+  //   내가 역까지 빨리 걷든 늦게 걷든 그 차가 일찍 오지는 않는다.
+  //   예전엔 도보 노드를 통과할 때마다 앵커 기준으로 전 노드를 평행 이동시켜서,
+  //   걷는 속도에 따라 '17:38 → 17:39 → 17:34' 처럼 승차 시각이 계속 흔들렸다.
+  //   → 승차 전에는 '승차역 앞(도보 구간)'만 갱신한다.
+  var _boardIdx = -1;
+  for(var _bi2=0; _bi2<_transitNodeData.length; _bi2++){
+    var _n2 = _transitNodeData[_bi2];
+    if(!_n2.isOrigin && !_n2.isWalk && (_n2.isBus || _n2.isSub)){ _boardIdx = _bi2; break; }
+  }
+  var _notDeparted = (typeof _htlNotDeparted==='function') ? _htlNotDeparted() : false;
+
+  // 앵커(최근 실측 통과) 기준으로 노드 시각을 재계산 → 순서 꼬임 방지
   _transitNodeData.forEach(function(nd, idx){
     if(nd._schedMin == null) return;
+    // 승차 전이면 승차역 이후는 고정 (차가 오는 시각은 내 걸음과 무관하다)
+    if(_notDeparted && _boardIdx >= 0 && idx >= _boardIdx) return;
     var newMs = anchorMs + (nd._schedMin - anchor.sched) * 60000;
     var d = new Date(newMs);
     var hh = ('0'+d.getHours()).slice(-2), mm = ('0'+d.getMinutes()).slice(-2);
@@ -9262,10 +9277,66 @@ function _recalcArrivalsFrom(anchorIdx){
   //   이미 탄 열차이므로, 그 시각 이하의 가장 늦은 시각표 출발로 스냅한다.
   try{ _htlSnapBoardArr(); }catch(e){}
   try{ _fgNotifySync(); }catch(e){}      // ★ 역이 바뀌면 상주 알림도 즉시
+  try{ _aiArrivalSync(); }catch(e){}    // ★ AI 승무원 카드의 도착시각도 함께
+
+  // ★ 자가 점검: 경로 전체가 '지금'과 동떨어졌으면 되돌린다 (2026-08-31)
+  try{ _htlSanityCheck(); }catch(e){}
 
   // 헤더 남은시간/브리핑 갱신
   try { if(typeof _updateRouteRemaining === 'function') _updateRouteRemaining(); } catch(e){}
 }
+
+// 경로 시각이 현재 시각과 상식적으로 맞는지 확인한다.
+//   · 아직 안 탔으면: 승차역 시각이 지금보다 뒤여야 한다(이미 지난 차를 가리킬 수 없다)
+//   · 이미 탔으면  : 진행 중인 노드 시각이 지금 근처여야 한다
+//   크게 어긋나면 경로 전체를 통째로 평행 이동시켜 '지금'에 맞춘다.
+var _HTL_SANITY_TOL_MIN = 40;
+function _htlSanityCheck(){
+  try{
+    if(window._metroRouteMode === true) return;                 // 노선도 미리보기 제외
+    if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return;   // 예상시각 모드 제외
+    if(!_transitNodeData || !_transitNodeData.length) return;
+
+    // 기준 노드: 진행 중이면 그 노드, 아니면 승차역
+    var idx = -1;
+    var prog = (window._gpsMaxIdx == null) ? -1 : window._gpsMaxIdx;
+    if(prog >= 0 && _transitNodeData[prog] && _transitNodeData[prog]._schedMin != null){
+      idx = prog;
+    } else {
+      for(var i=0;i<_transitNodeData.length;i++){
+        var n = _transitNodeData[i];
+        if(!n.isOrigin && !n.isWalk && (n.isBus || n.isSub) && n._schedMin != null){ idx = i; break; }
+      }
+    }
+    if(idx < 0) return;
+
+    var gap = (typeof _markerTimeGap === 'function') ? _markerTimeGap(_transitNodeData[idx]) : null;
+    if(gap == null) return;
+    if(Math.abs(gap) <= _HTL_SANITY_TOL_MIN) return;             // 정상 범위
+
+    // 같은 값을 반복 교정하지 않는다
+    var now = Date.now();
+    if(window._htlSanityAt && (now - window._htlSanityAt) < 30000) return;
+    window._htlSanityAt = now;
+
+    console.warn('[경로시각] 기준 노드 ' + (_transitNodeData[idx].name||'?')
+      + '(' + _transitNodeData[idx].arrTime + ')가 현재와 ' + Math.round(gap)
+      + '분 차이 → 경로 전체를 현재 기준으로 맞춤');
+    // gap 이 양수면 미래로 밀려 있으므로 그만큼 당긴다
+    var mins = -gap;
+    _transitNodeData.forEach(function(nd){
+      if(nd._schedMin == null) return;
+      nd._schedMin += mins;
+      var t = ((nd._schedMin % 1440) + 1440) % 1440;
+      var _h = Math.floor(t/60), _m = Math.round(t%60);
+      if(_m >= 60){ _m -= 60; _h = (_h+1)%24; }
+      nd.arrTime = ('0'+_h).slice(-2) + ':' + ('0'+_m).slice(-2);
+      if(nd.el){ var lbl = nd.el.querySelector('.htl-time-lbl'); if(lbl) lbl.textContent = nd.arrTime; }
+    });
+    window._markerMaxProg = null;      // 위치 상한도 초기화
+  }catch(e){}
+}
+window._htlSanityCheck = _htlSanityCheck;
 
 // ★ 역을 지날 때마다 상주 알림을 즉시 갱신한다 (2026-08-30)
 //   예전엔 30초 주기로만 갱신돼서, 역을 지나도 한동안 이전 역이 떠 있었다.
@@ -9419,9 +9490,17 @@ function _htlNodeMs(nd){
   return ms;
 }
 // fromIdx 이후 모든 노드를 sec 초만큼 이동 (양수=지연, 음수=단축)
+// 한 번에 이동할 수 있는 최대 폭. 실제 지연·단축은 아무리 커도 이 범위다.
+// 이걸 넘는 값은 계산 오류이므로 통째로 무시한다(예전엔 상한이 없어
+// 잘못된 값 하나가 경로 전체를 몇 시간씩 밀어버릴 수 있었다).
+var _HTL_SHIFT_MAX_MIN = 90;
 function _htlShiftFrom(fromIdx, sec){
   if(!sec || !isFinite(sec)) return;
   var mins = sec / 60;
+  if(Math.abs(mins) > _HTL_SHIFT_MAX_MIN){
+    console.warn('[시각이동] ' + Math.round(mins) + '분은 비정상 → 무시');
+    return;
+  }
   _transitNodeData.forEach(function(nd, i){
     if(i < fromIdx || nd._schedMin == null) return;
     nd._schedMin += mins;
@@ -11106,11 +11185,58 @@ function _gpsSegment(lat, lng, bestIdx){
 }
 
 // GPS 마커(dot+ring)를 두 노드 사이 ratio 위치에 부드럽게 배치
+// ★ 마커가 서 있는 노드의 시각이 '지금'과 맞는지 본다 (2026-08-31)
+//   마커는 현재 내가 있는 지점이므로, 그 노드에 적힌 시각은 현재 시각 근처여야 한다.
+//   지금 6:22 인데 마커가 18:54 에 있는 건 논리적으로 불가능하다.
+//   원인: 경로 시각이 어떤 이유로 크게 어긋났는데(예: 예전 경로 잔존, 자정 넘김 오판)
+//   마커 배치는 그걸 검증하지 않고 그대로 따라갔다.
+//   → 어긋남이 크면 배치를 시각 기준으로 되돌린다.
+var _MARKER_TIME_TOL_MIN = 25;    // 이 이상 어긋나면 시각 기준으로 교정
+function _markerTimeGap(nd){
+  try{
+    if(!nd || !nd.arrTime || !/^\d{1,2}:\d{2}$/.test(nd.arrTime)) return null;
+    var p = nd.arrTime.split(':');
+    var h = parseInt(p[0],10), mi = parseInt(p[1],10);
+    if(!(h>=0 && h<=23 && mi>=0 && mi<=59)) return null;
+    var now = new Date();
+    var nowMin = now.getHours()*60 + now.getMinutes() + now.getSeconds()/60;
+    var d = (h*60 + mi) - nowMin;
+    if(d >  720) d -= 1440;          // 자정 넘김 보정
+    if(d < -720) d += 1440;
+    return d;                        // 양수 = 아직 안 온 시각, 음수 = 지난 시각
+  }catch(e){ return null; }
+}
+window._markerTimeGap = _markerTimeGap;
+
 function _placeGpsMarkerSmooth(fromNd, toNd, ratio){
   var track = document.getElementById('transitHtlTrack');
   var dot  = window._htlGpsDot  || document.getElementById('htl-gps-marker-dot');
   var ring = window._htlGpsRing || document.getElementById('htl-gps-marker-ring');
   if(!track || !dot || !fromNd || !fromNd.el) return;
+
+  // ── 시각 정합성 검사 ──────────────────────────────
+  //   미리보기(노선도·예상시각)는 '지금' 기준이 아니므로 검사하지 않는다.
+  try{
+    var _skipTimeChk = (window._metroRouteMode === true)
+                    || (typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null);
+    if(!_skipTimeChk && _transitNodeData && _transitNodeData.length){
+      var _gap = _markerTimeGap(fromNd);
+      if(_gap != null && Math.abs(_gap) > _MARKER_TIME_TOL_MIN){
+        // 시각으로 다시 계산한 위치가 있으면 그쪽을 쓴다
+        var _tp = (typeof _estimateTimelinePos === 'function') ? _estimateTimelinePos() : null;
+        if(_tp && _transitNodeData[_tp.fromIdx]){
+          var _nf = _transitNodeData[_tp.fromIdx];
+          var _nt = _transitNodeData[_tp.toIdx] || _nf;
+          if(_nf.el && _nf !== fromNd){
+            console.warn('[마커] ' + (fromNd.name||'?') + '(' + fromNd.arrTime + ')는 현재 시각과 '
+              + Math.round(_gap) + '분 차이 → 시각 기준 ' + (_nf.name||'?') + '(' + _nf.arrTime + ')로 교정');
+            fromNd = _nf; toNd = _nt; ratio = _tp.ratio || 0;
+            window._markerMaxProg = null;      // 교정했으므로 역주행 상한도 초기화
+          }
+        }
+      }
+    }
+  }catch(e){}
   // ★ 트랙이 숨겨져 있으면(다른 탭 등) offset이 0 → 이동하지 말고 복귀 시 스냅하도록 표시
   if(track.offsetParent === null || track.offsetWidth === 0){ window._gpsMarkerNeedsSnap = true; return; }
 
@@ -11225,11 +11351,26 @@ function _updateRouteRemaining(){
   if(rem == null) return;
   var numEl = document.getElementById('transitResultMinNum');
   if(numEl) numEl.textContent = rem;
-  if(window._lastRemMin !== rem){
+  // ★ 2026-08-31: 남은 '분'이 같아도 도착 '시각'은 바뀔 수 있다.
+  //   예전엔 rem 이 달라졌을 때만 갱신해서, 경로 시각이 이동해도
+  //   AI 승무원 카드에는 이전 도착시각이 그대로 남아 있었다.
+  //   (경로는 18:35 인데 AI 는 19:19 로 표시되던 문제)
+  //   → 타임라인의 도착 시각이 바뀌면 분이 같아도 다시 그린다.
+  var _arrMs = (typeof _routeArriveMs === 'function') ? _routeArriveMs() : null;
+  if(window._lastRemMin !== rem || window._lastArrMs !== _arrMs){
     window._lastRemMin = rem;
+    window._lastArrMs  = _arrMs;
     _syncHomeBriefRemaining(rem);
   }
 }
+
+// ★ 경로 시각이 재계산되면 AI 승무원 카드의 도착시각도 즉시 맞춘다.
+function _aiArrivalSync(){
+  try{
+    if(typeof _updateRouteRemaining === 'function') _updateRouteRemaining();
+  }catch(e){}
+}
+window._aiArrivalSync = _aiArrivalSync;
 
 // ── 경로 추적용 연속 GPS watch: 좌표를 실시간으로 갱신 (고정 방지) ──
 // 수동 출발지 모드: 출발지가 '내 위치(gps)'가 아니면 true → GPS 추적/보정 금지
@@ -13063,18 +13204,41 @@ function _busArrHtml(cardIdx, rid, slot, arr){
   var id='busarr_'+cardIdx+'_'+rid+'_'+slot;
   if(!arr) return slot===0 ? '<div class="kbus-arr kbus-none">도착정보 없음</div>' : '';
   var cnt = arr.cnt>0 ? '<span class="kbus-cnt">'+arr.cnt+'번째전</span>' : '';
-  return '<div class="kbus-arr'+(arr.sec<=60?' soon':'')+'" id="'+id+'"><span class="kbus-time">'+_busFmtCd(arr.sec)+'</span>'+cnt+'</div>';
+  // ★ 카드를 다시 그려도 이어서 흐르도록, 기억해 둔 시작점 기준으로 표시한다
+  var prev = _BUSARR[id];
+  var show = arr.sec;
+  if(prev){
+    var flowed = prev.sec - (Date.now() - prev.at)/1000;
+    if(Math.abs(arr.sec - flowed) <= 45) show = flowed;
+  }
+  return '<div class="kbus-arr'+(show<=60?' soon':'')+'" id="'+id+'"><span class="kbus-time">'+_busFmtCd(show)+'</span>'+cnt+'</div>';
 }
+// ★ 2026-08-31: 같은 값이면 카운트다운 시작점을 유지한다.
+//   화면을 다시 그릴 때마다 at 을 지금으로 갱신하면, 흐르던 시간이 처음으로 되돌아간다.
+//   (탭을 다녀오면 '4분 39초'가 다시 '4분 39초'로 보이던 이유)
+//   서버가 준 값이 실제로 바뀌었을 때만 새로 시작한다.
+function _busArrKeep(id, sec){
+  var prev = _BUSARR[id];
+  if(prev){
+    var flowed = prev.sec - (Date.now() - prev.at)/1000;   // 지금 흐르고 있는 값
+    // 새 값이 흐르던 값과 45초 이내면 '같은 차'로 보고 시작점을 유지
+    if(Math.abs(sec - flowed) <= 45) return prev;
+  }
+  return { sec: sec, at: Date.now() };
+}
+
 function _busArrReg(cardIdx, rid, slot, arr){
   var id='busarr_'+cardIdx+'_'+rid+'_'+slot;
-  if(arr){ _BUSARR[id]={sec:arr.sec, at:Date.now()}; } else { delete _BUSARR[id]; }
+  if(arr){ _BUSARR[id]=_busArrKeep(id, arr.sec); } else { delete _BUSARR[id]; }
 }
 function _busArrUpd(cardIdx, rid, slot, arr){
   var id='busarr_'+cardIdx+'_'+rid+'_'+slot, el=document.getElementById(id);
   if(!arr){ delete _BUSARR[id]; return; }
-  _BUSARR[id]={sec:arr.sec, at:Date.now()};
+  _BUSARR[id]=_busArrKeep(id, arr.sec);
   if(el){
-    var t=el.querySelector('.kbus-time'); if(t) t.textContent=_busFmtCd(arr.sec);
+    // 화면 글자는 '지금 흐르는 값'으로 — 새 응답이 와도 숫자가 튀지 않는다
+    var _st=_BUSARR[id], _now=_st.sec-(Date.now()-_st.at)/1000;
+    var t=el.querySelector('.kbus-time'); if(t) t.textContent=_busFmtCd(_now);
     var c=el.querySelector('.kbus-cnt');
     if(arr.cnt>0){ if(c){ c.textContent=arr.cnt+'번째전'; } else { el.insertAdjacentHTML('beforeend','<span class="kbus-cnt">'+arr.cnt+'번째전</span>'); } }
     else if(c){ c.remove(); }
@@ -13086,9 +13250,15 @@ if(!window._busCdTick){
     if(document.hidden) return;
     var now=Date.now();
     for(var id in _BUSARR){
+      var st=_BUSARR[id];
+      // ★ 오래된 항목만 지운다.
+      //   예전엔 DOM 이 없으면 바로 지웠는데, 다른 탭에 가 있는 동안에도
+      //   카드가 화면에서 사라져 상태가 통째로 날아갔다.
+      //   그래서 돌아오면 카운트다운이 처음부터 다시 시작했다.
+      if(!st || (now - st.at) > 10*60*1000){ delete _BUSARR[id]; continue; }
       var el=document.getElementById(id);
-      if(!el){ delete _BUSARR[id]; continue; }
-      var st=_BUSARR[id], rem=st.sec-(now-st.at)/1000;
+      if(!el) continue;                       // 화면에 없을 뿐, 상태는 유지
+      var rem=st.sec-(now-st.at)/1000;
       var t=el.querySelector('.kbus-time'); if(t) t.textContent=_busFmtCd(rem);
       if(rem<=60) el.classList.add('soon'); else el.classList.remove('soon');
     }
@@ -25567,14 +25737,43 @@ function switchTab(tab,el){
   if(tab === 'food') {
     setTimeout(function(){ if(typeof loadFoodTab === 'function') loadFoodTab(false); }, 100);
   }
-  // ★ 노선도 탭 진입 시 버스 화면이 열려 있으면 현재 위치로 주변 정류장 재계산
+  // ★ 2026-08-31: 노선도 탭에 돌아왔을 때 화면을 다시 만들지 않는다.
+  //   예전엔 무조건 loadMapNearStops() 를 불러 목록을 통째로 재구성했다.
+  //   그래서 다른 탭을 다녀오면 카운트다운이 처음부터 다시 시작하고,
+  //   스피너가 돌면서 화면이 깜빡였다.
+  //   → 목록이 이미 있으면 **도착정보만 조용히 갱신**한다.
+  //     위치가 실제로 많이 바뀌었을 때만 목록을 다시 만든다.
   if(tab === 'map'){
     setTimeout(function(){
       try{
         var busPane = document.getElementById('mapBusPanel') || document.getElementById('mapBusView');
         var busOpen = busPane ? (busPane.style.display !== 'none') : false;
-        if(busOpen && (typeof _busViewMode==='undefined' || _busViewMode==='near')
-           && typeof loadMapNearStops==='function') loadMapNearStops();
+        if(!busOpen) return;
+        if(typeof _busViewMode !== 'undefined' && _busViewMode !== 'near') return;
+
+        var hasList = !!(window._mapBusCards && window._mapBusCards.length);
+        if(!hasList){
+          if(typeof loadMapNearStops==='function') loadMapNearStops();
+          return;
+        }
+
+        // 위치가 크게 바뀌었으면 목록 자체를 새로 만든다
+        var moved = false;
+        try{
+          var c = window._nearStopsCache;
+          var la = window._lastGPSLat, ln = window._lastGPSLng;
+          if(c && la != null && ln != null && typeof haversineM === 'function'){
+            moved = haversineM(c.lat, c.lng, la, ln) > 250;
+          }
+        }catch(e){}
+        if(moved){
+          console.log('[버스탭] 위치가 바뀌어 목록을 다시 만듭니다');
+          if(typeof loadMapNearStops==='function') loadMapNearStops(true);
+          return;
+        }
+
+        // 그대로 두고 도착정보만 갱신 — 화면은 깜빡이지 않는다
+        if(typeof _refreshMapBusArrivals === 'function') _refreshMapBusArrivals();
       }catch(e){}
     }, 150);
   }
