@@ -7325,6 +7325,16 @@ function fmapDoRoute() {
   // 이 응답을 버려야 하는가 = '더 새로운 요청의 결과가 이미 화면에 그려졌는가'
   //   (단순히 새 요청이 시작된 것만으로 버리면, 그 요청이 실패했을 때 카드가 빈 채로 남는다)
   function _routeStale(){ return (window._routeResultReady || 0) > _reqToken; }
+
+// 로딩 덮개를 끄는 단일 창구 — 감시 타이머까지 함께 정리한다.
+function _hideRouteLoading(){
+  try{
+    var el = document.getElementById('transitLoading');
+    if(el) el.style.display = 'none';
+    if(window._loadingGuard){ clearTimeout(window._loadingGuard); window._loadingGuard = null; }
+  }catch(e){}
+}
+window._hideRouteLoading = _hideRouteLoading;
   _allRouteResults = null;
   window._transitResultData = null;
   window._lastHtlNodes = null;
@@ -7401,7 +7411,23 @@ function fmapDoRoute() {
     setTimeout(_scrollToResult, 650);    // 레이아웃 정착 후
   }
   window._scrollToRouteResult = _scrollToResult;
-  if(loading) loading.style.display = 'flex';
+  if(loading){
+    loading.style.display = 'flex';
+    // ★ 어떤 경로로도 끄지 못하는 상황에 대비한 최후의 안전장치.
+    //   화면 전체를 덮는 요소라, 한 번 남으면 앱이 통째로 먹통이 된다.
+    //   정상 흐름은 늦어도 15초 안에 끝나므로 그 뒤엔 강제로 걷어낸다.
+    try{ clearTimeout(window._loadingGuard); }catch(e){}
+    window._loadingGuard = setTimeout(function(){
+      try{
+        var el = document.getElementById('transitLoading');
+        if(el && el.style.display !== 'none'){
+          el.style.display = 'none';
+          console.warn('[안전장치] 로딩 덮개가 남아 있어 강제로 닫음');
+          if(typeof toast === 'function') toast('경로를 불러오지 못했어요. 다시 시도해 주세요');
+        }
+      }catch(e){}
+    }, 15000);
+  }
   if(card)    card.style.display = 'none';
   if(errBox)  errBox.style.display = 'none';
 
@@ -7514,7 +7540,11 @@ function fmapDoRoute() {
     // ★ 출발지 주변 실시간 버스 대기를 먼저 모아 엔진에 넘긴다(rtw).
     //   못 모으거나 늦으면 빈 값으로 진행 — 기존 동작 그대로다.
     _collectRTW(start.lat, start.lng, function(rtw){
-    if(_routeStale()) return;
+    // ★ 2026-08-31: 오래된 응답이라 버릴 때도 로딩 오버레이는 반드시 끈다.
+    //   transitLoading 은 position:fixed;inset:0;z-index:9000 인 전체 화면 덮개다.
+    //   예전엔 여기서 그냥 return 해서 덮개가 남았고, 화면 전체가 안 눌렸다.
+    //   (앱을 껐다 켜야만 사라지던 '먹통' 증상의 정체)
+    if(_routeStale()){ if(loading) loading.style.display = 'none'; return; }
     window._routeSentAt = Date.now();          // 워치독 기준 시각
     if(rtw) console.log('[route-v2-rtw]', rtw);
 
@@ -7614,8 +7644,9 @@ function fmapDoRoute() {
     }))
     .then(function(results) {
       // ★ 더 새로운 결과가 이미 그려졌으면 이 응답은 버린다 (오래된 경로 표시 방지)
-      if(_routeStale()) return;
+      //   버리더라도 로딩 덮개는 먼저 끈다.
       if(loading) loading.style.display = 'none';
+      if(_routeStale()) return;
 
       // 모든 path 합치기
       var allPaths = [];
@@ -7666,12 +7697,14 @@ function fmapDoRoute() {
         ? function(paths, cb){ console.log('[순위] 엔진이 실시간 반영함(' + _rtwDone + '개 노선) → 앱 재순위 생략'); cb(); }
         : _applyRealtimeWaits;
 
-      // ★ 노선도가 늦게 뜼던 이유: 재순위(_applyRealtimeWaits, 최대 3.5초)가
-      //   끝나야 비로서 그렸다. 앞단 실시간 대기 수집(1.5초)까지 합치면
-      //   경로가 다 왔는데도 화면이 5초가까이 비어 있었다.
+      // ★ 노선도가 늦게 뜨던 이유: 재순위(_applyRealtimeWaits, 최대 3.5초)가
+      //   끝나야 비로소 그렸다. 앞단 실시간 대기 수집(1.5초)까지 합치면
+      //   경로가 다 왔는데도 화면이 5초 가까이 비어 있었다.
       //   → 기본 순위로 **먼저 그리고**, 재순위 결과가 오면 그때 다시 그린다.
       var _drawOnce = function(first){
-        if(_routeStale()) return;
+        // 여기까지 오면 위에서 이미 덮개를 껐지만, 규칙을 하나로 지킨다
+        //   ('stale 로 빠져나갈 때는 반드시 덮개를 끈다')
+        if(_routeStale()){ if(typeof _hideRouteLoading==='function') _hideRouteLoading(); return; }
         var _cd = { result: { path: allPaths } };
         window._favSearchStart = start;
         if(first) window._favToastKey = null;
@@ -7696,7 +7729,7 @@ function fmapDoRoute() {
       _drawOnce(true);     // 즉시 1차 렌더 — 노선도가 바로 보인다
 
       _rankStep(allPaths, function(){
-      if(_routeStale()) return;
+      if(_routeStale()){ if(loading) loading.style.display = 'none'; return; }
       // 재순위 결과 반영 — 순서가 바뀌었을 수 있으므로 다시 그린다
       _drawOnce(false);
 
