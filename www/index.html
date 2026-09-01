@@ -12506,16 +12506,23 @@ function loadMapNearStops(force) {
     if(!shown && !silent){
       listEl.innerHTML = '<div class="map-bus-loading"><div class="bus-spinner"></div>현재 위치로 주변 정류장 검색 중...</div>';
       // 응답이 끝내 안 오면 로딩에서 멈추지 않도록
+      // ★ 2026-08-31: 20초는 너무 길고, 실패했다고 빈 화면을 주면 안 된다.
+      //   8초로 줄이고 마지막 성공 목록이 있으면 그걸 먼저 보여준다.
       clearTimeout(window._nearLoadGuard);
       window._nearLoadGuard = setTimeout(function(){
         try{
           if(shown) return;
-          if(listEl.querySelector('.bus-spinner')){
-            listEl.innerHTML = '<div class="map-bus-empty">😕<br>정류장 정보를 불러오지 못했어요<br>'
-              + '<button class="map-bus-set-btn" onclick="window._nearWideTried=0;loadMapNearStops(true)">다시 시도</button></div>';
+          if(!listEl.querySelector('.bus-spinner')) return;
+          var _last = (typeof _nearCacheGet === 'function') ? _nearCacheGet(la, ln) : null;
+          if(_last && _last.length){
+            paint(_last, la, ln, false);
+            if(typeof toast==='function') toast('최근에 받은 정류장 목록을 보여드려요');
+            return;
           }
+          listEl.innerHTML = '<div class="map-bus-empty">😕<br>정류장 정보를 불러오지 못했어요<br>'
+            + '<button class="map-bus-set-btn" onclick="window._nearWideTried=0;loadMapNearStops(true)">다시 시도</button></div>';
         }catch(e){}
-      }, 20000);
+      }, 8000);
     }
     _fetchNearStops(la, ln, function(err, stops){
       // 성공한 결과는 저장해 둔다(다음 실패 때 폴백으로 쓴다)
@@ -25360,6 +25367,25 @@ function inlineDestSearch(q){
 
 /* ══ 탭 전환 ══ */
 function switchTab(tab,el){
+  // ★ 2026-08-31: 탭을 바꾸면 열려 있던 시트·모달을 닫는다.
+  //   예전엔 노선 상세 시트가 그대로 남아, 홈을 눌러도 노선도가 덮고 있었다.
+  try{
+    if(typeof closeBusRoute === 'function'
+       && (document.getElementById('busRouteModal')||{}).style
+       && document.getElementById('busRouteModal').style.display !== 'none'){
+      closeBusRoute();
+    }
+  }catch(e){}
+  try{
+    // 화면을 덮는 시트·팝업만 닫는다.
+    //   승차 확인(boardAskModal 등)은 진행 중인 여정과 관련되므로 건드리지 않는다.
+    ['transitDetailModal','transitDetailSheet','mapRouteSheet','mapStnPopup',
+     'favSheet','postSheet','routeModal','routeModePopup','gmPop'].forEach(function(id){
+      var m = document.getElementById(id);
+      if(m && m.style && m.style.display !== 'none') m.style.display = 'none';
+    });
+  }catch(e){}
+
   // 현재 탭을 스택에 저장 (뒤로가기용)
   var curActive = document.querySelector('.tab-body.active');
   if(curActive){
@@ -28942,6 +28968,17 @@ function _checkRouteProximityAlert(lat, lng) {
 
       var isDestination = (i === path.length - 1);
       var isTransfer    = S.route.transfers && S.route.transfers.indexOf(stnName) >= 0;
+
+      // ★ 2026-08-31: 중간역을 지날 때마다 진동이 울려 성가시다는 피드백.
+      //   진동은 '내려야 할 때'만 의미가 있다 — 목적지·환승역 2정거장 이내로 제한.
+      //   그 밖의 역은 상단 알림(제목의 남은시간)만 조용히 갱신한다.
+      var _remainStops = (path.length - 1) - i;
+      var _shouldBuzz  = isDestination || isTransfer || (_remainStops <= 2);
+      if(!_shouldBuzz){
+        try{ if(typeof _fgNotifySync === 'function') _fgNotifySync(); }catch(e){}
+        console.log('[PROX] ' + stnName + ' 통과 — 진동 없이 알림만 갱신 (남은 ' + _remainStops + '정거장)');
+        continue;
+      }
 
       var title, body;
       if(isDestination) {
