@@ -10581,11 +10581,26 @@ function _isDarkTheme(){
 // 지도에 배경 타일을 얹는다. 실패가 잦으면 자동으로 OSM 으로 되돌린다.
 function _addBaseTiles(map){
   function _osm(){
-    return L.tileLayer(_TILE_OSM, {
+    var l = L.tileLayer(_TILE_OSM, {
       maxZoom: 19,
       subdomains: 'abc',
       attribution: _TILE_ATTR_OSM
     }).addTo(map);
+    // ★ 2026-08-31: 타일 한두 장이 실패하면 그 자리가 영영 빈 채로 남는다.
+    //   (네트워크가 잠깐 끊기거나 타일 서버가 순간 느릴 때 흔하다)
+    //   실패한 타일만 잠시 뒤 한 번 더 요청한다.
+    l.on('tileerror', function(ev){
+      try{
+        var t = ev && ev.tile;
+        if(!t || t.__retried) return;
+        t.__retried = 1;
+        var src = t.src;
+        setTimeout(function(){
+          try{ t.src = src + (src.indexOf('?')>=0 ? '&' : '?') + '_r=' + Date.now(); }catch(e){}
+        }, 800);
+      }catch(e){}
+    });
+    return l;
   }
   try{
     var key = _cartoKey();
@@ -12628,10 +12643,37 @@ function _busNearMapRender(stops){
 
       if(pts.length === 1) _busNearMap.setView(pts[0], 17);
       else if(pts.length) _busNearMap.fitBounds(L.latLngBounds(pts), { padding:[36,36], maxZoom:17 });
-      // 컨테이너 높이가 확정된 뒤에 타일이 채워지도록 재측정
-      [0, 150, 400, 800].forEach(function(d){
+      // ★ 2026-08-31: 타일이 절반만 그려지는 문제.
+      //   컨테이너 크기가 확정되기 전에 Leaflet 이 타일 격자를 계산하면
+      //   그 시점의 (더 작은) 크기만큼만 타일을 요청하고, 나중에 컨테이너가
+      //   커져도 빈 영역이 그대로 남는다.
+      //   예전엔 800ms 까지만 재측정해서, 그 뒤에 크기가 바뀌면 놓쳤다.
+      //   → 재측정을 늘리고, ResizeObserver 로 '크기가 바뀔 때마다' 다시 맞춘다.
+      [0, 150, 400, 800, 1500].forEach(function(d){
         setTimeout(function(){ try{ _busNearMap.invalidateSize(); }catch(e){} }, d);
       });
+      // 컨테이너 크기 변화를 계속 따라간다(탭 전환·지도 높이 변경 등)
+      try{
+        if(window.ResizeObserver && !_busNearMap.__ro){
+          _busNearMap.__ro = new ResizeObserver(function(){
+            try{ _busNearMap.invalidateSize(); }catch(e){}
+          });
+          _busNearMap.__ro.observe(el);
+        }
+      }catch(e){}
+      // 화면에 보이게 된 순간에도 한 번 (숨겨진 상태에서 만들어졌을 때)
+      try{
+        if(window.IntersectionObserver && !_busNearMap.__io){
+          _busNearMap.__io = new IntersectionObserver(function(ents){
+            for(var i=0;i<ents.length;i++){
+              if(ents[i].isIntersecting){
+                try{ _busNearMap.invalidateSize(); }catch(e){}
+              }
+            }
+          }, { threshold: 0.1 });
+          _busNearMap.__io.observe(el);
+        }
+      }catch(e){}
     }catch(e){ wrap.style.display = 'none'; }
   });
 }
@@ -15021,6 +15063,15 @@ window._bgDiag = async function(){
     var _ap = (typeof _AI_POSTS!=='undefined' && _AI_POSTS) ? _AI_POSTS : (window._AI_POSTS || null);
     add('현재 화면 대화: ' + (_lv ? _lv.length : '읽을 수 없음') + '줄'
         + ' · 게시글 ' + (_ap ? _ap.length : '읽을 수 없음') + '개');
+    // ★ 대화가 멈췄는지 한눈에
+    try{
+      var _lastT = (_lv && _lv.length) ? (_lv[_lv.length-1].time || 0) : 0;
+      var _q = _lastT ? Math.round((Date.now() - _lastT)/1000) : null;
+      add('마지막 대화: ' + (_q == null ? '없음' : _q + '초 전')
+          + (_q != null && _q > 180 ? ' ← 멈춤 의심' : ''));
+      add('서버 대화 모드: ' + (window._serverTalksActive ? '켜짐(로컬 생성 보류)' : '꺼짐(로컬 생성)'));
+      add('대화 타이머: ' + (window._ltWatchdog ? '감시 중' : '없음'));
+    }catch(e){}
 
     // ★ 저장이 되는지 지금 직접 확인한다 (원인을 한 번에 가리기 위해)
     if(typeof window._saveTalk !== 'function'){
@@ -15941,7 +15992,7 @@ window.addEventListener('unhandledrejection', function(e) {
       <!-- ★ 실시간 열차위치 진단 -->
       <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-top:12px;">
         <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">🚆 실시간 열차위치 진단</div>
-        <p style="font-size:12px;color:var(--sub);margin-bottom:12px;">실시간 적용 중: <b>1~9호선·GTX-A</b>(열차위치) · <b>서해선·경강선·신림선·우이신설선</b>(도착정보)<br>인천1·2호선·김포골드라인·의정부경전철·에버라인은 실시간 미제공 → 시각표+GPS+연착추정<br>1차=열차위치 · 2차=역 도착정보 (각 10~15초)</p>
+        <p style="font-size:12px;color:var(--sub);margin-bottom:12px;"><b>열차위치</b>(1순위): 1~9호선 · 경의중앙 · 수인분당 · 공항철도 · 경춘 · 신분당<br><b>도착정보</b>(2순위): 위 노선 + 서해 · 경강 · 신림 · 우이신설<br><b>미제공</b>: 인천1·2호선, 김포골드라인, 의정부경전철, 에버라인, GTX-A → 시각표+GPS+연착추정<br>1차=열차위치 · 2차=역 도착정보 (각 10~15초)</p>
         <div style="display:flex;gap:8px;margin-bottom:10px;">
           <button onclick="_rtProbeUI2()" style="flex:1;padding:11px;border-radius:10px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:var(--gold);color:#121214;font-family:inherit;">진단 실행</button>
           <button onclick="_rtProbeReset()" style="padding:11px 14px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--sub);font-family:inherit;">초기화</button>
@@ -25832,6 +25883,14 @@ function switchTab(tab,el){
 
         // 그대로 두고 도착정보만 갱신 — 화면은 깜빡이지 않는다
         if(typeof _refreshMapBusArrivals === 'function') _refreshMapBusArrivals();
+        // ★ 탭에 돌아오면 지도 크기를 다시 맞춘다(숨겨져 있던 동안 타일이 안 채워짐)
+        try{
+          if(_busNearMap){
+            [0, 200, 600].forEach(function(d){
+              setTimeout(function(){ try{ _busNearMap.invalidateSize(); }catch(e){} }, d);
+            });
+          }
+        }catch(e){}
       }catch(e){}
     }, 150);
   }
@@ -38983,7 +39042,11 @@ function _serverFetchTalks(){
     fetch(_SERVER_URL + '/talks?after=' + _lastTalkTs)
       .then(function(r){ return r.json(); })
       .then(function(d){
-        if(!d || !d.talks || !d.talks.length) return;
+        // 응답은 왔지만 새 대화가 없음 = 서버 대본 소진 상태
+        if(!d || !d.talks || !d.talks.length){
+          window._serverEmptyAt = Date.now();
+          return;
+        }
         var added = false;
         var _nowMs = Date.now();
         d.talks.forEach(function(t){
@@ -39877,6 +39940,7 @@ function _ltGenerate(){
   try{ var _p = (typeof _ltPickPool==='function') ? (_ltPickPool()||[]) : []; if(_p.length) _poolN = Math.max(5, Math.min(20, Math.floor(_p.length/2))); }catch(e){}
   while(_ltRecentTexts.length > _poolN) _ltRecentTexts.shift();
   _ltAdd({ nick: nick, text: text, time: Date.now(), mine: false });
+  window._ltLastGenAt = Date.now();
 }
 function _renderLiveTalk(){
   var box = document.getElementById('liveTalkList');
@@ -39951,6 +40015,36 @@ function _homeTalkSend(){
 }
 window._homeTalkSend = _homeTalkSend;
 var _ltTimer = null;
+// ★ 실시간소통 자가 복구 (2026-08-31)
+//   증상: 일정 시간이 지나면 새 대화가 영영 안 올라온다.
+//   타이머가 어떤 이유로든 끊기면(예외·백그라운드 정리·중복 clear) 되살릴 길이 없었다.
+//   → 2분마다 '마지막 대화가 언제였는지' 보고, 너무 오래 조용하면 다시 돌린다.
+var _LT_STALL_MS = 3*60*1000;    // 이 시간 넘게 새 대화가 없으면 멈춘 것으로 본다
+if(!window._ltWatchdog){
+  window._ltWatchdog = setInterval(function(){
+    try{
+      if(document.hidden) return;
+      var last = 0;
+      try{
+        if(_LIVE_TALK && _LIVE_TALK.length){
+          var m = _LIVE_TALK[_LIVE_TALK.length-1];
+          last = m && m.time ? m.time : 0;
+        }
+      }catch(e){}
+      if(!last) last = window._ltLastGenAt || 0;
+      if(!last) return;                       // 아직 한 줄도 없으면 판단 보류
+      var quiet = Date.now() - last;
+      if(quiet < _LT_STALL_MS) return;
+
+      console.warn('[실시간소통] ' + Math.round(quiet/1000) + '초째 조용 → 다시 시작');
+      // 서버 대기 플래그도 풀고, 즉시 한 줄 생성한 뒤 타이머 재예약
+      window._serverTalksActive = false;
+      try{ if(typeof _ltGenerate === 'function') _ltGenerate(); }catch(e){}
+      try{ if(typeof _scheduleLiveTalk === 'function') _scheduleLiveTalk(); }catch(e){}
+    }catch(e){}
+  }, 120000);
+}
+
 function _scheduleLiveTalk(){
   if(_ltTimer) clearTimeout(_ltTimer);
   // 실제 채팅 리듬: Gemini 대화 큐가 있으면 8~16초(활발), 폴백이면 15~26초(잔잔)
@@ -39959,7 +40053,17 @@ function _scheduleLiveTalk(){
     // ★ 2026-08-31: 생성 중 예외가 나면 다음 예약까지 못 가서 대화가 영영 멈췄다.
     //   생성은 실패할 수 있어도 '다음 예약'은 반드시 걸리도록 분리한다.
     try{
-      var serverFresh = window._serverTalksActive && (Date.now() - (window._lastServerTalkAt||0) < 90000);
+      // ★ 2026-08-31: 서버 대본이 소진돼도 _serverTalksActive 가 true 로 남아 있었다.
+      //   _lastServerTalkAt 은 '마지막 수신 시각'이라 90초가 지나면 serverFresh 가
+      //   false 가 되어 로컬 생성이 돌아야 하는데, 그 사이 폴링이 한 번이라도
+      //   빈 응답을 받으면 _lastServerTalkAt 은 그대로라 판정이 계속 애매했다.
+      //   → 조용한 지 90초가 넘으면 플래그 자체를 내려서 로컬 생성으로 완전히 넘긴다.
+      var _quietMs = Date.now() - (window._lastServerTalkAt || 0);
+      if(window._serverTalksActive && _quietMs > 90000){
+        window._serverTalksActive = false;
+        console.log('[실시간소통] 서버가 ' + Math.round(_quietMs/1000) + '초째 조용 → 로컬 생성으로 전환');
+      }
+      var serverFresh = window._serverTalksActive && _quietMs < 90000;
       if(!serverFresh) _ltGenerate();
     }catch(e){ console.warn('[실시간소통] 생성 실패:', e && e.message); }
     _scheduleLiveTalk();
