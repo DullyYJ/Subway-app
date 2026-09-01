@@ -4291,7 +4291,8 @@ function _busProxyGet(apiUrl, cb, _try){
   // ★ 노선 상세를 연 순간에는 그 조회가 최우선이다.
   //   예전엔 무조건 후순위(low)라, 주변 정류장 6곳의 도착정보가 앞에 깔려 있으면
   //   노선 정류장 목록이 그 뒤에야 시작됐다. 방금 연 화면이 가장 급하다.
-  var _urgent = !!window._busRouteModalOpen;
+  // 선반영 중이면 무조건 후순위 — 사용자가 지금 보는 화면이 먼저다
+  var _urgent = !!window._busRouteModalOpen && !window._prewarming;
   if(typeof _busArrEnqueue === 'function') _busArrEnqueue(run, !_urgent);
   else run();
 }
@@ -4496,6 +4497,8 @@ function openBusRoute(cityCode, routeId, routeNo, routeTp, originStop){
   modal.dataset.src = _src;
 
   window._busRouteModalOpen = true;   // ★ 이 화면의 조회를 우선 처리
+  // 이전 노선의 요약이 남지 않도록 비운다
+  try{ var _fx = document.getElementById('busRouteFixed'); if(_fx) _fx.innerHTML = ''; }catch(e){}
   _loadBusRouteData(cityCode, routeId, _src);
 }
 
@@ -4772,10 +4775,11 @@ function _renderBusRoute(stations, buses){
     }
   }
 
+  // ★ 상단 요약은 고정 영역에 따로 그린다(목록과 함께 스크롤되지 않도록)
+  var topHtml = '';
   var html = '';
-  // 상단 요약 (방향 · 운행 대수)
   var runN = buses.length;
-  html += '<div class="brs-top">'
+  topHtml += '<div class="brs-top">'
         +   (anchorIsStop && myDirEnd
               ? '<div class="brs-route-dir"><b>' + _ltEsc(anchorNm) + '</b><span class="brs-arrow">→</span><b>'
                 + _ltEsc(myDirEnd) + '</b> 방면'
@@ -4842,6 +4846,10 @@ function _renderBusRoute(stations, buses){
   });
   html += '</div>';
 
+  // ★ 요약은 고정 영역, 목록만 스크롤 영역에
+  var fixedEl = document.getElementById('busRouteFixed');
+  if(fixedEl) fixedEl.innerHTML = topHtml;
+  else html = topHtml + html;      // 구조가 없으면 예전처럼 함께 그린다
   body.innerHTML = html;
 
   // ★ 내 위치로 스크롤 (없으면 첫 버스)
@@ -12304,12 +12312,69 @@ function _prewarmStop(st){
 }
 window._prewarmStop = _prewarmStop;
 
+// ★ 주변 정류장에 오는 노선을 통째로 미리 받아둔다 (2026-08-31)
+//   앱을 켜고 바로 버스 탭에 들어갔을 때 아무것도 안 기다리게 하는 것이 목표.
+//   그래서 개수를 자르지 않고 **주변에 실제로 오는 노선 전부**를 병렬로 받는다.
+//   (예전엔 6개로 잘랐는데, 정류장에 10개 노선이 오면 나머지 4개는 눌렀을 때 기다렸다)
+//   · 경유정류장 = 하루 캐시라 한 번 받으면 재사용
+//   · 차량 위치  = 여기서도 함께 받아둔다. 5초 캐시(워커)라 눌렀을 때 즉시 뜬다
+//   · 이미 캐시에 있으면 네트워크를 타지 않는다
+var _PREWARM_ROUTE_CAP = 40;    // 안전 상한(비정상적으로 많은 경우만 방어)
+function _prewarmRoutes(stops){
+  try{
+    if(!stops || !stops.length) return;
+    if(typeof _busArrCache === 'undefined') return;
+    var seen = {}, jobs = [];
+    stops.forEach(function(st){
+      var nid = st.nodeid || st.nodeId;
+      var cc  = (typeof _tagoCityCode === 'function') ? _tagoCityCode(st) : (st.citycode || st.cityCode || '');
+      if(!nid) return;
+      var hit = _busArrCache[nid];
+      if(!hit || !hit.items) return;                 // 도착정보가 아직이면 건너뜀
+      hit.items.forEach(function(a){
+        var rid = a.routeid || a.routeId;
+        if(!rid || seen[rid]) return;
+        seen[rid] = 1;
+        if(jobs.length < _PREWARM_ROUTE_CAP) jobs.push({ cc: cc, rid: rid, src: st._src });
+      });
+    });
+    if(!jobs.length) return;
+
+    var need = 0;
+    // ★ 선반영은 '지금 화면에 필요한 요청'보다 항상 뒤여야 한다.
+    //   이 플래그가 켜져 있으면 _busProxyGet 이 후순위 큐를 쓴다.
+    window._prewarming = true;
+    jobs.forEach(function(j){
+      try{
+        var cached = (typeof _rtStnCacheGet === 'function')
+                     && _rtStnCacheGet('tago_' + j.cc + '_' + j.rid);
+        // 경유정류장 — 캐시에 없을 때만
+        if(!cached && typeof _fetchRouteStations === 'function'){
+          need++;
+          _fetchRouteStations(j.cc, j.rid, function(){});
+        }
+        // 차량 위치 — 워커가 5초 캐시하므로 눌렀을 때 바로 뜬다
+        if(j.src === 'gbis' || String(j.rid).indexOf('GG:') === 0){
+          if(typeof _fetchBusLocationsGG === 'function') _fetchBusLocationsGG(j.rid, function(){});
+        } else if(j.cc && typeof _fetchBusLocations === 'function'){
+          _fetchBusLocations(j.cc, j.rid, function(){});
+        }
+      }catch(e){}
+    });
+    // 큐에 다 넣었으면 플래그를 내린다(실행은 큐가 알아서 순서대로)
+    setTimeout(function(){ window._prewarming = false; }, 0);
+    console.log('[선반영] 노선 ' + jobs.length + '개 (새로 받는 정류장목록 ' + need + '개) 미리 받기');
+  }catch(e){}
+}
+window._prewarmRoutes = _prewarmRoutes;
+
 function _prefetchNearStops(lat, lng){
   if(!lat || !lng || typeof _fetchNearStops!=='function') return;
   var c = window._nearStopsCache;
   if(c && c.stops && c.stops.length && (Date.now()-c.ts < 40000) && _busCoordClose(c.lat,c.lng,lat,lng)){
-    // 정류장 목록은 신선 → 도착정보만 조용히 데워둔다
+    // 정류장 목록은 신선 → 도착정보를 데우고, 노선까지 이어서 데운다
     c.stops.forEach(function(s2){ _prewarmStop(s2); });
+    setTimeout(function(){ _prewarmRoutes(c.stops); }, 1200);
     return;
   }
   if(window._nearPrefetching) return;
@@ -12322,6 +12387,11 @@ function _prefetchNearStops(lat, lng){
     // ★ 도착정보 미리 데우기 — 반드시 렌더러와 '같은' 캐시(_busArrCache)를 채워야 한다.
     //   예전엔 _fetchBusArrival(_busCache)만 데워서 탭 열 때 다시 네트워크를 탔음.
     top.forEach(function(s){ _prewarmStop(s); });
+    // ★ 2026-08-31: 도착정보만 데우면 노선을 눌렀을 때 또 기다린다.
+    //   주변에 오는 노선의 '경유 정류장 목록 + 차량 위치'까지 전부 미리 받아둔다.
+    //   앱을 켜고 바로 버스 탭에 들어가도 기다림이 없게 하는 것이 목적이다.
+    //   도착정보가 먼저 채워져야 노선 목록을 뽑을 수 있으므로 조금 늦춰 부른다.
+    setTimeout(function(){ _prewarmRoutes(top); }, 1200);
     // 버스 near 탭이 지금 열려있고 아직 목록이 없으면 즉시 반영
     var le=document.getElementById('mapBusStopList');
     if(le && (typeof _busViewMode==='undefined' || _busViewMode==='near') && !(window._nearOrderedStops && window._nearOrderedStops.length)){
@@ -31021,6 +31091,10 @@ function safeSetItem(key, val){
       <button id="busRouteRefreshBtn" class="bus-route-refresh" onclick="refreshBusRoute()">🔄</button>
       <button class="bus-route-x" onclick="closeBusRoute()">✕</button>
     </div>
+    <!-- ★ 2026-08-31: 요약(방면·운행대수·내 정류장 도착)은 고정.
+         예전엔 목록과 함께 스크롤돼서, 아래로 내리면 '어느 방면인지·버스가 몇 대인지'가
+         사라졌다. 정류장 목록만 스크롤되도록 영역을 분리한다. -->
+    <div id="busRouteFixed" class="bus-route-fixed"></div>
     <div id="busRouteBody" class="bus-route-body"></div>
   </div>
 </div>
@@ -41204,6 +41278,7 @@ document.addEventListener('DOMContentLoaded', function() {
   font-size:22px;cursor:pointer;line-height:1;padding:4px 8px;}
 .bus-route-refresh{background:var(--card2);border:1px solid var(--border);border-radius:50%;
   width:36px;height:36px;color:var(--text);font-size:16px;cursor:pointer;transition:transform .5s;}
+.bus-route-fixed{flex:0 0 auto;background:var(--card);}
 .bus-route-body{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;min-height:0;background:var(--bg);}
 
 /* ── 노선 상세(정류장 타임라인) ── */
