@@ -3035,9 +3035,21 @@ function _homeNearStationName(){
 }
 
 // 홈 브리핑 요청
+// 같은 상황이면 이 시간 안에는 브리핑을 다시 만들지 않는다
+var _HOME_BRIEF_KEEP_MS = 5*60*1000;
+
 function requestHomeBrief(force){
   var body = document.getElementById('homeAiBody');
   if(!body) return;
+  // 아래 fromName 계산과 같은 값을 미리 얻기 위한 헬퍼(중복 계산 방지용 클로저)
+  var fromName_pre = function(){
+    try{
+      if(window._journeyFromFixed) return window._journeyFromFixed;
+      var h = _homeNearStationName();
+      if(typeof _isManualStart==='function' && _isManualStart() && _fmapStart && _fmapStart.name) return _fmapStart.name;
+      return h ? (typeof h === 'string' ? h : h.name) : '현위치';
+    }catch(e){ return '현위치'; }
+  };
 
   var here = _homeNearStationName();
   // ★ 수동 출발지면 브리핑 기준을 그 출발지로 (현위치 아님)
@@ -3066,6 +3078,27 @@ function requestHomeBrief(force){
   // 현재 혼잡도(있으면 반영)
   var congPct = 40;
   try { if(window._lastCongPct) congPct = window._lastCongPct; } catch(e){}
+
+  // ★ 2026-08-31: 목적지가 없을 땐 탭을 오갈 때마다 다시 만들지 않는다.
+  //   증상: 홈 탭에 돌아올 때마다 '브리핑 생성 중...'이 뜨고 내용이 새로 그려진다.
+  //   원인: 탭 진입마다 startHomeAI() → requestHomeBrief(false) 로 매번 재요청.
+  //   목적지가 없으면 브리핑 내용은 '현재 위치 + 시간대' 뿐이라, 그 둘이
+  //   안 바뀌었으면 다시 만들 이유가 없다.
+  //   → 위치·시간대가 같고 최근에 만든 게 있으면 그대로 둔다(무음 유지).
+  //     목적지가 있으면 경로 상황이 계속 변하므로 예전처럼 갱신한다.
+  try{
+    if(!force && !toName){
+      var _sig = (fromName_pre() || '') + '|' + hour;
+      var _age = Date.now() - (window._homeBriefAt || 0);
+      var _hasBody = body.innerHTML && body.innerHTML.indexOf('home-ai-empty') < 0;
+      if(_hasBody && window._homeBriefSig === _sig && _age < _HOME_BRIEF_KEEP_MS){
+        // 같은 상황 — 화면을 건드리지 않는다(깜빡임 없음)
+        _homeAiNextAt = Date.now() + 5*60*1000;
+        _startHomeCountdown();
+        return;
+      }
+    }
+  }catch(e){}
 
   if(force){
     body.innerHTML = '<div class="home-ai-empty">🤖 브리핑 생성 중...</div>';
@@ -3124,6 +3157,11 @@ window.requestHomeBrief = requestHomeBrief;
 function _renderHomeBrief(data, fromName, toName, hour, congPct){
   var body = document.getElementById('homeAiBody');
   if(!body) return;
+  // ★ 어떤 상황으로 만든 브리핑인지 기록 (같은 상황이면 재생성 생략)
+  try{
+    window._homeBriefSig = (fromName || '') + '|' + hour;
+    window._homeBriefAt  = Date.now();
+  }catch(e){}
   var _bMs = (typeof getBaseTimeMs==='function') ? getBaseTimeMs() : Date.now();
   var _preview = (typeof _baseTimeMs!=='undefined' && _baseTimeMs != null);
   var timeStr = new Date(_bMs).toLocaleTimeString('ko-KR', {hour:'2-digit',minute:'2-digit'});
@@ -3249,6 +3287,10 @@ function _msgToParas(msg){
 
 // 서버 실패 시 로컬 브리핑 (실시간=승무원 컴포저 / 미래·수동=예측 요약)
 function _renderHomeBriefLocal(fromName, toName, hour, congPct){
+  try{
+    window._homeBriefSig = (fromName || '') + '|' + hour;
+    window._homeBriefAt  = Date.now();
+  }catch(e){}
   var body = document.getElementById('homeAiBody');
   if(!body) return;
   var _bMs = (typeof getBaseTimeMs==='function') ? getBaseTimeMs() : Date.now();
@@ -3581,12 +3623,42 @@ function _renderHomeConductorBrief(fromName, toName, hour, congPct, serverMsg){
       ps.push('<span style="color:var(--sub);font-size:12px;">편안한 여정 되세요. 5분마다 현황을 업데이트해 드리겠습니다.</span>');
     }
 
-    body.innerHTML = '<div class="home-ai-msg">' + ps.map(function(p){ return '<p>' + p + '</p>'; }).join('') + '</div>';
+    var _html = '<div class="home-ai-msg">' + ps.map(function(p){ return '<p>' + p + '</p>'; }).join('') + '</div>';
+    // ★ 2026-08-31: 내용이 같으면 DOM 을 건드리지 않는다(깜빡임 없음).
+    //   다르면 짧은 페이드로 바꿔서 갑자기 툭 바뀌지 않게 한다.
+    if(body.innerHTML === _html) return;
+    try{
+      if(!document.getElementById('homeAiFadeCss')){
+        var _st = document.createElement('style');
+        _st.id = 'homeAiFadeCss';
+        _st.textContent = '.home-ai-body{transition:opacity .22s ease;}';
+        document.head.appendChild(_st);
+      }
+      var _had = body.innerHTML && body.innerHTML.indexOf('home-ai-empty') < 0;
+      if(_had){
+        body.style.opacity = '0';
+        setTimeout(function(){
+          try{ body.innerHTML = _html; body.style.opacity = '1'; }catch(e){}
+        }, 200);
+      } else {
+        body.innerHTML = _html;
+        body.style.opacity = '1';
+      }
+    }catch(e){ body.innerHTML = _html; }
   }
 
   var wF=null, wT=null, need=(fc?1:0)+(tc?1:0), done=0;
   if(!need || typeof _fetchWeather!=='function'){ compose(null, null); return; }
-  body.innerHTML = '<div class="home-ai-msg"><p style="color:var(--sub);">브리핑 준비 중...</p></div>';
+  // ★ 이미 브리핑이 떠 있으면 '준비 중'으로 비우지 않는다.
+  //   날씨를 받는 동안 화면을 비우면, 탭을 오갈 때마다 내용이 사라졌다 돌아온다.
+  //   내용은 그대로 두고 새 값이 오면 위에서 조용히 교체된다.
+  try{
+    var _hasNow = body.innerHTML && body.innerHTML.indexOf('home-ai-empty') < 0
+               && body.innerHTML.indexOf('브리핑 준비 중') < 0;
+    if(!_hasNow){
+      body.innerHTML = '<div class="home-ai-msg"><p style="color:var(--sub);">브리핑 준비 중...</p></div>';
+    }
+  }catch(e){}
   function step(){ if(++done>=need) compose(wF, wT); }
   if(fc) _fetchWeather(fc.lat, fc.lng, function(w){ wF=w; step(); });
   if(tc) _fetchWeather(tc.lat, tc.lng, function(w){ wT=w; step(); });
@@ -38554,8 +38626,12 @@ function showSettingsTab(el){
   try{ var _nb=document.getElementById('newsCatBar'); if(_nb) _nb.style.display='none'; }catch(e){}
   document.querySelectorAll('#filterRow .chip').forEach(function(c){c.classList.remove('on');});
   if(el) el.classList.add('on');
-  // 테마 카드 현재 상태 반영
-  try { var _ct=localStorage.getItem('app_theme')||'dark'; _updateThemeCards(_ct); } catch(e){}
+  // ★ 2026-08-31: 기본 테마가 두 곳에서 달랐다.
+  //   복원부(_restoreTheme)는 'pastel', 여기는 'dark' 를 기본으로 읽어서,
+  //   앱을 처음 깔면 화면은 하늘 파스텔인데 설정 카드에는 '다크 블랙'에
+  //   체크가 붙는 모순이 생겼다.
+  //   → 기본값을 한 곳(_THEME_DEFAULT)에서만 정한다.
+  try { _updateThemeCards(_themeNow()); } catch(e){}
   var sv=document.getElementById('commScrollView'), cv=document.getElementById('chatTabView'),
       stv=document.getElementById('settingsTabView'), fab=document.getElementById('commFab');
   var avHide2=document.getElementById('aiTabView'); if(avHide2) avHide2.style.display='none';
@@ -38571,6 +38647,16 @@ window.showSettingsTab = showSettingsTab;
 // ══════════════════════════════════════════════════════════════
 // 🎨 테마 시스템
 // ══════════════════════════════════════════════════════════════
+// ★ 기본 테마는 여기 하나만 본다. HTML 의 <html data-theme="pastel"> 과 같아야 한다.
+var _THEME_DEFAULT = 'pastel';
+function _themeNow(){
+  try{
+    var v = localStorage.getItem('app_theme');
+    return (v === 'dark' || v === 'pastel') ? v : _THEME_DEFAULT;
+  }catch(e){ return _THEME_DEFAULT; }
+}
+window._themeNow = _themeNow;
+
 function applyTheme(theme) {
   var root = document.documentElement;
 
@@ -38675,7 +38761,7 @@ function _updateThemeCards(theme) {
 // 앱 시작 시 저장된 테마 복원
 (function _restoreTheme() {
   try {
-    var saved = localStorage.getItem('app_theme') || 'pastel';
+    var saved = _themeNow();
     if(saved === 'pastel') {
       document.documentElement.setAttribute('data-theme', 'pastel');
       var metaTheme = document.querySelector('meta[name="theme-color"]');
