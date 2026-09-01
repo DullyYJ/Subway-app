@@ -27252,6 +27252,9 @@ var _NEWS_CAT_FEEDS = {
 var _NEWS_CAT_TARGET = 100;          // 카테고리당 목표 건수
 var _NEWS_CAT_TTL    = 3*60*1000;    // 같은 카테고리 재수집 간격(목표 미달 시 곧 다시 시도)
 var _newsCatAt = {};                 // 카테고리별 마지막 수집 시각
+// ★ 2026-09-02: 목표(100건)를 영영 못 채우는 카테고리에서 재수집이 끝없이 돌던 것을 막는다.
+var _NEWS_CAT_MAX_TRIES = 3;         // 카테고리당 자동 보충 시도 상한 (앱 실행 1회 기준)
+var _NEWS_ROW_CHUNK = 100;           // 뉴스 목록을 한 번에 그리는 줄 수 (나머지는 이어서 붙임)
 
 // 한 카테고리를 채운다. 이미 목표를 넘겼고 최근에 받았으면 건너뛴다.
 // ── 뉴스 저장소 (localStorage) ──────────────────────────────────
@@ -27272,7 +27275,18 @@ function _newsStoreLoad(){
     return arr.filter(function(x){ return x && x.title && !(x.ts && x.ts < cut); });
   }catch(e){ return []; }
 }
+// ★ 2026-09-02: 피드 하나가 끝날 때마다 1,200건을 통째로 직렬화해 저장하고 있었다.
+//   카테고리 수집 한 번에 10번씩, 그때마다 수백 KB를 메인 스레드에서 쓰느라 화면이 끊겼다.
+//   → 호출은 그대로 두고 실제 저장만 모아서 한 번 한다(마지막 호출 기준 1.5초).
+var _newsSaveTimer = null;
 function _newsStoreSave(){
+  if(_newsSaveTimer) return;
+  _newsSaveTimer = setTimeout(function(){
+    _newsSaveTimer = null;
+    _newsStoreSaveNow();
+  }, 1500);
+}
+function _newsStoreSaveNow(){
   try{
     var arr = (_NEWSFEED.items || []).slice()
       .sort(function(a,b){ return (b.ts||0) - (a.ts||0); })
@@ -27291,6 +27305,7 @@ function _newsStoreSave(){
 }
 window._newsStoreLoad = _newsStoreLoad;
 window._newsStoreSave = _newsStoreSave;
+window._newsStoreSaveNow = _newsStoreSaveNow;
 
 // 앱 시작 시 1회: 저장된 기사를 즉시 올려 화면을 채운다
 function _newsStoreHydrate(){
@@ -27361,12 +27376,15 @@ window._fetchAllCatNews = _fetchAllCatNews;
 function _fetchCatNews(cat, cb, force){
   try{
     var feeds = _NEWS_CAT_FEEDS[cat];
-    if(!feeds || typeof _PROXY_LIST === 'undefined' || typeof _parseNewsRSS !== 'function'){ if(cb) cb(); return; }
+    // ★ 2026-09-02: 즉시 반환할 때 콜백을 그 자리에서 부르면 호출한 쪽과 동기 재귀가 된다.
+    //   콜백은 항상 다음 틱에 부른다(호출부는 비동기 완료만 가정하면 되므로 동작은 그대로).
+    var _cbAsync = function(){ if(cb) setTimeout(cb, 0); };
+    if(!feeds || typeof _PROXY_LIST === 'undefined' || typeof _parseNewsRSS !== 'function'){ _cbAsync(); return; }
     var have = (_NEWSFEED.items || []).filter(function(x){ return x && x.cat === cat; }).length;
-    if(!force && have >= _NEWS_CAT_TARGET) { if(cb) cb(); return; }
+    if(!force && have >= _NEWS_CAT_TARGET) { _cbAsync(); return; }
     // 목표(100건)를 못 채운 상태면 TTL 을 짧게 잡아 계속 채워 나간다.
     var ttl = (have >= _NEWS_CAT_TARGET) ? (10*60*1000) : _NEWS_CAT_TTL;
-    if(!force && _newsCatAt[cat] && Date.now() - _newsCatAt[cat] < ttl){ if(cb) cb(); return; }
+    if(!force && _newsCatAt[cat] && Date.now() - _newsCatAt[cat] < ttl){ _cbAsync(); return; }
     _newsCatAt[cat] = Date.now();
 
     var pending = feeds.length;
@@ -27391,7 +27409,7 @@ function _fetchCatNews(cat, cb, force){
           .catch(function(){ tryP(i+1); });
       })(0);
     });
-  }catch(e){ if(cb) cb(); }
+  }catch(e){ if(cb) setTimeout(cb, 0); }
 }
 window._fetchCatNews = _fetchCatNews;
 
@@ -27555,20 +27573,34 @@ function _renderNewsTab(list){
   }
 
   // ★ 카테고리별 목표(100건)를 못 채웠으면 그 카테고리 전용 피드를 더 받아온다.
+  // ★ 2026-09-02: 여기가 '앱이 멈추는' 원인이었다.
+  //   _fetchCatNews 는 재수집 간격(TTL) 안이면 콜백을 **그 자리에서 동기로** 부른다.
+  //   그 콜백이 다시 _renderNewsTab 을 부르고, 목표(100건)를 여전히 못 채웠으면
+  //   또 _fetchCatNews → 콜백 → 렌더 … 가 끝없이 반복됐다(동기 재귀).
+  //   구글 차단으로 기사가 거의 없는 연예 탭처럼 목표를 못 채우는 카테고리에서는
+  //   JS 스레드가 통째로 붙잡혀 화면이 아무것도 안 눌렸다.
+  //   → ①카테고리당 시도 상한 ②기사가 실제로 늘었을 때만 재렌더 ③재렌더는 스택을 끊고 비동기로
   if(_newsCatSel !== '전체' && typeof _fetchCatNews === 'function' && !window._newsCatFetching){
     var haveN = items.length;
-    if(haveN < _NEWS_CAT_TARGET){
+    var _rcCat = _newsCatSel;
+    window._newsCatTries = window._newsCatTries || {};
+    var _rcTry = window._newsCatTries[_rcCat] || 0;
+    if(haveN < _NEWS_CAT_TARGET && _rcTry < _NEWS_CAT_MAX_TRIES){
       // 저장본으로 이미 차 있으면 조용히 보충만 한다 (화면은 그대로 유지)
+      window._newsCatTries[_rcCat] = _rcTry + 1;
       window._newsCatFetching = 1;
-      _fetchCatNews(_newsCatSel, function(){
+      _fetchCatNews(_rcCat, function(){
         window._newsCatFetching = 0;
-        _renderNewsTab(list);
+        if(_newsCatSel !== _rcCat) return;             // 그 사이 다른 탭으로 옮겼으면 건드리지 않는다
+        var _now = (_NEWSFEED.items || []).filter(function(x){ return x && x.cat === _rcCat; }).length;
+        if(_now <= haveN) return;                      // 한 건도 안 늘었으면 다시 그릴 이유가 없다
+        setTimeout(function(){ _renderNewsTab(list); }, 0);
       });
     }
   }
   var esc = function(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
   window._NEWS_SHOWN = items;   // 상세 팝업 참조용
-  var rows = items.map(function(it, i){
+  var _newsRowHtml = function(it, i){
     return '<div class="news-row" data-i="' + i + '" onclick="_openNewsDetail(this.dataset.i)"'
       + ' style="display:flex;gap:10px;padding:13px 4px;border-bottom:1px solid var(--border);cursor:pointer;align-items:flex-start;">'
       + '<div style="width:3px;align-self:stretch;border-radius:2px;background:var(--gold);flex-shrink:0;margin-top:2px;"></div>'
@@ -27578,7 +27610,8 @@ function _renderNewsTab(list){
       + '</div>'
       + '<div style="color:var(--sub);font-size:13px;flex-shrink:0;margin-top:3px;">›</div>'
       + '</div>';
-  }).join('');
+  };
+  var rows = items.slice(0, _NEWS_ROW_CHUNK).map(_newsRowHtml).join('');
   // ★ 칩은 스크롤 밖(고정 헤더)에 그린다 — 기사가 칩 뒤로 비치지 않는다
   var catBar = document.getElementById('newsCatBar');
   if(catBar){
@@ -27590,6 +27623,25 @@ function _renderNewsTab(list){
         : '<div style="text-align:center;padding:40px;color:var(--sub);">📰 '
           + (_newsCatSel === '전체' ? '뉴스 불러오는 중...' : _newsCatSel + ' 뉴스를 불러오는 중...')
           + '</div>');
+  // ★ 2026-09-02: 카테고리 탭은 기사를 전부 보여주는데(수백 건), 그걸 한 번에 만들면
+  //   그 순간 화면이 멈춘다. 첫 묶음만 즉시 그리고 나머지는 틱을 나눠 이어 붙인다.
+  //   (표시되는 기사 수는 종전과 같다 — 그리는 시점만 나눈 것)
+  var _newsSeq = (window._newsRenderSeq = (window._newsRenderSeq || 0) + 1);
+  if(items.length > _NEWS_ROW_CHUNK){
+    var _from = _NEWS_ROW_CHUNK;
+    var _appendMore = function(){
+      if(window._newsRenderSeq !== _newsSeq) return;      // 그 사이 다시 그렸으면 중단
+      try{
+        if(!list.isConnected) return;
+        var to = Math.min(items.length, _from + _NEWS_ROW_CHUNK), h = '';
+        for(var k = _from; k < to; k++) h += _newsRowHtml(items[k], k);
+        list.insertAdjacentHTML('beforeend', h);
+        _from = to;
+      }catch(e){ return; }
+      if(_from < items.length) setTimeout(_appendMore, 16);
+    };
+    setTimeout(_appendMore, 16);
+  }
   // 칩 클릭 → 카테고리 전환
   (catBar || list).querySelectorAll('.news-cat-chip').forEach(function(b){
     b.addEventListener('click', function(){ _newsCatSel = b.dataset.cat; _renderNewsTab(list); });
