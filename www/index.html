@@ -16127,6 +16127,24 @@ window.addEventListener('unhandledrejection', function(e) {
         <div id="arrTestStat" style="margin-top:10px;background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px;font-size:11.5px;line-height:1.7;color:var(--text);font-family:monospace;white-space:pre-wrap;">'상태 확인'을 누르면 감시 상태와 남은 시간이 표시됩니다.</div>
       </div>
 
+      <!-- ★ 작은 요약 화면(PiP) -->
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-top:12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+          <div style="font-size:15px;font-weight:800;color:var(--text);">📺 작은 요약 화면</div>
+          <label style="position:relative;display:inline-block;width:50px;height:28px;flex-shrink:0;">
+            <input type="checkbox" id="pipToggle" onchange="_pipSetEnabled(this.checked)"
+              style="opacity:0;width:0;height:0;">
+            <span id="pipToggleTrack" style="position:absolute;inset:0;background:var(--border2);
+              border-radius:28px;transition:.2s;cursor:pointer;"></span>
+            <span id="pipToggleKnob" style="position:absolute;left:3px;top:3px;width:22px;height:22px;
+              background:#fff;border-radius:50%;transition:.2s;pointer-events:none;"></span>
+          </label>
+        </div>
+        <p style="font-size:12px;color:var(--sub);margin:6px 0 12px;">앱을 내려도 현재역 · 남은시간 · 도착 예정 시각만 작게 띄웁니다. 화면을 탭하면 닫혀요.</p>
+        <button onclick="_pipPreview()" style="width:100%;padding:11px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--text);font-family:inherit;">미리보기</button>
+        <div id="pipStat" style="margin-top:10px;font-size:11.5px;line-height:1.6;color:var(--sub);"></div>
+      </div>
+
       <!-- ★ 백그라운드 위치추적 진단 -->
       <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-top:12px;">
         <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">🛰 백그라운드 추적 진단</div>
@@ -30092,6 +30110,200 @@ function _clearForegroundNotif(){
   } catch(e){}
 }
 
+// ══════════════════════════════════════════════════════════════
+// ★ 2026-09-02: 작은 요약 화면 (PiP)
+//   티맵·카카오내비처럼 앱을 내려도 현재역·남은시간·도착시각만 크게 보여준다.
+//   구성이 두 겹이다.
+//   (1) 화면(이 파일) — 창이 작아지면 요약만 남기고 나머지를 가린다.
+//   (2) 네이티브 — 안드로이드에게 "이 화면을 작게 띄워라"라고 시키는 부분.
+//       Capacitor 플러그인(Pip.enter)이 있으면 그걸 부르고, 없으면 화면만 준비해 둔다.
+//       (네이티브 없이 웹만으로는 다른 앱 위에 창을 띄울 수 없다 — 그때는 상주 알림이 대신한다)
+var _PIP_KEY = 'pipOn';
+var _pipTimer = null;
+
+function _pipEnabled(){ try{ return localStorage.getItem(_PIP_KEY) !== '0'; }catch(e){ return true; } }
+function _pipSetEnabled(v){
+  try{ localStorage.setItem(_PIP_KEY, v ? '1' : '0'); }catch(e){}
+  if(!v) _pipHide();
+  if(typeof toast === 'function') toast(v ? '작은 요약 화면을 켰어요' : '작은 요약 화면을 껐어요');
+  try{ if(typeof _pipSyncToggle === 'function') _pipSyncToggle(); }catch(e){}
+  try{ if(typeof _pipNativeSync === 'function') _pipNativeSync(); }catch(e){}
+}
+window._pipSetEnabled = _pipSetEnabled;
+
+// 안내할 경로가 있나 (없으면 띄우지 않는다)
+function _pipHasRoute(){
+  try{
+    if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return false;  // 예상 시각 모드
+    if(window._metroRouteMode === true) return false;                            // 노선도 미리보기
+    if(typeof S !== 'undefined' && S && S.route && S.route.path && S.route.path.length) return true;
+    if(typeof _transitNodeData !== 'undefined' && _transitNodeData && _transitNodeData.length) return true;
+  }catch(e){}
+  return false;
+}
+
+// 표시할 값 — 상주 알림과 같은 계산을 쓴다(숫자가 어긋나지 않게)
+function _pipData(){
+  var out = { cur:'이동 중', dest:'', min:null, arr:null };
+  try{
+    var r = (typeof _journeyRemain === 'function') ? _journeyRemain() : null;
+    if(r){
+      out.cur  = r.cur || '이동 중';
+      out.dest = r.dest || '';
+      out.min  = (r.min != null) ? r.min : null;
+    }
+    var ms = (typeof _routeArriveMs === 'function') ? _routeArriveMs() : null;
+    if(!ms && out.min != null) ms = Date.now() + out.min*60000;
+    if(ms){
+      var d = new Date(ms), p2 = function(n){ return (n<10?'0':'') + n; };
+      out.arr = p2(d.getHours()) + ':' + p2(d.getMinutes());
+      if(out.min == null) out.min = Math.max(0, Math.round((ms - Date.now())/60000));
+    }
+  }catch(e){}
+  return out;
+}
+window._pipData = _pipData;
+
+function _pipEl(){
+  var el = document.getElementById('pipView');
+  if(el) return el;
+  el = document.createElement('div');
+  el.id = 'pipView';
+  el.style.cssText =
+    'position:fixed;inset:0;z-index:2147483000;display:none;'
+    + 'flex-direction:column;align-items:center;justify-content:center;gap:4px;'
+    + 'background:#0e0e10;color:#fff;padding:10px;text-align:center;';
+  el.innerHTML =
+      '<div id="pipCur"  style="font-size:26px;font-weight:800;line-height:1.15;'
+    +   'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;"></div>'
+    + '<div id="pipMin"  style="font-size:34px;font-weight:900;line-height:1.1;color:#ffd60a;"></div>'
+    + '<div id="pipArr"  style="font-size:15px;font-weight:600;color:#d0d0d5;"></div>'
+    + '<div id="pipDest" style="font-size:12px;color:#8e8e93;white-space:nowrap;overflow:hidden;'
+    +   'text-overflow:ellipsis;max-width:100%;"></div>';
+  el.addEventListener('click', function(){ _pipHide(); });
+  document.body.appendChild(el);
+  return el;
+}
+
+function _pipPaint(){
+  try{
+    var el = document.getElementById('pipView');
+    if(!el || el.style.display === 'none') return;
+    var d = _pipData();
+    var c = document.getElementById('pipCur');
+    var m = document.getElementById('pipMin');
+    var a = document.getElementById('pipArr');
+    var t = document.getElementById('pipDest');
+    if(c) c.textContent = d.cur;
+    if(m) m.textContent = (d.min != null) ? (d.min + '분 남음') : '안내 중';
+    if(a) a.textContent = d.arr ? (d.arr + ' 도착 예정') : '';
+    if(t) t.textContent = d.dest ? ('→ ' + d.dest) : '';
+  }catch(e){}
+}
+
+function _pipShow(){
+  try{
+    var el = _pipEl();
+    el.style.display = 'flex';
+    _pipPaint();
+    if(!_pipTimer) _pipTimer = setInterval(_pipPaint, 1000);
+  }catch(e){}
+}
+function _pipHide(){
+  try{
+    var el = document.getElementById('pipView');
+    if(el) el.style.display = 'none';
+    if(_pipTimer){ clearInterval(_pipTimer); _pipTimer = null; }
+  }catch(e){}
+}
+window._pipShow = _pipShow;
+window._pipHide = _pipHide;
+
+// 네이티브 PiP 플러그인 (있으면 사용)
+function _pipNative(){
+  try{
+    var P = window.Capacitor && window.Capacitor.Plugins;
+    return (P && (P.Pip || P.PictureInPicture)) || null;
+  }catch(e){ return null; }
+}
+window._pipNativeAvailable = function(){ return !!_pipNative(); };
+
+// 배경으로 내려갈 때 호출
+function _pipEnter(){
+  if(!_pipEnabled() || !_pipHasRoute()) return false;
+  _pipShow();                       // 창이 작아졌을 때 보이도록 먼저 준비
+  var n = _pipNative();
+  if(n && typeof n.enter === 'function'){
+    try{ n.enter({ width:2, height:1 }); }catch(e){}
+    return true;
+  }
+  return false;                     // 네이티브 없음 → 상주 알림이 대신한다
+}
+window._pipEnter = _pipEnter;
+
+// ★ 네이티브에 "지금 안내 중인가"를 알려 둔다.
+//   안드로이드는 홈 버튼을 누르는 순간(onUserLeaveHint)에만 PiP로 바꿀 수 있어서,
+//   그때 물어볼 시간이 없다. 미리 상태를 넘겨 두고 네이티브가 스스로 판단하게 한다.
+var _pipLastActive = null;
+function _pipNativeSync(){
+  try{
+    var n = _pipNative();
+    if(!n || typeof n.setActive !== 'function') return;
+    var v = !!(_pipEnabled() && _pipHasRoute());
+    if(v === _pipLastActive) return;
+    _pipLastActive = v;
+    n.setActive({ active: v });
+  }catch(e){}
+}
+window._pipNativeSync = _pipNativeSync;
+try{ setInterval(_pipNativeSync, 10000); setTimeout(_pipNativeSync, 2000); }catch(e){}
+
+// ★ 창 크기로 PiP 여부를 판단한다.
+//   안드로이드가 PiP로 만들면 웹뷰가 작아진다. 그때만 요약 화면을 남긴다.
+function _pipOnResize(){
+  try{
+    var small = (window.innerHeight <= 340 && window.innerWidth <= 520);
+    if(small){
+      if(_pipEnabled() && _pipHasRoute()) _pipShow();
+    } else {
+      _pipHide();
+    }
+  }catch(e){}
+}
+try{ window.addEventListener('resize', _pipOnResize); }catch(e){}
+
+// 설정에서 눌러 보는 미리보기 (5초 뒤 자동으로 닫힌다)
+// 설정 화면의 토글 모양을 지금 상태에 맞춘다
+function _pipSyncToggle(){
+  try{
+    var on = _pipEnabled();
+    var chk = document.getElementById('pipToggle');
+    var tr  = document.getElementById('pipToggleTrack');
+    var kn  = document.getElementById('pipToggleKnob');
+    if(chk) chk.checked = on;
+    if(tr)  tr.style.background = on ? 'var(--green,#34c759)' : 'var(--border2)';
+    if(kn)  kn.style.left = on ? '25px' : '3px';
+    var st = document.getElementById('pipStat');
+    if(st){
+      st.textContent = _pipNative()
+        ? '화면 위 축소 표시를 쓸 수 있어요.'
+        : '이 빌드에는 화면 축소 기능이 없어, 앱을 내리면 상단 알림으로 안내해요.';
+    }
+  }catch(e){}
+}
+window._pipSyncToggle = _pipSyncToggle;
+try{
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function(){ setTimeout(_pipSyncToggle, 300); });
+  else setTimeout(_pipSyncToggle, 300);
+}catch(e){}
+
+function _pipPreview(){
+  _pipShow();
+  if(typeof toast === 'function') toast('작은 요약 화면 미리보기 · 탭하면 닫혀요');
+  setTimeout(function(){ if(window.innerHeight > 340) _pipHide(); }, 5000);
+}
+window._pipPreview = _pipPreview;
+
 /* 앱 포그라운드/백그라운드 전환 감지 */
 function _initAppStateListener(){
   // Capacitor App 플러그인
@@ -30104,6 +30316,7 @@ function _initAppStateListener(){
         if(state.isActive){
           // 포그라운드 진입
           console.log('[앱상태] 포그라운드');
+          try{ if(typeof _pipHide === 'function') _pipHide(); }catch(e){}
           if(S.route && S.boarded){
             // 웹 GPS 재시작 (포그라운드에서는 더 빠른 업데이트)
             startWatch();
@@ -30121,6 +30334,8 @@ function _initAppStateListener(){
             var cur  = S.route.path[S.curIdx] || '경로 안내 중';
             var rem  = (S.route.path.length-1) - S.curIdx;
             _showForegroundNotif(cur, dest, rem);
+            // ★ 작은 요약 화면(PiP) — 네이티브가 있으면 화면 위에 축소해 띄운다
+            try{ if(typeof _pipEnter === 'function') _pipEnter(); }catch(e){}
           }
         }
       });
