@@ -7018,7 +7018,7 @@ function _htlWaitTick(force){
           ? locOnGps(p.coords.latitude, p.coords.longitude, p.coords.accuracy, p.coords.speed) : true;
         if(!_ok) return;
         if(typeof S !== 'undefined') S.lastGPSFix = { lat:p.coords.latitude, lng:p.coords.longitude, ts:Date.now(), acc:p.coords.accuracy };
-        window._lastGPSLat = p.coords.latitude; window._lastGPSLng = p.coords.longitude;
+        window._lastGPSLat = p.coords.latitude; window._lastGPSLng = p.coords.longitude; window._lastGPSAt = Date.now();
         handle();
       },
       function(){ handle(); },
@@ -11472,7 +11472,7 @@ function _startTransitWatch(){
     var la=pos.coords.latitude, ln=pos.coords.longitude, ac=pos.coords.accuracy||99;
     if(la==null||ln==null||isNaN(la)||isNaN(ln)) return;
     if(ac>150) return;                 // 저정확도(실내 튐) 무시
-    window._lastGPSLat=la; window._lastGPSLng=ln;
+    window._lastGPSLat=la; window._lastGPSLng=ln; window._lastGPSAt=Date.now();
     if(typeof S!=='undefined') S.lastGPSFix={lat:la,lng:ln,ts:Date.now()};
     // ★ 위치 확보 시 주변 버스 정류장 미리 로드 (탭 열 때 즉시 표시)
     try { if(typeof _prefetchNearStops==='function') _prefetchNearStops(la, ln); } catch(e){}
@@ -12828,7 +12828,7 @@ function _busRefreshLocation(cb, force){
     function(pos){
       if(done) return; done=true; clearTimeout(tid);
       _busGpsLat=pos.coords.latitude; _busGpsLng=pos.coords.longitude;
-      window._lastGPSLat=_busGpsLat; window._lastGPSLng=_busGpsLng;
+      window._lastGPSLat=_busGpsLat; window._lastGPSLng=_busGpsLng; window._lastGPSAt=Date.now();
       cb(_busGpsLat, _busGpsLng);
     },
     function(){ if(done) return; done=true; clearTimeout(tid); cb(_busGpsLat, _busGpsLng); },
@@ -15271,7 +15271,8 @@ window._bgDiag = async function(){
       add('승차 여부: ' + (_dep === null ? '?' : (_dep ? '탑승 중' : '승차 전')));
       add('확정 진행도: ' + (window._gpsConfirmIdx == null ? '없음' : window._gpsConfirmIdx));
     }
-    add('미리보기 모드: ' + (window._metroRouteMode === true ? '예 (추적 안 함)' : '아니오'));
+    add('미리보기 모드: ' + (window._metroRouteMode === true ? '예 (추적·알림 안 함)' : '아니오')
+        + (window._metroStartDist != null ? ' · 출발역까지 ' + window._metroStartDist + 'm' : ''));
   }catch(e){}
   add('[노선도 전용] 탑승(S.boarded): ' + (typeof S!=='undefined' ? !!S.boarded : '?'));
   add('[노선도 전용] 경로(S.route): ' + (typeof S!=='undefined' ? !!S.route : '?'));
@@ -23444,7 +23445,7 @@ function _openGpsModal() {
 // ── GPS 좌표를 그대로 출발지("내 위치")로 설정 ──
 function _setStartToMyLocation(lat, lng){
   _fmapStart = { type:'gps', name:'내 위치', lat: lat, lng: lng };
-  window._lastGPSLat = lat; window._lastGPSLng = lng;
+  window._lastGPSLat = lat; window._lastGPSLng = lng; window._lastGPSAt = Date.now();
   var si = document.getElementById('fmapStartInp');
   if(si){ si.value = '내 위치'; si.style.opacity = ''; }
   if(typeof _updateRouteBtn === 'function') _updateRouteBtn();
@@ -23477,7 +23478,7 @@ function autoSetStartFromGPS() {
     _acceptFix(lat, lng);
   }
   function _acceptFix(lat, lng){
-    window._lastGPSLat = lat; window._lastGPSLng = lng;
+    window._lastGPSLat = lat; window._lastGPSLng = lng; window._lastGPSAt = Date.now();
     if(typeof S !== 'undefined') S.lastGPSFix = { lat: lat, lng: lng, ts: Date.now() };
     if(_fmapStart) return;   // ★ 수동/기존 출발지 절대 덮지 않음
     var si = document.getElementById('fmapStartInp');
@@ -23560,7 +23561,7 @@ function triggerGPS(){
     console.log('[GPS] best lat='+lat+' lng='+lng+' acc='+Math.round(acc)+'m');
 
     // 전역 GPS 좌표 저장 (세부경로 현위치 마커가 사용)
-    window._lastGPSLat = lat; window._lastGPSLng = lng;
+    window._lastGPSLat = lat; window._lastGPSLng = lng; window._lastGPSAt = Date.now();
     if(typeof S !== 'undefined') S.lastGPSFix = { lat: lat, lng: lng, ts: Date.now(), acc: acc };
 
     /* ★ 역/정류장 선택 없이 GPS "내 위치"를 출발지로 */
@@ -25190,6 +25191,7 @@ function _arrWatchTick(){
   try{
     if(typeof S === 'undefined' || !S || !S.route || !S.boardedAt) return;
     if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return;
+    if(window._metroRouteMode === true) return;   // ★ 노선도 미리보기 → 추천 알림 없음
     var total = (S.route.tp || []).reduce(function(a, b){ return a + (b || 0); }, 0);
     if(!total) return;
     var arrMs = S.boardedAt + total * 1000;
@@ -25922,6 +25924,14 @@ function _initLocalNotifications(){
     var LN = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.LocalNotifications;
     if(LN){
       try { _initLocalNotifications(); } catch(e){ window._notifPermDone = Promise.resolve(); }
+      // ★ 2026-09-02: 앱이 강제 종료되면 상주 알림(id 1)이 남아, 다음에 열었을 때
+      //   옛 경로가 그대로 떠 있었다. 안내할 경로가 없으면 시작할 때 지운다.
+      try{
+        setTimeout(function(){
+          var hasRoute = (typeof S !== 'undefined' && S && S.route && S.boarded);
+          if(!hasRoute) LN.cancel({ notifications:[{ id: 1 }] }).catch(function(){});
+        }, 1500);
+      }catch(e){}
       return;
     }
     if(tries < 12){ setTimeout(attempt, 250); return; }
@@ -26509,16 +26519,15 @@ function gmHub(name) {
   if(!pop) return;
   if(pn) pn.textContent = name;
   if(pl) {
-    pl.innerHTML = '';
+    // ★ 2026-09-02: 같은 역이 노선별로 여러 줄 들어 있어 같은 노선이 두 번 나오곤 했다.
+    //   노선명을 정리(중복 제거)한 뒤 공통 배지로 그린다.
     var stns = (typeof STNDB !== 'undefined') ? STNDB.filter(function(s){ return s.name === name; }) : [];
-    stns.forEach(function(s){
-      var sp = document.createElement('span');
-      var col = s.color || '#555';
-      sp.style.cssText = 'font-size:10px;font-weight:700;padding:2px 8px;border-radius:12px;'
-        + 'color:#fff;background:' + col + ';display:inline-flex;align-items:center;gap:4px;';
-      sp.textContent = s.line;
-      pl.appendChild(sp);
-    });
+    var _pls = (typeof _lineListClean === 'function')
+      ? _lineListClean(stns.map(function(s){ return s.line; }))
+      : stns.map(function(s){ return s.line; });
+    pl.innerHTML = _pls.length && typeof _linePillHtml === 'function'
+      ? _pls.map(_linePillHtml).join('')
+      : '';
   }
   pop.style.bottom = '0';
   // 외부 클릭 시 닫기
@@ -29355,6 +29364,30 @@ window.resetMapStyles   = resetMapStyles;
 // ── svgSetRoute / gmRouteSet: 노선도 역 선택 처리 ─────────────
 // [지침 1-②] 출발역만 → 팝업 닫지 않고 노선도 유지
 //             출발+도착 완료 → _goHome() 자동 호출
+// ★ 2026-09-02: 노선도에서 경로를 설정할 때, 지금 내가 그 출발역에 있는지 GPS로 본다.
+//   · 있으면  → 실제 이동으로 보고 하이라이트 없이 승하차 알림까지 켠다.
+//   · 없으면  → 서울에서 부산 경로를 구경하는 것 같은 상황이므로,
+//              미리보기 하이라이트만 두고 승하차 알림은 띄우지 않는다.
+//   GPS가 없거나 오래됐으면 '아니다'로 본다(잘못 울리는 쪽이 더 나쁘다).
+var _METRO_NEAR_M   = 800;          // 출발역 인정 반경(m)
+var _METRO_GPS_MAX  = 10*60*1000;   // 이보다 오래된 GPS는 안 믿는다
+function _metroNearStart(stn){
+  var out = { near:false, dist:null, why:'' };
+  try{
+    if(!stn || stn.lat == null || stn.lng == null){ out.why = '역 좌표 없음'; return out; }
+    var la = window._lastGPSLat, ln = window._lastGPSLng;
+    if(la == null || ln == null){ out.why = '위치 정보 없음'; return out; }
+    var at = window._lastGPSAt;
+    if(at && (Date.now() - at) > _METRO_GPS_MAX){ out.why = '위치 정보가 오래됨'; return out; }
+    if(typeof haversineM !== 'function'){ out.why = '거리 계산 불가'; return out; }
+    out.dist = Math.round(haversineM(la, ln, stn.lat, stn.lng));
+    out.near = (out.dist <= _METRO_NEAR_M);
+    out.why  = out.near ? ('출발역에서 ' + out.dist + 'm') : (out.dist + 'm 떨어져 있음');
+  }catch(e){ out.why = '판정 오류'; }
+  return out;
+}
+window._metroNearStart = _metroNearStart;
+
 function svgSetRoute(type) {
   var name = _selName || _gmSel;
   if(!name) return;
@@ -29409,7 +29442,8 @@ function svgSetRoute(type) {
     if(sn)  sn.style.display = 'none';
     if(fi)  fi.value = stn.name;
     if(inp) inp.value = stn.name;
-    if(typeof updateCong==='function') setTimeout(function(){ updateCong(stn); }, 100);
+    // ★ 2026-09-02: 노선도에서 직접 고른 역이므로 이전 경로 흔적을 무시하고 그린다.
+    if(typeof updateCong==='function') setTimeout(function(){ updateCong(stn, true); }, 100);
 
     // _fmapStart 동기화
     _fmapStart = { type:'subway', name:stn.name, lat:stn.lat, lng:stn.lng, line:stn.line };
@@ -29437,12 +29471,41 @@ function svgSetRoute(type) {
       if(fs) fs.value = S.start.name;
       window._preferBoardStn = S.start.name;
       _fmapDest = { type:'subway', name:S.dest.name, lat:S.dest.lat, lng:S.dest.lng, line:S.dest.line };
-      window._metroRouteMode = true;   // ★ 노선도로 설정한 경로 → 홈에서 하이라이트
-      // 이미 배경 추적이 돌고 있었다면 멈춘다(경로만 볼 것이므로).
-      //   _cleanupBgTracking 은 아래쪽 블록에서 정의되므로 다음 틱에 부른다.
-      setTimeout(function(){
-        try{ if(typeof _cleanupBgTracking === 'function') _cleanupBgTracking(); }catch(e){}
-      }, 0);
+      // ★ 2026-09-02: 이전 경로의 잔상 제거.
+      //   _transitNodeData(이전 탐색 결과)가 남아 있으면 혼잡도 카드와 상주 알림이
+      //   계속 옛 경로('내 위치 → 의정부' 같은)를 보여준다. 새 경로를 그리기 전에 비운다.
+      try{
+        if(typeof _transitNodeData !== 'undefined') _transitNodeData = [];
+        window._gpsMaxIdx      = null;
+        window._lastCongNodeIdx = -1;
+        window._congMode       = null;
+      }catch(e){}
+
+      // ★ GPS로 지금 그 출발역에 있는지 보고 두 갈래로 나눈다.
+      var _atStart = _metroNearStart(S.start);
+      window._metroAtStart   = _atStart.near;
+      window._metroStartDist = _atStart.dist;
+      window._metroRouteMode = !_atStart.near;   // 근처면 실제 이동, 아니면 미리보기(하이라이트)
+
+      if(typeof updateCong === 'function' && S.start){
+        try{ updateCong({ name:S.start.name, line:S.start.line || '' }, true); }catch(e){}
+      }
+
+      if(_atStart.near){
+        // 실제 이동 — 하이라이트 없이 평소 경로처럼 안내한다(승하차 알림 포함).
+        // 옛 경로로 떠 있던 상주 알림만 내린다(추적 자체는 그대로 둔다).
+        setTimeout(function(){
+          try{ if(typeof _clearForegroundNotif === 'function') _clearForegroundNotif(); }catch(e){}
+        }, 0);
+        if(typeof toast === 'function') toast('📍 ' + S.start.name + ' 근처예요 · 승하차 안내를 켭니다');
+      } else {
+        // 미리보기 — 배경 추적과 상주 알림을 확실히 내린다.
+        if(typeof toast === 'function')
+          toast('🗺 경로 미리보기 (' + (_atStart.why || '출발역과 떨어져 있음') + ') · 알림은 보내지 않아요');
+        setTimeout(function(){
+          try{ if(typeof _cleanupBgTracking === 'function') _cleanupBgTracking(); }catch(e){}
+        }, 0);
+      }
       var homeNi = document.getElementById('ni-home');
       if(typeof switchTab === 'function') switchTab('home', homeNi);
       // 홈에서 전체 경로 탐색 → 지하철 모드 자동 선택
@@ -29870,6 +29933,15 @@ function _journeyRemain(){
     //   S.route 는 노선도 BFS 전용이라, 홈 경로로 이동 중일 땐 비어 있어서
     //   상주 알림이 '경로 안내 중'만 반복 표시됐다.
     var _nd = (typeof _transitNodeData !== 'undefined') ? _transitNodeData : null;
+    // ★ 2026-09-02: 이 노드 목록이 '지금 보고 있는 경로'인지 확인한다.
+    //   예전 탐색 결과가 남아 있으면 상주 알림이 엉뚱한 경로(내 위치 → 의정부)를
+    //   계속 띄웠다. 목적지가 다르면 아래의 S.route 기준 계산으로 넘어간다.
+    try{
+      if(_nd && _nd.length && S && S.dest && S.dest.name){
+        var _k = function(v){ return String(v||'').replace(/\s/g,'').replace(/\(.*$/,'').replace(/역$/,''); };
+        if(_k(_nd[_nd.length-1].name) !== _k(S.dest.name)) _nd = null;
+      }
+    }catch(e){}
     if(_nd && _nd.length){
       var _prog = (window._gpsMaxIdx == null) ? 0 : window._gpsMaxIdx;
       var _last = _nd.length - 1;
@@ -29926,6 +29998,9 @@ function _journeyRemain(){
 function _showForegroundNotif(currentStn, destStn, remainStops){
   // ★ 알림 정책: 상주(포그라운드) 알림 비활성화
   if(typeof _notifAllowed==='function' && !_notifAllowed('fg_service')) return;
+  // ★ 2026-09-02: 노선도 미리보기(내가 그 출발역에 있지 않음)면 상주 알림도 띄우지 않는다.
+  if(window._metroRouteMode === true) return;
+  if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return;
   try {
     var LN = window.Capacitor &&
              window.Capacitor.Plugins &&
@@ -30056,7 +30131,7 @@ function _onForegroundResume(){
             var la = pos.coords.latitude, ln = pos.coords.longitude;
             var ac = pos.coords.accuracy || 99;
             if(la == null || ln == null || ac > 150) return;
-            window._lastGPSLat = la; window._lastGPSLng = ln;
+            window._lastGPSLat = la; window._lastGPSLng = ln; window._lastGPSAt = Date.now();
             if(typeof S !== 'undefined') S.lastGPSFix = { lat:la, lng:ln, ts:Date.now() };
             window._gpsMarkerNeedsSnap = true;
             // 좌표만 넣어두면 다음 추적 틱(1초 이내)이 진행도를 즉시 반영한다.
@@ -30113,6 +30188,7 @@ function _onForegroundResume(){
     if(navigator.geolocation){
       navigator.geolocation.getCurrentPosition(function(pos){
         try {
+          window._lastGPSAt  = Date.now();
           window._lastGPSLat = pos.coords.latitude;
           window._lastGPSLng = pos.coords.longitude;
           if(typeof S!=='undefined'){ S.lastGPSFix = { lat:pos.coords.latitude, lng:pos.coords.longitude, ts:Date.now() }; }
@@ -35112,6 +35188,69 @@ function svgRemovePopup() {
 }
 
 
+// ★ 2026-09-02: 노선 배지 표기 정리.
+//   증상: 역을 누르면 '인천2 인천2호선', '서해 서해선', '경의중 경의중앙선'처럼
+//         같은 말이 두 번 나왔다.
+//   원인: 노선명에서 '호선/선' 등을 지운 축약어를 원 안에 넣고, 그 옆에 다시
+//         노선명 전체를 붙였다. 숫자 노선('2호선' → '2')에서만 자연스럽고
+//         이름 노선에서는 그대로 중복이 된다.
+//   → 원 안에 넣을 게 분명할 때(숫자 노선, GTX-A)만 원을 그리고,
+//     나머지는 노선명만 담은 알약 하나로 보여준다.
+function _lineColorOf(line){
+  var l = String(line || '').trim();
+  if(typeof LC !== 'undefined' && LC[l]) return LC[l];
+  if(typeof _REGION_LINE_COLORS !== 'undefined' && _REGION_LINE_COLORS[l]) return _REGION_LINE_COLORS[l];
+  // 지역 접두어를 뗀 이름으로 한 번 더(예: '인천2호선' 없을 때 '2호선')
+  var bare = l.replace(/^(수도권|서울|인천|부산|대구|광주|대전|경기)\s*/, '');
+  if(typeof LC !== 'undefined' && LC[bare]) return LC[bare];
+  return '#5a5a5f';
+}
+window._lineColorOf = _lineColorOf;
+
+// 원 안에 넣을 글자 (없으면 빈 문자열 → 원을 그리지 않는다)
+function _lineNumOf(line){
+  var l = String(line || '').trim();
+  var m = l.match(/(\d+)\s*호선/);
+  if(m) return m[1];
+  var g = l.match(/GTX[-\s]?([A-Z])/i);
+  if(g) return g[1].toUpperCase();
+  return '';
+}
+window._lineNumOf = _lineNumOf;
+
+// 노선명 목록 정리: 공백 제거 · 빈값 제거 · 중복 제거 (표기 순서는 유지)
+function _lineListClean(lines){
+  var out = [], seen = {};
+  (lines || []).forEach(function(l){
+    var v = String(l == null ? '' : l).trim();
+    if(!v) return;
+    if(seen[v]) return;
+    seen[v] = 1;
+    out.push(v);
+  });
+  return out;
+}
+window._lineListClean = _lineListClean;
+
+// 배지 1개의 HTML
+function _linePillHtml(line){
+  var esc = function(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+  var col = _lineColorOf(line);
+  var num = _lineNumOf(line);
+  var pad = num ? '6px 14px 6px 6px' : '7px 14px';
+  var html = '<span style="display:inline-flex;align-items:center;gap:6px;'
+           + 'padding:' + pad + ';border-radius:20px;background:' + col + ';'
+           + 'color:#fff;font-size:13px;font-weight:700;line-height:1;">';
+  if(num){
+    html += '<span style="background:rgba(255,255,255,.28);border-radius:50%;'
+          + 'width:22px;height:22px;display:inline-flex;align-items:center;'
+          + 'justify-content:center;font-size:12px;font-weight:900;">' + esc(num) + '</span>';
+  }
+  html += esc(line) + '</span>';
+  return html;
+}
+window._linePillHtml = _linePillHtml;
+
 function svgShowPopup(name, lines) {
   svgRemovePopup();
   _selName = name;
@@ -35138,25 +35277,10 @@ function svgShowPopup(name, lines) {
   var ld = document.createElement('div');
   ld.style.cssText = 'display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px;';
 
-  (lines || []).forEach(function(l) {
-    var col = (typeof LC !== 'undefined' && LC[l]) || '#555';
-    var short = l.replace('호선','').replace('분당','분').replace('중앙','중')
-                 .replace('GTX-A','G').replace('철도','').replace('선','');
-    var tag = document.createElement('span');
-    tag.style.cssText =
-      'display:inline-flex;align-items:center;gap:5px;' +
-      'padding:7px 16px;border-radius:20px;background:' + col + ';' +
-      'color:#fff;font-size:13px;font-weight:700;';
-    tag.innerHTML =
-      '<span style="background:rgba(0,0,0,.3);border-radius:50%;' +
-      'width:22px;height:22px;display:inline-flex;align-items:center;' +
-      'justify-content:center;font-size:11px;font-weight:900;">' + short + '</span>' + l;
-    ld.appendChild(tag);
-  });
-
-  if (!lines || !lines.length) {
-    ld.innerHTML = '<span style="color:#888;font-size:12px;">노선 정보 없음</span>';
-  }
+  var _ls = _lineListClean(lines);
+  ld.innerHTML = _ls.length
+    ? _ls.map(_linePillHtml).join('')
+    : '<span style="color:#888;font-size:12px;">노선 정보 없음</span>';
   pop.appendChild(ld);
 
   // 버튼 — 터치/클릭 이중 트리거 방지
@@ -37037,12 +37161,18 @@ function _congFixStation(stn){
   }catch(e){ return stn; }
 }
 
-function updateCong(stn) {
+// ★ 2026-09-02: force=true 면 이전 경로의 흔적을 무시하고 이 역으로 그린다.
+//   증상: 노선도에서 부산·광주 등 다른 지역 노선을 골랐는데 혼잡도 카드에
+//         예전 수도권 역(광명)이 그대로 남아 있었다.
+//   원인: (1) 직전 경로에 버스가 있으면 _congMode==='bus' 라서 지하철 갱신을 통째로 무시,
+//         (2) _congFixStation 이 '이전 경로'의 노드 목록을 기준으로 역을 바꿔치기.
+//         둘 다 이전 경로가 지워지지 않은 상태에서 새 역을 막아버렸다.
+function updateCong(stn, force) {
   if(!stn || !stn.name) return;
   // 🚌 버스 혼잡도가 현재 표시 중이면 지하철로 덮어쓰지 않음
   // (버스 탭/버스 구간에서 updateCong가 호출되어도 무시)
-  if(window._congMode === 'bus') return;
-  stn = _congFixStation(stn);
+  if(!force && window._congMode === 'bus') return;
+  if(!force) stn = _congFixStation(stn);
   if(!stn || !stn.name) return;
   window._congMode = 'subway';
   var pct  = getCongPct(stn.name, stn.line);
