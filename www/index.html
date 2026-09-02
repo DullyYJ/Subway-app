@@ -3135,7 +3135,7 @@ function requestHomeBrief(force){
       hour: hour, congPct: congPct, transfers: Math.max(0, lines.length-1),
       totalMin: totalMin, mode: 'home',
       preview: _preview, whenLabel: _whenLabel,
-      manualStart: _manual, manualLabel: (_manual ? ('수동설정경로: ' + new Date(_briefMs).toLocaleDateString('ko-KR',{month:'numeric',day:'numeric'}) + ' ' + new Date(_briefMs).getHours() + '시') : ''),
+      manualStart: _manual, manualLabel: '',   // ★ 2026-09-02: 제목 라벨 폐지
       segments: (function(){ try { var _r=_buildRouteBrief(); return _r?_r.segments:[]; } catch(e){ return []; } })()
     })
   })
@@ -3174,9 +3174,6 @@ function _renderHomeBrief(data, fromName, toName, hour, congPct){
   var _preview = (typeof _baseTimeMs!=='undefined' && _baseTimeMs != null);
   var timeStr = new Date(_bMs).toLocaleTimeString('ko-KR', {hour:'2-digit',minute:'2-digit'});
   var _pre = _preview ? '예상 · ' : '';
-  if(typeof _isManualStart==='function' && _isManualStart()){
-    _pre = '수동설정 · ' + _pre;
-  }
   var titleEl = document.getElementById('homeAiTitle');
   var hasRoute = toName && toName !== fromName;
   var _isMetroR = (window._metroRouteMode === true);
@@ -3304,15 +3301,19 @@ function _renderHomeBriefLocal(fromName, toName, hour, congPct){
   var _bMs = (typeof getBaseTimeMs==='function') ? getBaseTimeMs() : Date.now();
   var _preview = (typeof _baseTimeMs!=='undefined' && _baseTimeMs != null);
   var _manualL = (typeof _isManualStart==='function' && _isManualStart());
-  var _mLabel = _manualL ? ('수동설정경로: ' + new Date(_bMs).toLocaleDateString('ko-KR',{month:'numeric',day:'numeric'}) + ' ' + new Date(_bMs).getHours() + '시 · ') : '';
-  var timeStr = _mLabel + (_preview ? '예상 · ' : '') + new Date(_bMs).toLocaleTimeString('ko-KR', {hour:'2-digit',minute:'2-digit'});
+  // ★ 2026-09-02: 제목의 '수동설정경로: 9. 2. 12시 ·' 라벨 제거.
+  //   길기만 하고 아래 본문에 같은 날짜·시각이 또 나온다.
+  var timeStr = (_preview ? '예상 · ' : '') + new Date(_bMs).toLocaleTimeString('ko-KR', {hour:'2-digit',minute:'2-digit'});
   var titleEl = document.getElementById('homeAiTitle');
   var hasRoute = toName && toName !== fromName;
   var peak = (hour>=7&&hour<=9) || (hour>=17&&hour<=19);
   var congTxt = congPct>=70 ? '매우 혼잡' : congPct>=45 ? '다소 혼잡' : '여유로운 편';
 
-  // ── 미래/수동 설정: 예측 요약(이모지 없음) ──
-  if(_preview || _manualL){
+  // ── 미래 시각(기준시각을 앞뒤로 옮긴 경우): 예측 요약(이모지 없음) ──
+  //   ★ 2026-09-02: 수동으로 출발지를 정한 경우는 여기서 빼낸다.
+  //   출발지를 손으로 골랐을 뿐 '지금 가는 길'이므로, 날씨·환승·도착 시각·조언까지
+  //   들어 있는 아래 승무원 브리핑을 그대로 받아야 한다.
+  if(_preview){
     if(titleEl) titleEl.textContent = (hasRoute ? fromName + ' → ' + toName : fromName) + ' · ' + timeStr;
     var _d2 = new Date(_bMs);
     var _dateTxt = (_d2.getMonth()+1) + '월 ' + _d2.getDate() + '일(' + ['일','월','화','수','목','금','토'][_d2.getDay()] + ') '
@@ -38801,6 +38802,96 @@ function _swipeBlocked(el){
   return false;
 }
 
+// ★ 2026-09-02: 커뮤니티에만 있던 좌우 스와이프를 쇼핑센터·맛집에도 붙인다.
+//   두 탭은 카테고리가 순환한다(마지막에서 왼쪽으로 밀면 처음으로).
+//   커뮤니티는 종전대로 양 끝에서 멈춘다(탭 구조가 달라서 넘기면 헷갈린다).
+
+// 칩 바에서 지금 카테고리가 보이도록 스크롤 + 목록은 맨 위로
+function _swipeAfterCat(barId, sel, scrollId){
+  try{
+    var bar = document.getElementById(barId);
+    if(bar && sel){
+      var b = bar.querySelector(sel);
+      if(b && b.scrollIntoView) b.scrollIntoView({ inline:'center', block:'nearest' });
+    }
+  }catch(e){}
+  try{ var sv = document.getElementById(scrollId); if(sv) sv.scrollTop = 0; }catch(e){}
+}
+
+// 쇼핑센터: 추천 → 식사 → 음료 → … → 완구 → 다시 추천 (순환)
+//   dir: -1 = 왼쪽으로 밈(다음), +1 = 오른쪽으로 밈(이전)
+function _shopCatStep(dir){
+  try{
+    if(typeof _shopPick !== 'function' || typeof _shopSelCat !== 'function') return false;
+    var pick = _shopPick();
+    if(!pick) return false;
+    var cats = [SHOP_REC_CAT].concat(pick.order || []);
+    if(cats.length < 2) return false;
+    var cur = cats.indexOf(_shopActiveCat);
+    if(cur < 0) cur = 0;
+    var nx = (cur - dir + cats.length) % cats.length;      // ★ 순환
+    _shopSelCat(cats[nx]);
+    _swipeAfterCat('shopCats', '[data-c="' + cats[nx].replace(/"/g,'') + '"]', 'shopScrollView');
+    return true;
+  }catch(e){ return false; }
+}
+window._shopCatStep = _shopCatStep;
+
+// 맛집: 전체 → 밥집 → 카페 → 술집 → 다시 전체 (순환)
+function _foodCatStep(dir){
+  try{
+    var chips = document.querySelectorAll('#foodFilter .food-chip');
+    if(!chips || chips.length < 2) return false;
+    var cats = ['전체','밥집','카페','술집'];
+    var cur = cats.indexOf(typeof _foodCurFilter !== 'undefined' ? _foodCurFilter : '전체');
+    if(cur < 0) cur = 0;
+    var nx = (cur - dir + cats.length) % cats.length;      // ★ 순환
+    if(typeof foodFilterCat === 'function') foodFilterCat(chips[nx], cats[nx]);
+    _swipeAfterCat('foodFilter', null, 'foodList');
+    return true;
+  }catch(e){ return false; }
+}
+window._foodCatStep = _foodCatStep;
+
+// 스와이프 감지를 공통으로 붙인다 (판정 기준은 커뮤니티와 동일)
+function _swipeAttach(hostId, stepFn){
+  var host = document.getElementById(hostId);
+  if(!host || host._swipeOn) return;
+  host._swipeOn = true;
+  var st = null;
+  host.addEventListener('touchstart', function(e){
+    if(!e.touches || e.touches.length !== 1){ st = null; return; }
+    if(_swipeBlocked(e.target)){ st = null; return; }
+    var t = e.touches[0];
+    st = { x:t.clientX, y:t.clientY, t:Date.now(), off:false };
+  }, { passive:true });
+  host.addEventListener('touchmove', function(e){
+    if(!st || !e.touches || e.touches.length !== 1) return;
+    var t = e.touches[0];
+    var ax = Math.abs(t.clientX - st.x), ay = Math.abs(t.clientY - st.y);
+    if(ay > _SWIPE_MAX_OFF && ay > ax) st.off = true;
+  }, { passive:true });
+  host.addEventListener('touchend', function(e){
+    var sw = st; st = null;
+    if(!sw || sw.off) return;
+    if(Date.now() - sw.t > _SWIPE_MAX_MS) return;
+    var t = (e.changedTouches && e.changedTouches[0]);
+    if(!t) return;
+    var dx = t.clientX - sw.x, dy = t.clientY - sw.y;
+    if(Math.abs(dx) < _SWIPE_MIN_PX) return;
+    if(Math.abs(dx) < Math.abs(dy) * _SWIPE_RATIO) return;
+    try{ stepFn(dx < 0 ? -1 : 1); }catch(e2){}
+  }, { passive:true });
+  host.addEventListener('touchcancel', function(){ st = null; }, { passive:true });
+}
+window._swipeAttach = _swipeAttach;
+
+function _shopFoodSwipeInit(){
+  _swipeAttach('tab-shop', _shopCatStep);
+  _swipeAttach('tab-food', _foodCatStep);
+}
+window._shopFoodSwipeInit = _shopFoodSwipeInit;
+
 function _commSwipeInit(){
   var host = document.getElementById('tab-community');
   if(!host || host._swipeOn) return;
@@ -38840,9 +38931,13 @@ function _commSwipeInit(){
 window._commSwipeInit = _commSwipeInit;
 
 try{
+  var _swInitAll = function(){
+    try{ _commSwipeInit(); }catch(e){}
+    try{ _shopFoodSwipeInit(); }catch(e){}
+  };
   if(document.readyState === 'loading')
-    document.addEventListener('DOMContentLoaded', _commSwipeInit);
-  else _commSwipeInit();
+    document.addEventListener('DOMContentLoaded', _swInitAll);
+  else _swInitAll();
 }catch(e){}
 
 function filterCat(el,cat){
