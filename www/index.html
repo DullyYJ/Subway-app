@@ -1918,9 +1918,16 @@ function _exitCancel(){
 var _KAKAO_PROXY_BASE = 'https://gentle-lab-7e47subway-api.phg0643.workers.dev';
 // ★ 키를 클라이언트에 두지 않기 위한 공용 프록시 베이스 (Worker가 서버에서 키를 붙임)
 var _API_PROXY_BASE = _KAKAO_PROXY_BASE;
+// ★ 2026-09-02: 경로 탐색은 ODsay 같은 외부 API가 아니라 **자체 엔진**이다.
+//   route-v2 워커가 전국 지하철·버스 데이터를 얹고 Dijkstra 로 직접 계산한다.
+//   응답만 예전 형식(subPath/trafficType/sectionTime)에 맞춰 내보내서
+//   앱의 기존 파서를 그대로 쓴다.
+//   ↓ 경로 문자열의 'odsay' 는 **워커에 등록된 라우트 이름**이라 앱에서 바꾸면
+//     404 가 나서 경로 탐색이 통째로 죽는다. 워커를 같이 고치기 전에는 손대지 말 것.
 var _ROUTE_V2_BASE = 'https://route-v2.phg0643.workers.dev';
+var _ROUTE_V2_PATH = '/route-v2-odsay';   // 워커 라우트명(변경 금지)
 function _routeV2Url(qs){
-  return _ROUTE_V2_BASE + '/route-v2-odsay?' + qs;
+  return _ROUTE_V2_BASE + _ROUTE_V2_PATH + '?' + qs;
 }
 // 공공데이터포털(TAGO) 프록시: path=엔드포인트경로, qs=serviceKey 제외한 쿼리
 function _tagoUrl(path, qs){
@@ -1932,8 +1939,83 @@ function _seoulUrl(path){
 }
 window._tagoUrl = _tagoUrl; window._seoulUrl = _seoulUrl;
 // dapi.kakao.com/v2/local/* 프록시
+// ★ 2026-09-02: 이 워커에 /kakao-local 라우트가 없으면 계속 404가 돌아온다(확인됨).
+//   호출부들은 실패를 조용히 무시하도록 되어 있어 앱은 정상 동작하지만,
+//   죽은 주소로 계속 요청을 보낼 이유가 없다. 404를 한 번 보면 이후 호출은 건너뛴다.
+//   (라우트를 워커에 추가하면 앱 재시작 시 자동으로 다시 시도한다)
+//
+// ★ 2026-09-02: 호출 아끼기 — 같은 질문을 다시 묻지 않는다.
+//   지오코딩 결과는 사실상 변하지 않는다. 좌표는 100m 격자로 뭉쳐서 키를 만들고,
+//   검색어는 문자열 그대로 키로 쓴다. 저장은 90일, 최대 300건(오래된 것부터 정리).
+//   → 홈탭을 열 때마다·10분마다 같은 자리를 다시 묻던 호출이 대부분 0회가 된다.
+var _KL_CACHE_KEY = 'kakaoLocalCache';
+var _KL_TTL       = 90*24*3600*1000;   // 90일
+var _KL_MAX       = 300;               // 저장 상한
+
+// 좌표 파라미터는 100m 격자(소수 3자리 ≈ 90~110m)로 반올림해 같은 자리로 묶는다
+function _klKey(path, qs){
+  var q = String(qs || '');
+  if(/coord2/.test(String(path || ''))){
+    q = q.replace(/(^|&)(x|y)=(-?\d+(?:\.\d+)?)/g, function(_m, pre, k, v){
+      return pre + k + '=' + (Math.round(parseFloat(v) * 1000) / 1000).toFixed(3);
+    });
+  }
+  return String(path || '') + '?' + q;
+}
+window._klKey = _klKey;
+
+function _klLoad(){
+  try{ return JSON.parse(localStorage.getItem(_KL_CACHE_KEY) || '{}') || {}; }
+  catch(e){ return {}; }
+}
+function _klGet(k){
+  try{
+    var m = _klLoad(), e = m[k];
+    if(!e || !e.t) return null;
+    if(Date.now() - e.t > _KL_TTL) return null;
+    return e.d;
+  }catch(e){ return null; }
+}
+function _klPut(k, data){
+  try{
+    var m = _klLoad();
+    m[k] = { t: Date.now(), d: data };
+    var keys = Object.keys(m);
+    if(keys.length > _KL_MAX){
+      keys.sort(function(a, b){ return (m[a].t || 0) - (m[b].t || 0); });   // 오래된 것부터
+      keys.slice(0, keys.length - _KL_MAX).forEach(function(x){ delete m[x]; });
+    }
+    localStorage.setItem(_KL_CACHE_KEY, JSON.stringify(m));
+  }catch(e){
+    // 용량이 차면 통째로 비우고 이번 것만 남긴다
+    try{
+      var one = {}; one[k] = { t: Date.now(), d: data };
+      localStorage.setItem(_KL_CACHE_KEY, JSON.stringify(one));
+    }catch(e2){}
+  }
+}
+window._klGet = _klGet; window._klPut = _klPut;
+
+// 호출부는 전부 r.json() 을 쓰므로, 캐시도 같은 모양으로 돌려준다
+function _klRes(data){
+  return { ok:true, status:200, _cached:true, json:function(){ return Promise.resolve(data); } };
+}
+
 function _kakaoLocal(path, qs){
-  return _fetchT(_KAKAO_PROXY_BASE + '/kakao-local?path=' + encodeURIComponent(path) + '&qs=' + encodeURIComponent(qs || ''), {}, 8000);
+  var key = _klKey(path, qs);
+  var hit = _klGet(key);
+  if(hit) return Promise.resolve(_klRes(hit));                       // 저장본이 있으면 호출 안 함
+  if(window._kakaoDead) return Promise.reject(new Error('kakao-local 없음'));
+  return _fetchT(_KAKAO_PROXY_BASE + '/kakao-local?path=' + encodeURIComponent(path) + '&qs=' + encodeURIComponent(qs || ''), {}, 8000)
+    .then(function(r){
+      if(r && r.status === 404){ window._kakaoDead = true; return r; }
+      if(!r || !r.ok) return r;
+      return r.json().then(function(d){
+        // 결과가 있을 때만 저장 — 빈 응답을 90일 붙들고 있으면 안 된다
+        if(d && d.documents && d.documents.length) _klPut(key, d);
+        return _klRes(d);
+      }).catch(function(){ return r; });
+    });
 }
 // apis-navi.kakaomobility.com/* 프록시
 function _kakaoNavi(path, qs){
@@ -2404,7 +2486,7 @@ function loadFoodTab(force) {
   if(!destStn && S.route && S.route.path && S.route.path.length)
     destStn = S.route.path[S.route.path.length - 1];
 
-  // 2) 복합경로 결과 (ODsay/카카오)
+  // 2) 복합경로 결과 (경로엔진/장소검색)
   if(!destStn && typeof _transitResultDest !== 'undefined' && _transitResultDest && _transitResultDest.name)
     destStn = _transitResultDest.name;
 
@@ -3233,7 +3315,7 @@ function _buildRouteBrief(){
   return { segments:segs, from:cp[0], to:cp[cp.length-1], totalMin:totalMin, transfers:Math.max(0, segs.length-1) };
 }
 
-// 확정된 복합경로(_transitResultData: ODsay routes/sections)에서 구간·환승 추출
+// 확정된 복합경로(_transitResultData: 경로엔진 routes/sections)에서 구간·환승 추출
 function _briefFromTransitData(){
   try {
     if(typeof _transitResultData === 'undefined' || !_transitResultData || !_transitResultData.routes || !_transitResultData.routes[0]) return null;
@@ -7625,7 +7707,7 @@ window._hideRouteLoading = _hideRouteLoading;
 
     // ── 경로 방식 판단 ──
     // 지하철역↔지하철역 같은 도시 → BFS
-    // 그 외(버스/장소/다른도시) → ODsay
+    // 그 외(버스/장소/다른도시) → 경로엔진
     var useBFS = (start.type === 'subway' && dest.type === 'subway' && _needKakao(start, dest) === false);
 
     if(useBFS) {
@@ -7642,7 +7724,7 @@ window._hideRouteLoading = _hideRouteLoading;
       return;
     }
 
-    // ODsay 복합경로
+    // 경로엔진 복합경로
     if(!start.lat || !start.lng || !dest.lat || !dest.lng) {
       if(loading) loading.style.display = 'none';
       toast('좌표 정보가 없습니다. 검색 목록에서 선택해주세요.');
@@ -7824,7 +7906,7 @@ window._hideRouteLoading = _hideRouteLoading;
         var _cd = { result: { path: allPaths } };
         window._favSearchStart = start;
         if(first) window._favToastKey = null;
-        _allRouteResults = _parseODsayAllOptions(_cd);
+        _allRouteResults = _parseRouteOptions(_cd);
         window._routeResultReady = _reqToken;
         var tabDiv = document.getElementById('routeOptionTabs');
         if(tabDiv) tabDiv.style.display = 'flex';
@@ -7835,7 +7917,7 @@ window._hideRouteLoading = _hideRouteLoading;
         try{ _highlightRouteTab(_ht); }catch(e){}
         setTimeout(function(){ try{ _highlightRouteTab(_ht); }catch(e){} }, 0);
         var fr = _allRouteResults ? _allRouteResults.fast : null;
-        var rd = fr ? { routes: [_convertSinglePathToRoute(fr)] } : _convertODsayToRoutes(_cd);
+        var rd = fr ? { routes: [_convertSinglePathToRoute(fr)] } : _convertEngineRoutes(_cd);
         _renderTransitResultCard(rd, start, dest, 'route-v2');
         // ★ 카드가 생기면 높이가 바뀌므로 다시 한 번 맞춘다
         try{ if(typeof window._scrollToRouteResult==='function')
@@ -7876,7 +7958,7 @@ window._hideRouteLoading = _hideRouteLoading;
 // ── 경로 결과 저장 (옵션 선택용) ──
 var _allRouteResults = null;  // { fast, less, bus } 세 가지 경로
 
-// ODsay 응답에서 최단/최소환승/버스우선 경로 분리
+// 경로엔진 응답에서 최단/최소환승/버스우선 경로 분리
 // ── 실시간 버스 대기시간을 경로 순위에 반영 ──────────────────────────
 //   문제: 순위가 엔진이 준 totalTime(차내 이동 기준)만 보고 정해져서,
 //   "지금 이 정류장에 어떤 차가 먼저 오는지"가 빠져 있었다.
@@ -8131,11 +8213,11 @@ function _dedupPaths(paths){
 }
 window._dedupPaths = _dedupPaths;
 
-function _parseODsayAllOptions(odsayData) {
-  var paths = (odsayData.result || {}).path || [];
+function _parseRouteOptions(engineData) {
+  var paths = (engineData.result || {}).path || [];
   if(!paths.length) return null;
 
-  // ODsay는 이미 최단시간 순으로 정렬해서 줌
+  // 엔진이 이미 최단시간 순으로 정렬해서 준다
   // pathType: 1=지하철우선, 2=버스우선, 3=지하철+버스
   var byType = { 1: [], 2: [], 3: [] };
   paths.forEach(function(p) {
@@ -8421,10 +8503,42 @@ function _favPathBonus(p){
   return 0;
 }
 // 비교용 Cost(분) = 실제 소요시간 - 즐겨찾기 감면
+// ★ 2026-09-02: 첫 구간(집→타는 곳)과 마지막 구간(내려서→목적지) 도보 시간.
+//   trafficType 3 = 도보.
+function _walkEdgeMin(p){
+  var out = { head:0, tail:0 };
+  try{
+    var subs = (p && p.subPath) || [];
+    if(!subs.length) return out;
+    if(subs[0] && subs[0].trafficType === 3) out.head = subs[0].sectionTime || 0;
+    var last = subs[subs.length-1];
+    if(subs.length > 1 && last && last.trafficType === 3) out.tail = last.sectionTime || 0;
+  }catch(e){}
+  return out;
+}
+window._walkEdgeMin = _walkEdgeMin;
+
+// ★ 2026-09-02: 오래 걷는 경로에 벌점.
+//   증상: 정류장이 코앞인데 53분을 걸어 지하철역까지 가는 경로가 '최단시간'으로 뽑혔다.
+//   원인: 엔진의 최단시간 모드는 도보 가중치가 1이라 걷는 1분과 앉아 가는 1분이 같다.
+//         그래서 '버스로 5분 + 지하철'보다 '50분 걷기 + 지하철'이 총합만 조금 짧으면 이긴다.
+//   → 10분을 넘는 접근·마무리 도보는 넘는 만큼 1.5배로 세서, 버스를 타는 경로가
+//     정당하게 비교되도록 한다. 10분 이하 도보는 벌점 0이라 기존 순서 그대로다.
+var _WALK_FREE_MIN = 10;   // 이만큼은 그냥 걷는 것으로 본다
+var _WALK_WEIGHT   = 1.5;  // 넘는 시간에 붙는 가중치
+function _walkPenalty(p){
+  try{
+    var w = _walkEdgeMin(p);
+    var over = Math.max(0, w.head - _WALK_FREE_MIN) + Math.max(0, w.tail - _WALK_FREE_MIN);
+    return Math.round(over * _WALK_WEIGHT);
+  }catch(e){ return 0; }
+}
+window._walkPenalty = _walkPenalty;
+
 function _favCost(p){
   var t=((p&&p.info)||{}).totalTime;
   if(t==null) t=999;
-  return t - _favPathBonus(p);
+  return t - _favPathBonus(p) + _walkPenalty(p);
 }
 window._favPathBonus=_favPathBonus;
 window._favCost=_favCost;
@@ -8437,7 +8551,7 @@ function _renderNormalBus(){
     if(!(r&&r.sections&&r.sections.length)){ try{ r=_convertSinglePathToRoute(_allRouteResults[t]); }catch(e){} }
   });
   if(!(r&&r.sections&&r.sections.length)){ toast('버스 경로를 찾을 수 없습니다.'); return; }
-  _renderTransitResultCard({routes:[r]}, _transitResultStart, _transitResultDest, 'odsay_bus');
+  _renderTransitResultCard({routes:[r]}, _transitResultStart, _transitResultDest, 'engine_bus');
 }
 // 버스 탭: 500m 내 즐겨찾기 정류장에서 승차하는 경로 재탐색. 처리하면 true.
 function _selectBusFavRoute(){
@@ -8452,7 +8566,7 @@ function _selectBusFavRoute(){
     var busPath=null;
     try{
       if(data&&data.result&&data.result.path){
-        var opts=_parseODsayAllOptions({result:{path:data.result.path}});
+        var opts=_parseRouteOptions({result:{path:data.result.path}});
         busPath = opts ? (opts.bus || opts.less || opts.fast) : null;
       }
     }catch(e){}
@@ -8460,7 +8574,7 @@ function _selectBusFavRoute(){
     if(busPath){ try{ routeObj=_convertSinglePathToRoute(busPath); }catch(e){} }
     if(routeObj&&routeObj.sections&&routeObj.sections.length){
       var favStart={ name:'⭐ '+fav.nodenm, lat:fav.la, lng:fav.lo, type:(st.type||1) };
-      _renderTransitResultCard({routes:[routeObj]}, favStart, dst, 'odsay_bus');
+      _renderTransitResultCard({routes:[routeObj]}, favStart, dst, 'engine_bus');
       _transitResultStart = st;   // 전역 출발지는 실제 출발지로 복원(다른 탭 영향 방지)
       var bx=document.getElementById('transitResultBox')||document.getElementById('transitDetailBox');
     } else {
@@ -8524,7 +8638,7 @@ function _doSelectRouteOption(type) {
 
   if(!routeObj){ toast('경로를 찾을 수 없습니다.'); return; }
   var data = { routes: [routeObj] };
-  _renderTransitResultCard(data, _transitResultStart, _transitResultDest, 'odsay_' + type);
+  _renderTransitResultCard(data, _transitResultStart, _transitResultDest, 'engine_' + type);
 
   // ★ 즐겨찾기 정류장 승차 경로가 선택된 경우 1회 안내
   try{
@@ -8603,13 +8717,13 @@ function _highlightRouteTab(type){
 window._highlightRouteTab = _highlightRouteTab;
 
 // ── 지하철 탭: 출발지에서 가장 가까운 역에서 타는 경로 ──
-// 출발지 좌표로 가장 가까운 지하철역을 찾아, 그 역→도착지 ODsay 지하철 경로를 재요청
+// 출발지 좌표로 가장 가까운 지하철역을 찾아, 그 역→도착지 지하철 경로를 재요청
 function _selectSubwayNearestRoute(){
   var start = _transitResultStart, dest = _transitResultDest;
   if(!start || !dest || start.lat==null || dest.lat==null){
     // 좌표 없으면 기존 sub 경로라도 시도
     var fb = _allRouteResults && _allRouteResults.sub;
-    if(fb){ var r=_convertSinglePathToRoute(fb); if(r&&r.sections&&r.sections.length){ _renderTransitResultCard({routes:[r]}, start, dest, 'odsay_sub'); return; } }
+    if(fb){ var r=_convertSinglePathToRoute(fb); if(r&&r.sections&&r.sections.length){ _renderTransitResultCard({routes:[r]}, start, dest, 'engine_sub'); return; } }
     toast('출발지 위치를 확인할 수 없어요.');
     return;
   }
@@ -8627,7 +8741,7 @@ function _selectSubwayNearestRoute(){
 }
 window._selectSubwayNearestRoute = _selectSubwayNearestRoute;
 
-// 단일 ODsay path → route 형식
+// 단일 엔진 path → route 형식
 // ★ 정류장 객체 정규화 — 시간 정보가 오면 반드시 보존한다(2026-08-26)
 //   예전 변환기는 stationName/lat/lon 세 필드만 남기고 나머지를 통째로 버렸다.
 //   그래서 엔진이나 TAGO에서 정류장별 소요/도착 시각을 실어 보내도
@@ -8690,9 +8804,9 @@ function _convertSinglePathToRoute(path) {
   };
 }
 
-// ODsay 응답 → _renderTransitResultCard용 routes 형식 변환
-function _convertODsayToRoutes(odsayData) {
-  var paths = (odsayData.result || {}).path || [];
+// 엔진 응답 → _renderTransitResultCard용 routes 형식 변환
+function _convertEngineRoutes(engineData) {
+  var paths = (engineData.result || {}).path || [];
   var routes = paths.slice(0, 3).map(function(path) {
     var info = path.info || {};
     var sections = (path.subPath || []).map(function(sp) {
@@ -8722,7 +8836,7 @@ function _convertODsayToRoutes(odsayData) {
   });
   return { routes: routes };
 }
-window._convertODsayToRoutes = _convertODsayToRoutes;
+window._convertEngineRoutes = _convertEngineRoutes;
 
 window.fmapDoRoute = fmapDoRoute;
 
@@ -15181,6 +15295,11 @@ window._bgDiag = async function(){
           + (_q != null && _q > 180 ? ' ← 멈춤 의심' : ''));
       add('서버 대화 모드: ' + (window._serverTalksActive ? '켜짐(로컬 생성 보류)' : '꺼짐(로컬 생성)'));
       add('대화 타이머: ' + (window._ltWatchdog ? '감시 중' : '없음'));
+    try{
+      var _klN = Object.keys(JSON.parse(localStorage.getItem('kakaoLocalCache') || '{}')).length;
+      add('장소 API(kakao-local): ' + (window._kakaoDead ? '없음(404) — 폴백 사용' : '정상 또는 미사용')
+          + ' · 저장본 ' + _klN + '건');
+    }catch(e2){}
     // ★ 도착 10분 전 추천(커피·야식) 상태
     try{
       var _aw = window._arrWatchTimer ? '감시 중' : '없음';
@@ -30144,6 +30263,34 @@ function _stnSame(a, b){
   return !!a && !!b && k(a) === k(b);
 }
 
+// ★ 2026-09-02: 작은 화면에 '내 위치'라고만 뜨던 것을 실제 지명으로 바꾼다.
+//   1순위: 지금 좌표의 행정동 이름(카카오)  2순위: 경로의 첫 역·정류장 이름
+//   결과는 캐시해 두고, 못 구하면 예전처럼 '내 위치'로 둔다.
+function _pipResolveFrom(){
+  try{
+    var la = window._lastGPSLat, ln = window._lastGPSLng;
+    if(la == null || ln == null) return;
+    if(window._pipFromAt && (Date.now() - window._pipFromAt) < 10*60*1000) return;  // 10분간 재사용
+    if(typeof _kakaoLocal !== 'function') return;
+    window._pipFromAt = Date.now();
+    _kakaoLocal('geo/coord2regioncode.json', 'x=' + ln + '&y=' + la)
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var docs = (d && d.documents) || [];
+        var h = docs.find(function(x){ return x.region_type === 'H'; }) || docs[0];
+        if(!h) return;
+        var nm = h.region_3depth_name || h.region_2depth_name || '';
+        if(nm){
+          window._pipFromName = nm;
+          if(window._pipTrip && (!window._pipTrip.from || window._pipTrip.from === '내 위치'))
+            window._pipTrip.from = nm;
+        }
+      })
+      .catch(function(){});
+  }catch(e){}
+}
+window._pipResolveFrom = _pipResolveFrom;
+
 function _pipTripSet(){
   try{
     var from = '내 위치', to = '';
@@ -30152,9 +30299,29 @@ function _pipTripSet(){
       to   = S.route.path[S.route.path.length - 1] || '';
     }
     var nd = (typeof _transitNodeData !== 'undefined') ? _transitNodeData : null;
-    if(!to && nd && nd.length >= 2){ from = nd[0].name || from; to = nd[nd.length-1].name || ''; }
+    if(!to && nd && nd.length >= 2){
+      // ★ 2026-09-02: 첫 노드가 '도보'인 경우가 많아, 실제로 타는 곳을 출발지로 삼는다
+      for(var i1=0;i1<nd.length;i1++){
+        if(nd[i1] && !nd[i1].isWalk && nd[i1].name){ from = nd[i1].name; break; }
+      }
+      to = nd[nd.length-1].name || '';
+    }
     if(!to && typeof S !== 'undefined' && S && S.dest && S.dest.name) to = S.dest.name;
     if(!to) return;
+    // 출발지가 GPS(=내 위치)면 지명으로 바꿔 준다
+    if(!from || from === '내 위치'){
+      if(window._pipFromName) from = window._pipFromName;
+      else {
+        // 경로의 첫 역·정류장 이름이라도 쓴다(도보 노드는 건너뜀)
+        var nd2 = (typeof _transitNodeData !== 'undefined') ? _transitNodeData : null;
+        if(nd2 && nd2.length){
+          for(var i2=0;i2<nd2.length;i2++){
+            if(nd2[i2] && !nd2[i2].isWalk && nd2[i2].name){ from = nd2[i2].name; break; }
+          }
+        }
+      }
+      _pipResolveFrom();   // 다음 갱신 때 더 정확한 지명으로
+    }
     window._pipTrip = { from: from, to: to, at: Date.now() };
   }catch(e){}
 }
@@ -30225,18 +30392,18 @@ function _pipEl(){
   el.id = 'pipView';
   // ★ 2026-09-02: 창이 작아지면 글자가 잘리고 겹쳤다.
   //   고정 px 대신 창 크기(vw/vh)에 맞춰 줄어드는 값을 쓰고, 모든 줄을 한 줄로 고정한다.
+  // ★ 2026-09-02: 창을 낮추면서 다섯 줄이 넘쳤다. 글자 크기는 그대로 두고 줄만 셋으로 합친다.
+  //   1줄 경로(+현재 위치) · 2줄 소요시간 · 3줄 도착예정 + 한마디
   var NOWRAP = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;';
   el.style.cssText =
     'position:fixed;inset:0;z-index:2147483000;display:none;'
-    + 'flex-direction:column;align-items:center;justify-content:center;gap:min(1.2vh,6px);'
-    + 'background:#0e0e10;color:#fff;padding:min(2vw,12px);text-align:center;'
+    + 'flex-direction:column;align-items:center;justify-content:center;gap:min(0.8vh,4px);'
+    + 'background:#0e0e10;color:#fff;padding:min(1.5vw,10px);text-align:center;'
     + 'font-family:inherit;overflow:hidden;';
   el.innerHTML =
       '<div id="pipRoute" style="font-size:min(5.2vw,17px);font-weight:800;line-height:1.2;' + NOWRAP + '"></div>'
-    + '<div id="pipCur"   style="font-size:min(3.6vw,12px);color:#9a9aa0;line-height:1.2;' + NOWRAP + '"></div>'
     + '<div id="pipMin"   style="font-size:min(9vw,30px);font-weight:900;line-height:1.15;color:#ffd60a;' + NOWRAP + '"></div>'
-    + '<div id="pipArr"   style="font-size:min(4.4vw,15px);font-weight:600;color:#d8d8dd;line-height:1.2;' + NOWRAP + '"></div>'
-    + '<div id="pipMood"  style="font-size:min(3.6vw,12px);color:#7d7d85;line-height:1.2;' + NOWRAP + '"></div>';
+    + '<div id="pipArr"   style="font-size:min(4.4vw,15px);font-weight:600;color:#d8d8dd;line-height:1.2;' + NOWRAP + '"></div>';
   el.addEventListener('click', function(){ _pipHide(); });
   document.body.appendChild(el);
   return el;
@@ -30248,15 +30415,13 @@ function _pipPaint(){
     if(!el || el.style.display === 'none') return;
     var d = _pipData();
     var R = document.getElementById('pipRoute');
-    var c = document.getElementById('pipCur');
     var m = document.getElementById('pipMin');
     var a = document.getElementById('pipArr');
-    var o = document.getElementById('pipMood');
-    if(R) R.textContent = (d.from || '내 위치') + ' → ' + (d.dest || '목적지');
-    if(c) c.textContent = d.cur ? ('현재 ' + d.cur) : '';
+    var head = (d.from || '내 위치') + ' → ' + (d.dest || '목적지');
+    if(d.cur && d.cur !== d.from) head += '  (현재 ' + d.cur + ')';
+    if(R) R.textContent = head;
     if(m) m.textContent = (d.min != null) ? ('소요시간 ' + _pipMinText(d.min)) : '안내 중';
-    if(a) a.textContent = d.arr ? ('도착예정 ' + d.arr) : '';
-    if(o) o.textContent = _pipMood(d.min);
+    if(a) a.textContent = (d.arr ? ('도착예정 ' + d.arr + ' · ') : '') + _pipMood(d.min);
   }catch(e){}
 }
 
@@ -30315,7 +30480,9 @@ function _pipEnter(){
   _pipShow();                       // 창이 작아졌을 때 보이도록 먼저 준비
   var n = _pipNative();
   if(n && typeof n.enter === 'function'){
-    try{ n.enter({ width:2, height:1 }); }catch(e){}
+    // ★ 2026-09-02: 창 높이를 줄인다. 안드로이드가 허용하는 최대 가로비가 2.39:1 이라
+    //   그보다 납작하게는 만들 수 없다(넘기면 PiP 진입 자체가 실패한다).
+    try{ n.enter({ width:239, height:100 }); }catch(e){}
     return true;
   }
   return false;                     // 네이티브 없음 → 상주 알림이 대신한다
