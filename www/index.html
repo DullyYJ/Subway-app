@@ -941,6 +941,14 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);}
 [data-theme="pastel"] .gm{background:rgba(0,0,0,.5) !important;}
 [data-theme="pastel"] #transitCongList{background:var(--card) !important;border-color:var(--border) !important;}
 [data-theme="pastel"] #transitResultCard button{background:var(--card2) !important;border-color:var(--border) !important;color:var(--text) !important;}
+/* ★ 2026-09-02: 위 규칙(!important)이 선택된 경로 탭까지 덮어써서, 화이트 테마에서는
+   내가 고른 탭(최소환승 등)이 다른 탭과 똑같이 보였다. 선택 탭만 파란색으로 되돌린다. */
+#transitResultCard button.route-tab-on,
+[data-theme="pastel"] #transitResultCard button.route-tab-on{
+  background:var(--gold) !important;
+  border-color:var(--gold) !important;
+  color:#fff !important;
+}
 [data-theme="pastel"] .cong-bar-bg,[data-theme="pastel"] .bar-bg{background:var(--border2) !important;}
 
 /* 혼잡 분석 */
@@ -3422,6 +3430,29 @@ function _stnBadge(stn, line){
 }
 // ★ 노선도 경로: 현재시각 기준 출발역 다음 열차 조회 → {found, depMin, arrMin} | null
 //   found=false면 오늘 운행 열차 없음(막차 이후)
+// ★ 2026-09-02: 경로 카드 타임라인에 이미 그려 놓은 실제 시각을 읽어 온다.
+//   증상: 타임라인 마지막이 13:33인데 AI 승무원은 도착을 13:37로 안내했다.
+//   원인: 타임라인은 시각표로 구간마다 계산한 값이고, AI 문구는 '다음 열차 출발 +
+//         소요시간'을 따로 더한 값이라 기준이 달랐다.
+//   → 화면에 보이는 타임라인을 기준으로 삼아 두 숫자를 하나로 맞춘다.
+function _htlDepArrTimes(){
+  try{
+    var nd = window._lastHtlNodes;
+    if(!nd || !nd.length) return null;
+    var re = /^\d{1,2}:\d{2}$/;
+    var dep = null, arr = null;
+    for(var i=0;i<nd.length;i++){
+      if(nd[i] && !nd[i].isWalk && re.test(String(nd[i].arrTime||''))){ dep = nd[i].arrTime; break; }
+    }
+    for(var j=nd.length-1;j>=0;j--){
+      if(nd[j] && re.test(String(nd[j].arrTime||''))){ arr = nd[j].arrTime; break; }
+    }
+    if(!dep || !arr) return null;
+    return { dep: dep, arr: arr };
+  }catch(e){ return null; }
+}
+window._htlDepArrTimes = _htlDepArrTimes;
+
 function _metroNextTrainInfo(mins){
   try {
     var rb = (typeof _buildRouteBrief==='function') ? _buildRouteBrief() : null;
@@ -3567,7 +3598,11 @@ function _renderHomeConductorBrief(fromName, toName, hour, congPct, serverMsg){
         if(info && info.found && info.depMin!=null){
           var dh=Math.floor((info.depMin%1440)/60), dmn=Math.round(info.depMin%60);
           var ah=Math.floor((info.arrMin%1440)/60), amn=Math.round(info.arrMin%60);
-          ps.push('현재 기준 다음 열차는 <b>' + pad(dh)+':'+pad(dmn) + '</b>, 도착은 <b>' + pad(ah)+':'+pad(amn) + '</b>경으로 예상됩니다.');
+          var _depStr = pad(dh)+':'+pad(dmn), _arrStr = pad(ah)+':'+pad(amn);
+          // ★ 위 경로 카드 타임라인에 실제 시각이 있으면 그쪽을 따른다(숫자 불일치 방지).
+          var _tlT = (typeof _htlDepArrTimes === 'function') ? _htlDepArrTimes() : null;
+          if(_tlT){ _depStr = _tlT.dep; _arrStr = _tlT.arr; }
+          ps.push('현재 기준 다음 열차는 <b>' + _depStr + '</b>, 도착은 <b>' + _arrStr + '</b>경으로 예상됩니다.');
         } else if(info && info.found === false){
           var _fMsg = '현재 시각 기준으로 <b>운행 중인 열차가 없습니다</b> (막차 이후).';
           if(info.firstMin != null){
@@ -8555,10 +8590,12 @@ function _highlightRouteTab(type){
       btn.style.background = 'var(--gold)';
       btn.style.color = '#fff';
       btn.style.borderColor = 'var(--gold)';
+      btn.classList.add('route-tab-on');      // ★ 화이트 테마용 (인라인 스타일이 !important에 밀린다)
     } else {
       btn.style.background = 'var(--card2)';
       btn.style.color = 'var(--sub)';
       btn.style.borderColor = 'var(--border)';
+      btn.classList.remove('route-tab-on');
     }
   });
 }
@@ -15570,7 +15607,7 @@ window.addEventListener('unhandledrejection', function(e) {
 
       <!-- ── 경로 옵션 탭 (최단시간/최소환승) ── -->
       <div id="routeOptionTabs" style="display:none;gap:6px;margin-bottom:10px;flex-wrap:nowrap;">
-        <button id="routeTabFast" onclick="selectRouteOption('fast')"
+        <button id="routeTabFast" class="route-tab-on" onclick="selectRouteOption('fast')"
           style="flex:1;padding:7px 0;border-radius:10px;border:1.5px solid var(--gold);
           background:var(--gold);color:#fff;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;">
           ⚡ 최단시간
