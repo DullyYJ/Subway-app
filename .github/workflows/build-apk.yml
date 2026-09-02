@@ -55,7 +55,7 @@ jobs:
       - name: Sync Capacitor
         run: npx cap sync android
         
-      - name: Install CellInfo plugin (기지국 보조측위)
+      - name: Install native plugins (기지국 보조측위 + 작은 요약 화면)
         run: |
           python3 - << 'PYEOF'
           import os, shutil
@@ -65,26 +65,63 @@ jobs:
           os.makedirs(PKGDIR, exist_ok=True)
 
           # 1) 플러그인 소스 복사
-          src = "native/CellInfoPlugin.java"
-          if not os.path.exists(src):
-              raise SystemExit("native/CellInfoPlugin.java 가 없습니다 — 저장소에 올렸는지 확인하세요")
-          shutil.copy(src, os.path.join(PKGDIR, "CellInfoPlugin.java"))
+          for src in ["native/CellInfoPlugin.java", "native/PipPlugin.java"]:
+              if not os.path.exists(src):
+                  raise SystemExit(src + " 가 없습니다 — 저장소에 올렸는지 확인하세요")
+              shutil.copy(src, os.path.join(PKGDIR, os.path.basename(src)))
 
-          # 2) MainActivity 재작성 (cap add android 가 매번 새로 만들므로 통째로 덮어씀)
+          # 2) MainActivity 재작성 (cap add android 가 매번 새로 만드므로 통째로 덮어씀)
+          MAIN = "\n".join([
+              "package " + PKG + ";",
+              "",
+              "import android.app.PictureInPictureParams;",
+              "import android.content.res.Configuration;",
+              "import android.os.Build;",
+              "import android.os.Bundle;",
+              "import android.util.Rational;",
+              "",
+              "import com.getcapacitor.BridgeActivity;",
+              "",
+              "public class MainActivity extends BridgeActivity {",
+              "",
+              "    @Override",
+              "    public void onCreate(Bundle savedInstanceState) {",
+              "        registerPlugin(CellInfoPlugin.class);",
+              "        registerPlugin(PipPlugin.class);",
+              "        super.onCreate(savedInstanceState);",
+              "    }",
+              "",
+              "    // 홈 버튼 등으로 앱을 떠날 때 — 안내 중이면 작은 화면(PiP)으로",
+              "    @Override",
+              "    protected void onUserLeaveHint() {",
+              "        super.onUserLeaveHint();",
+              "        if (!PipPlugin.guiding) return;",
+              "        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;",
+              "        if (isInPictureInPictureMode()) return;",
+              "        try {",
+              "            enterPictureInPictureMode(new PictureInPictureParams.Builder()",
+              "                    .setAspectRatio(new Rational(2, 1)).build());",
+              "        } catch (Exception ignored) { }",
+              "    }",
+              "",
+              "    // PiP 전환/복귀를 웹뷰에 알린다",
+              "    @Override",
+              "    public void onPictureInPictureModeChanged(boolean inPip, Configuration newConfig) {",
+              "        super.onPictureInPictureModeChanged(inPip, newConfig);",
+              '        final String js = inPip ? "window._pipShow && window._pipShow();"',
+              '                                : "window._pipHide && window._pipHide();";',
+              "        runOnUiThread(new Runnable() {",
+              "            @Override public void run() {",
+              "                try { getBridge().getWebView().evaluateJavascript(js, null); } catch (Exception ignored) { }",
+              "            }",
+              "        });",
+              "    }",
+              "}",
+          ])
+
           main = os.path.join(PKGDIR, "MainActivity.java")
           with open(main, "w", encoding="utf-8") as f:
-              f.write(
-                  "package " + PKG + ";\n\n"
-                  "import android.os.Bundle;\n"
-                  "import com.getcapacitor.BridgeActivity;\n\n"
-                  "public class MainActivity extends BridgeActivity {\n"
-                  "    @Override\n"
-                  "    public void onCreate(Bundle savedInstanceState) {\n"
-                  "        registerPlugin(CellInfoPlugin.class);\n"
-                  "        super.onCreate(savedInstanceState);\n"
-                  "    }\n"
-                  "}\n"
-              )
+              f.write(MAIN + "\n")
 
           print("=== MainActivity.java ===")
           print(open(main, encoding="utf-8").read())
@@ -206,6 +243,31 @@ jobs:
 
           # BackgroundGeolocationService는 플러그인 자체 Manifest에 이미 선언됨
           # 중복 방지를 위해 앱 Manifest에는 추가 안 함
+
+          # ★ 작은 요약 화면(PiP) — 액티비티 속성 추가
+          python3 - << 'PYEOF'
+          import re
+          M = "android/app/src/main/AndroidManifest.xml"
+          s = open(M, encoding="utf-8").read()
+
+          if "supportsPictureInPicture" not in s:
+              s = s.replace(
+                  'android:name=".MainActivity"',
+                  'android:name=".MainActivity" android:supportsPictureInPicture="true" android:resizeableActivity="true"',
+                  1)
+
+          # PiP로 크기가 바뀔 때 액티비티가 다시 만들어지지 않도록
+          m = re.search(r'android:configChanges="([^"]*)"', s)
+          if m:
+              vals = m.group(1).split("|")
+              for need in ["screenSize", "smallestScreenSize", "screenLayout"]:
+                  if need not in vals:
+                      vals.append(need)
+              s = s.replace(m.group(0), 'android:configChanges="' + "|".join(vals) + '"', 1)
+
+          open(M, "w", encoding="utf-8").write(s)
+          print("PiP 매니페스트 패치 완료")
+          PYEOF
 
           echo "=== 최종 AndroidManifest ==="
           cat "$M"
