@@ -490,6 +490,48 @@ async function purgeKakaoCache(env) {
 
 const SEOUL_BASE = 'https://swopenapi.seoul.go.kr/api/subway';
 
+// ★ 호출 아끼기 — 서울 지하철 인증키는 하루 1,000건이라 그냥 쓰면 금방 닳는다.
+//   같은 역을 여러 사람이 봐도 한 번만 나가도록 세 겹으로 막는다.
+//     ① 같은 isolate 메모리   (가장 빠름)
+//     ② Cloudflare 엣지 캐시  (같은 지역 사용자끼리 공유)
+//     ③ 동시요청 합치기       (10명이 동시에 눌러도 upstream 1회)
+//   도착정보는 10초, 열차위치는 15초. 원본이 그 정도 주기로 갱신되므로
+//   신선도 손해는 거의 없고 호출량은 사용자 수에 비례하지 않게 된다.
+const SEOUL_TTL = { arrival: 10, position: 15, other: 1800 };
+
+function seoulTtl(path) {
+  if (/^realtimeStationArrival\//.test(path)) return SEOUL_TTL.arrival;
+  if (/^realtimePosition\//.test(path))       return SEOUL_TTL.position;
+  return SEOUL_TTL.other;
+}
+
+const _seoulMem      = new Map();   // path -> { exp, body, status }
+const _seoulInflight = new Map();   // path -> Promise
+const seoulStats     = { upstream: 0, mem: 0, edge: 0, coalesced: 0 };
+
+function seoulMemGet(path) {
+  const e = _seoulMem.get(path);
+  if (!e) return null;
+  if (Date.now() > e.exp) { _seoulMem.delete(path); return null; }
+  return e;
+}
+function seoulMemPut(path, status, body, ttlSec) {
+  _seoulMem.set(path, { exp: Date.now() + ttlSec * 1000, body, status });
+  if (_seoulMem.size > 500) {                       // 오래된 것부터 정리
+    for (const [k, v] of _seoulMem) { if (Date.now() > v.exp) _seoulMem.delete(k); }
+  }
+}
+function seoulRes(body, status, from, ttlSec, usedKey) {
+  const h = {
+    'Content-Type': 'application/json; charset=utf-8',
+    ...CORS,
+    'Cache-Control': 'public, max-age=' + ttlSec,
+    'x-seoul-cache': from
+  };
+  if (usedKey != null) h['x-seoul-key'] = String(usedKey);   // 몇 번째 키가 쓰였는지
+  return new Response(body, { status, headers: h });
+}
+
 // 이 서비스들만 허용 (임의 경로 프록시 방지)
 const SEOUL_SERVICES = /^(realtimeStationArrival|realtimePosition|getShtrmPath|SearchSTNBySubwayLineInfo|SearchInfoBySubwayNameService)\//;
 
@@ -513,10 +555,43 @@ async function handleSeoul(request, env) {
     return jsonRes({ ok: false, error: 'SEOUL_API_KEY not set' }, 500);
   }
 
-  // 실시간은 캐시하면 안 된다. 시각표성(getShtrmPath)만 잠깐 재사용한다.
-  const isRealtime = /^realtime/.test(path);
-  const ttl = isRealtime ? 5 : 1800;
+  const ttl = seoulTtl(path);
 
+  // ① 메모리
+  const hit = seoulMemGet(path);
+  if (hit) { seoulStats.mem++; return seoulRes(hit.body, hit.status, 'MEM', ttl); }
+
+  // ② 엣지 캐시 (같은 지역 사용자끼리 공유)
+  const cacheKey = new Request('https://seoul-cache/' + encodeURIComponent(path));
+  let edge = null;
+  try { edge = await caches.default.match(cacheKey); } catch (e) { /* 캐시 없으면 그냥 진행 */ }
+  if (edge) {
+    seoulStats.edge++;
+    const body = await edge.text();
+    seoulMemPut(path, edge.status, body, ttl);
+    return seoulRes(body, edge.status, 'EDGE', ttl);
+  }
+
+  // ③ 같은 경로를 동시에 여러 명이 요청하면 upstream 은 한 번만
+  const flying = _seoulInflight.get(path);
+  if (flying) {
+    seoulStats.coalesced++;
+    const r = await flying;
+    return seoulRes(r.body, r.status, 'WAIT', ttl, r.key);
+  }
+
+  const job = seoulUpstream(path, keys, ttl, cacheKey);
+  _seoulInflight.set(path, job);
+  try {
+    const r = await job;
+    return seoulRes(r.body, r.status, 'MISS', ttl, r.key);
+  } finally {
+    _seoulInflight.delete(path);
+  }
+}
+
+// 실제 호출 (키 로테이션 포함) — 성공하면 두 캐시에 모두 넣는다
+async function seoulUpstream(path, keys, ttl, cacheKey) {
   let lastBody = '', lastStatus = 502;
 
   for (let i = 0; i < keys.length; i++) {
@@ -527,6 +602,7 @@ async function handleSeoul(request, env) {
         headers: { Accept: 'application/json', 'User-Agent': 'gildongmu/1.0' },
         cf: { cacheTtl: ttl, cacheEverything: false }
       });
+      seoulStats.upstream++;
       status = r.status;
       body   = await r.text();
     } catch (e) {
@@ -546,17 +622,22 @@ async function handleSeoul(request, env) {
 
     if (code === 'ERROR-337' || code === 'INFO-100' || code === 'ERROR-336') continue;
 
-    return new Response(body, {
-      status,
-      headers: { 'Content-Type': 'application/json; charset=utf-8', ...CORS, 'x-seoul-key': String(i + 1) }
-    });
+    // 정상 응답만 캐시에 넣는다(한도 초과 메시지를 10초 붙들면 안 된다)
+    if (status === 200) {
+      seoulMemPut(path, status, body, ttl);
+      try {
+        await caches.default.put(cacheKey, new Response(body, {
+          headers: { 'Content-Type': 'application/json; charset=utf-8',
+                     'Cache-Control': 'public, max-age=' + ttl }
+        }));
+      } catch (e) { /* 엣지 캐시 실패는 무시 */ }
+    }
+    return { body, status, key: i + 1 };
   }
 
   // 모든 키가 막힘 — 앱은 이 경우 정적 시각표로 폴백한다
-  return new Response(lastBody || JSON.stringify({ ok: false, error: 'all keys exhausted' }), {
-    status: lastStatus,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', ...CORS, 'x-seoul-key': 'exhausted' }
-  });
+  return { body: lastBody || JSON.stringify({ ok: false, error: 'all keys exhausted' }),
+           status: lastStatus, key: 'exhausted' };
 }
 
 export default {
@@ -575,12 +656,14 @@ export default {
           ok: true,
           service: 'gildongmu-bus-proxy',
           // 배포된 코드가 어느 버전인지 확인용 — 새 기능이 안 보이면 여기부터 본다
-          version: 'seoul-kakao-2026-09-02',
+          version: 'seoul-cache-2026-09-02',
           routes: ['/tago', '/seoul', '/kakao-local', '/news/all', '/news',
                    '/admin/news-collect', '/admin/news-debug', '/admin/news-purge', '/admin/kakao-purge'],
           keySet: !!env.DATA_GO_KR_KEY,
           kakaoKeySet: !!env.KAKAO_REST_KEY,
           seoulKeyCount: seoulKeys(env).length,
+          seoulStats,   // upstream=실제 호출, mem/edge/coalesced=아낀 횟수
+
           keyType: env.DATA_GO_KR_KEY
             ? (/%[0-9A-Fa-f]{2}/.test(env.DATA_GO_KR_KEY) ? 'encoding(자동 디코드 적용)' : 'decoding')
             : 'none',
