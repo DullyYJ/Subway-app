@@ -34,8 +34,8 @@ public class PipPlugin extends Plugin {
 
     @PluginMethod
     public void enter(PluginCall call) {
-        int w = call.getInt("width", 2);
-        int h = call.getInt("height", 1);
+        int w = call.getInt("width", 239);
+        int h = call.getInt("height", 100);
         call.resolve(new JSObject().put("ok", enterPip(w, h)));
     }
 
