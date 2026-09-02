@@ -477,6 +477,88 @@ async function purgeKakaoCache(env) {
   return (r && r.meta && r.meta.changes) || 0;
 }
 
+// ══════════════════════════════════════════════════════════════
+// /seoul — 서울 열린데이터 지하철 실시간 (키 주입 + 키 로테이션)
+//   앱 호출: /seoul?path=realtimeStationArrival/0/10/아라
+//   실제 주소: https://swopenapi.seoul.go.kr/api/subway/{KEY}/json/{path}
+//
+//   키는 시크릿 SEOUL_API_KEY 에 둔다. 쉼표로 여러 개 넣으면
+//   일일 한도(ERROR-337)나 인증 실패(INFO-100)가 뜰 때 다음 키로 넘어간다.
+//     npx wrangler secret put SEOUL_API_KEY
+//     → key1,key2,key3
+// ══════════════════════════════════════════════════════════════
+
+const SEOUL_BASE = 'https://swopenapi.seoul.go.kr/api/subway';
+
+// 이 서비스들만 허용 (임의 경로 프록시 방지)
+const SEOUL_SERVICES = /^(realtimeStationArrival|realtimePosition|getShtrmPath|SearchSTNBySubwayLineInfo|SearchInfoBySubwayNameService)\//;
+
+function seoulKeys(env) {
+  return String(env.SEOUL_API_KEY || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+async function handleSeoul(request, env) {
+  const url  = new URL(request.url);
+  const path = url.searchParams.get('path') || '';
+
+  if (!SEOUL_SERVICES.test(path)) {
+    return jsonRes({ ok: false, error: 'path not allowed' }, 400);
+  }
+
+  const keys = seoulKeys(env);
+  if (!keys.length) {
+    return jsonRes({ ok: false, error: 'SEOUL_API_KEY not set' }, 500);
+  }
+
+  // 실시간은 캐시하면 안 된다. 시각표성(getShtrmPath)만 잠깐 재사용한다.
+  const isRealtime = /^realtime/.test(path);
+  const ttl = isRealtime ? 5 : 1800;
+
+  let lastBody = '', lastStatus = 502;
+
+  for (let i = 0; i < keys.length; i++) {
+    const target = SEOUL_BASE + '/' + encodeURIComponent(keys[i]) + '/json/' + path;
+    let body = '', status = 502;
+    try {
+      const r = await fetch(target, {
+        headers: { Accept: 'application/json', 'User-Agent': 'gildongmu/1.0' },
+        cf: { cacheTtl: ttl, cacheEverything: false }
+      });
+      status = r.status;
+      body   = await r.text();
+    } catch (e) {
+      lastBody = JSON.stringify({ ok: false, error: String((e && e.message) || e) });
+      continue;                       // 다음 키로
+    }
+
+    lastBody = body; lastStatus = status;
+
+    // 한도 초과·키 문제면 다음 키로, 그 외에는 그대로 돌려준다
+    let code = '';
+    try {
+      const j = JSON.parse(body);
+      code = (j && j.errorMessage && j.errorMessage.code)
+          || (j && j.status && j.status.code) || '';
+    } catch (e) { /* JSON 이 아니면 그대로 반환 */ }
+
+    if (code === 'ERROR-337' || code === 'INFO-100' || code === 'ERROR-336') continue;
+
+    return new Response(body, {
+      status,
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...CORS, 'x-seoul-key': String(i + 1) }
+    });
+  }
+
+  // 모든 키가 막힘 — 앱은 이 경우 정적 시각표로 폴백한다
+  return new Response(lastBody || JSON.stringify({ ok: false, error: 'all keys exhausted' }), {
+    status: lastStatus,
+    headers: { 'Content-Type': 'application/json; charset=utf-8', ...CORS, 'x-seoul-key': 'exhausted' }
+  });
+}
+
 export default {
   async fetch(request, env) {
     const reqUrl = new URL(request.url);
@@ -493,11 +575,12 @@ export default {
           ok: true,
           service: 'gildongmu-bus-proxy',
           // 배포된 코드가 어느 버전인지 확인용 — 새 기능이 안 보이면 여기부터 본다
-          version: 'kakao-cache-2026-09-02',
-          routes: ['/tago', '/kakao-local', '/news/all', '/news',
+          version: 'seoul-kakao-2026-09-02',
+          routes: ['/tago', '/seoul', '/kakao-local', '/news/all', '/news',
                    '/admin/news-collect', '/admin/news-debug', '/admin/news-purge', '/admin/kakao-purge'],
           keySet: !!env.DATA_GO_KR_KEY,
           kakaoKeySet: !!env.KAKAO_REST_KEY,
+          seoulKeyCount: seoulKeys(env).length,
           keyType: env.DATA_GO_KR_KEY
             ? (/%[0-9A-Fa-f]{2}/.test(env.DATA_GO_KR_KEY) ? 'encoding(자동 디코드 적용)' : 'decoding')
             : 'none',
@@ -619,6 +702,11 @@ export default {
     if (reqUrl.pathname === '/admin/kakao-purge') {
       try { return jsonRes({ ok: true, purged: await purgeKakaoCache(env) }); }
       catch (e) { return jsonRes({ ok: false, error: String((e && e.message) || e) }, 500); }
+    }
+
+    /* ── 🚇 서울 지하철 실시간 ───────────────────────────────── */
+    if (reqUrl.pathname === '/seoul') {
+      return handleSeoul(request, env);
     }
 
     if (reqUrl.pathname !== '/tago') {
