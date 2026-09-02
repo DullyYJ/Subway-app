@@ -20797,12 +20797,16 @@ window._realFirstDep = _realFirstDep;
 // [정리] 중복 정의 제거: _fetchWithTimeout (아래쪽 정의 사용)
 
 // ── 서울교통공사 실시간 도착 API ────────────────────────────
-var _SEOUL_API_KEY = '757a596c51796a773130374f77675166';
+// ★ 2026-09-02: 앱에 박혀 있던 서울 인증키를 걷어냈다.
+//   APK 를 뜯으면 그대로 보이는 자리라, 스토어에 올리면 키가 도용돼
+//   하루 1,000건 한도가 남의 호출로 소진된다. 이제 전부 워커(/seoul)를 거치고
+//   키는 서버에만 둔다. 워커가 캐시·키 로테이션까지 맡는다.
+var _SEOUL_API_KEY = '';   // 사용하지 않음 (호환용으로만 남김)
 var _seoulArrCache = {};
 
 
 // ── 서울 실시간 열차 위치 API ─────────────────────────────────
-// http://swopenAPI.seoul.go.kr/api/subway/KEY/json/realtimePosition/0/60/LINE
+// 워커 경유: /seoul?path=realtimePosition/0/60/LINE  (키는 서버에만 둔다)
 // trainSttus: 0=진입, 1=도착, 2=출발, 3=전역출발
 var _trainPosCache = {};
 var _trainPosTimer = null;
@@ -20814,8 +20818,7 @@ async function fetchRealtimeTrainPos(lineName) {
   if(cached && Date.now() - cached.ts < 30000) return cached.data; // 30초 캐시
 
   try {
-    var url = 'http://swopenAPI.seoul.go.kr/api/subway/' + _SEOUL_API_KEY +
-      '/json/realtimePosition/0/60/' + encodeURIComponent(lineNum);
+    var url = _seoulUrl('realtimePosition/0/60/' + encodeURIComponent(lineNum));
     var res = await _fetchWithTimeout(url, 5000);
     var txt = await res.text();
     if(!txt || txt.trim()[0] !== '{') return null;
@@ -20888,8 +20891,7 @@ async function seoulFetchArrival(stnName, lineName) {
   try {
     var lineNum = lineName.replace('호선','');
     // 서울 열린데이터광장 실시간 도착 API
-    var url = 'http://swopenAPI.seoul.go.kr/api/subway/' + _SEOUL_API_KEY +
-      '/json/realtimeStationArrival/0/10/' + encodeURIComponent(stnName);
+    var url = _seoulUrl('realtimeStationArrival/0/10/' + encodeURIComponent(stnName));
     var res = await _fetchWithTimeout(url, 6000);
     var txt = await res.text();
     // 응답이 JSON인지 확인
@@ -31206,7 +31208,7 @@ async function _checkApiStatus() {
 
   // 1. 서울 실시간 API
   try {
-    var _sUrl = 'http://swopenAPI.seoul.go.kr/api/subway/'+_SEOUL_API_KEY+'/json/realtimeStationArrival/0/3/%EC%84%9C%EC%9A%B8%EC%97%AD';
+    var _sUrl = _seoulUrl('realtimeStationArrival/0/3/%EC%84%9C%EC%9A%B8%EC%97%AD');
     var r1 = await _fetchWithTimeout(_sUrl, 8000);
     var _txt1 = await r1.text();
     if(_txt1 && _txt1.trim()[0]==='{') {
@@ -32759,9 +32761,38 @@ var SEOUL_API_BASE='https://swopenapi.seoul.go.kr/api/subway';
 
 // ── seoulFetch: URL 규격 = {BASE}/{KEY}/json/{SERVICE}/{START}/{END}/{STATION_NAME}
 // 호출 예) seoulFetch('realtimeStationArrival/1/5/강남')
+// ★ 2026-09-02: 앱에서도 같은 질문을 겹쳐 묻지 않는다.
+//   서울 인증키는 하루 1,000건이라, 화면 여러 곳이 같은 역을 동시에 물으면
+//   그만큼 그냥 날아간다. 도착정보 10초·열차위치 15초 동안 재사용하고,
+//   같은 경로가 이미 날아가는 중이면 그 결과를 같이 받는다(워커 캐시와 같은 기준).
+var _SEOUL_CACHE = {};       // path -> { ts, data }
+var _SEOUL_FLYING = {};      // path -> Promise
+function _seoulTtlMs(path){
+  if(/^realtimeStationArrival\//.test(path)) return 10000;
+  if(/^realtimePosition\//.test(path))       return 15000;
+  return 30*60*1000;
+}
+
 async function seoulFetch(path, timeoutMs) {
   timeoutMs = timeoutMs||5000;
   if(typeof _IS_WEBVIEW_BLOCKED!=='undefined'&&_IS_WEBVIEW_BLOCKED) return null;
+
+  var _c = _SEOUL_CACHE[path];
+  if(_c && (Date.now() - _c.ts) < _seoulTtlMs(path)) return _c.data;
+  if(_SEOUL_FLYING[path]) return _SEOUL_FLYING[path];
+
+  var _job = _seoulFetchNow(path, timeoutMs);
+  _SEOUL_FLYING[path] = _job;
+  try{
+    var _r = await _job;
+    if(_r) _SEOUL_CACHE[path] = { ts: Date.now(), data: _r };   // 성공만 저장
+    return _r;
+  } finally {
+    delete _SEOUL_FLYING[path];
+  }
+}
+
+async function _seoulFetchNow(path, timeoutMs) {
 
   // 로딩 스피너 시작
   var spinner = document.getElementById('apiSpinner');
