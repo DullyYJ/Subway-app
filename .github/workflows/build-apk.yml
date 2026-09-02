@@ -100,7 +100,7 @@ jobs:
               "        if (isInPictureInPictureMode()) return;",
               "        try {",
               "            enterPictureInPictureMode(new PictureInPictureParams.Builder()",
-              "                    .setAspectRatio(new Rational(2, 1)).build());",
+              "                    .setAspectRatio(new Rational(239, 100)).build());",
               "        } catch (Exception ignored) { }",
               "    }",
               "",
