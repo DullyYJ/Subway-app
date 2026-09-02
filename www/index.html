@@ -29716,6 +29716,9 @@ function _beginJourneyTracking(){
       dest = (_transitResultDest.name || _transitResultDest) + '';
     }
     if(typeof _showForegroundNotif === 'function') _showForegroundNotif(cur, dest, rem);
+    // ★ 2026-09-02: 작은 요약 화면이 볼 여정을 여기서 한 번만 적는다(이전 목적지 잔상 방지)
+    try{ if(typeof _pipTripSet === 'function') _pipTripSet(); }catch(e){}
+    try{ if(typeof _pipNativeSync === 'function') _pipNativeSync(); }catch(e){}
     console.log('[탑승] 경로 확정 → 백그라운드 추적 시작 (route=' + (!!S.route) + ')');
   } catch(e){ console.warn('[탑승] 시작 예외:', (e&&e.message)||e); }
 }
@@ -30131,25 +30134,76 @@ function _pipSetEnabled(v){
 }
 window._pipSetEnabled = _pipSetEnabled;
 
+// ★ 2026-09-02: 지금 안내 중인 여정을 한 곳(_pipTrip)에만 적어 둔다.
+//   증상: 새 목적지를 정하고 앱을 내려도 이전 목적지로 작은 화면이 떴다.
+//   원인: '경로가 있나'를 S.route / _transitNodeData 로 넓게 판단해서,
+//         지난 여정에서 남은 값이 그대로 잡혔다.
+//   → 경로를 확정할 때만 적고, 추적을 정리할 때 지운다. 목적지가 달라지면 무효로 본다.
+function _stnSame(a, b){
+  var k = function(v){ return String(v||'').replace(/\s/g,'').replace(/\(.*$/,'').replace(/역$/,''); };
+  return !!a && !!b && k(a) === k(b);
+}
+
+function _pipTripSet(){
+  try{
+    var from = '내 위치', to = '';
+    if(typeof S !== 'undefined' && S && S.route && S.route.path && S.route.path.length >= 2){
+      from = S.route.path[0] || from;
+      to   = S.route.path[S.route.path.length - 1] || '';
+    }
+    var nd = (typeof _transitNodeData !== 'undefined') ? _transitNodeData : null;
+    if(!to && nd && nd.length >= 2){ from = nd[0].name || from; to = nd[nd.length-1].name || ''; }
+    if(!to && typeof S !== 'undefined' && S && S.dest && S.dest.name) to = S.dest.name;
+    if(!to) return;
+    window._pipTrip = { from: from, to: to, at: Date.now() };
+  }catch(e){}
+}
+window._pipTripSet = _pipTripSet;
+
+function _pipTripClear(){ try{ window._pipTrip = null; }catch(e){} }
+window._pipTripClear = _pipTripClear;
+
 // 안내할 경로가 있나 (없으면 띄우지 않는다)
 function _pipHasRoute(){
   try{
     if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return false;  // 예상 시각 모드
     if(window._metroRouteMode === true) return false;                            // 노선도 미리보기
-    if(typeof S !== 'undefined' && S && S.route && S.route.path && S.route.path.length) return true;
-    if(typeof _transitNodeData !== 'undefined' && _transitNodeData && _transitNodeData.length) return true;
+    var trip = window._pipTrip;
+    if(!trip || !trip.to) return false;                                          // 확정된 여정만
+    // 화면에 설정된 목적지가 이 여정과 다르면 지난 여정이다
+    if(typeof S !== 'undefined' && S && S.dest && S.dest.name && !_stnSame(S.dest.name, trip.to)) return false;
+    return true;
   }catch(e){}
   return false;
 }
 
 // 표시할 값 — 상주 알림과 같은 계산을 쓴다(숫자가 어긋나지 않게)
+function _pipMinText(m){
+  if(m == null) return '-';
+  if(m < 1) return '곧 도착';
+  var h = Math.floor(m/60), mm = m%60;
+  return h ? (h + '시간 ' + mm + '분') : (mm + '분');
+}
+
+// 남은 시간에 맞춘 한마디
+function _pipMood(m){
+  if(m == null) return '안전하게 이동하세요';
+  if(m < 3)  return '내릴 준비하세요';
+  if(m < 10) return '거의 다 왔어요';
+  if(m < 30) return '조금만 더 가면 돼요';
+  if(m < 60) return '절반쯤 왔어요';
+  return '여유 있게 가고 있어요';
+}
+
 function _pipData(){
-  var out = { cur:'이동 중', dest:'', min:null, arr:null };
+  var out = { cur:'', from:'', dest:'', min:null, arr:null };
   try{
+    var trip = window._pipTrip || null;
+    if(trip){ out.from = trip.from || ''; out.dest = trip.to || ''; }
     var r = (typeof _journeyRemain === 'function') ? _journeyRemain() : null;
     if(r){
-      out.cur  = r.cur || '이동 중';
-      out.dest = r.dest || '';
+      out.cur  = r.cur || '';
+      out.dest = out.dest || r.dest || '';
       out.min  = (r.min != null) ? r.min : null;
     }
     var ms = (typeof _routeArriveMs === 'function') ? _routeArriveMs() : null;
@@ -30169,17 +30223,20 @@ function _pipEl(){
   if(el) return el;
   el = document.createElement('div');
   el.id = 'pipView';
+  // ★ 2026-09-02: 창이 작아지면 글자가 잘리고 겹쳤다.
+  //   고정 px 대신 창 크기(vw/vh)에 맞춰 줄어드는 값을 쓰고, 모든 줄을 한 줄로 고정한다.
+  var NOWRAP = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;';
   el.style.cssText =
     'position:fixed;inset:0;z-index:2147483000;display:none;'
-    + 'flex-direction:column;align-items:center;justify-content:center;gap:4px;'
-    + 'background:#0e0e10;color:#fff;padding:10px;text-align:center;';
+    + 'flex-direction:column;align-items:center;justify-content:center;gap:min(1.2vh,6px);'
+    + 'background:#0e0e10;color:#fff;padding:min(2vw,12px);text-align:center;'
+    + 'font-family:inherit;overflow:hidden;';
   el.innerHTML =
-      '<div id="pipCur"  style="font-size:26px;font-weight:800;line-height:1.15;'
-    +   'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;"></div>'
-    + '<div id="pipMin"  style="font-size:34px;font-weight:900;line-height:1.1;color:#ffd60a;"></div>'
-    + '<div id="pipArr"  style="font-size:15px;font-weight:600;color:#d0d0d5;"></div>'
-    + '<div id="pipDest" style="font-size:12px;color:#8e8e93;white-space:nowrap;overflow:hidden;'
-    +   'text-overflow:ellipsis;max-width:100%;"></div>';
+      '<div id="pipRoute" style="font-size:min(5.2vw,17px);font-weight:800;line-height:1.2;' + NOWRAP + '"></div>'
+    + '<div id="pipCur"   style="font-size:min(3.6vw,12px);color:#9a9aa0;line-height:1.2;' + NOWRAP + '"></div>'
+    + '<div id="pipMin"   style="font-size:min(9vw,30px);font-weight:900;line-height:1.15;color:#ffd60a;' + NOWRAP + '"></div>'
+    + '<div id="pipArr"   style="font-size:min(4.4vw,15px);font-weight:600;color:#d8d8dd;line-height:1.2;' + NOWRAP + '"></div>'
+    + '<div id="pipMood"  style="font-size:min(3.6vw,12px);color:#7d7d85;line-height:1.2;' + NOWRAP + '"></div>';
   el.addEventListener('click', function(){ _pipHide(); });
   document.body.appendChild(el);
   return el;
@@ -30190,32 +30247,56 @@ function _pipPaint(){
     var el = document.getElementById('pipView');
     if(!el || el.style.display === 'none') return;
     var d = _pipData();
+    var R = document.getElementById('pipRoute');
     var c = document.getElementById('pipCur');
     var m = document.getElementById('pipMin');
     var a = document.getElementById('pipArr');
-    var t = document.getElementById('pipDest');
-    if(c) c.textContent = d.cur;
-    if(m) m.textContent = (d.min != null) ? (d.min + '분 남음') : '안내 중';
-    if(a) a.textContent = d.arr ? (d.arr + ' 도착 예정') : '';
-    if(t) t.textContent = d.dest ? ('→ ' + d.dest) : '';
+    var o = document.getElementById('pipMood');
+    if(R) R.textContent = (d.from || '내 위치') + ' → ' + (d.dest || '목적지');
+    if(c) c.textContent = d.cur ? ('현재 ' + d.cur) : '';
+    if(m) m.textContent = (d.min != null) ? ('소요시간 ' + _pipMinText(d.min)) : '안내 중';
+    if(a) a.textContent = d.arr ? ('도착예정 ' + d.arr) : '';
+    if(o) o.textContent = _pipMood(d.min);
   }catch(e){}
 }
 
+// ★ 2026-09-02: 화면을 껐다 켜면 작은 창에 앱 화면이 그대로 보이던 문제.
+//   원인: 화면이 다시 켜질 때 잠깐 큰 크기로 resize 가 오면서 요약을 숨겼고,
+//         그 뒤로는 크기가 그대로라 다시 켜 줄 사건이 없었다.
+//   → '지금 PiP 안인가'를 플래그(_pipInPip)로 붙들고, 1초마다 다시 확인해 되살린다.
+//     이 플래그는 네이티브의 PiP 전환/복귀 통지(_pipShow/_pipHide)로만 바뀐다.
 function _pipShow(){
   try{
+    window._pipInPip = true;
     var el = _pipEl();
     el.style.display = 'flex';
     _pipPaint();
-    if(!_pipTimer) _pipTimer = setInterval(_pipPaint, 1000);
+    if(!_pipTimer) _pipTimer = setInterval(_pipTick, 1000);
   }catch(e){}
 }
 function _pipHide(){
   try{
+    window._pipInPip = false;
     var el = document.getElementById('pipView');
     if(el) el.style.display = 'none';
     if(_pipTimer){ clearInterval(_pipTimer); _pipTimer = null; }
   }catch(e){}
 }
+
+// 1초마다: 값 갱신 + 숨겨졌으면 되살리기
+function _pipTick(){
+  try{
+    if(!window._pipInPip) return;
+    var el = document.getElementById('pipView');
+    if(el && el.style.display === 'none') el.style.display = 'flex';   // 화면 껐다 켠 뒤 복구
+    _pipPaint();
+  }catch(e){}
+}
+try{
+  document.addEventListener('visibilitychange', function(){
+    if(!document.hidden && window._pipInPip) _pipTick();
+  });
+}catch(e){}
 window._pipShow = _pipShow;
 window._pipHide = _pipHide;
 
@@ -30265,9 +30346,12 @@ function _pipOnResize(){
     var small = (window.innerHeight <= 340 && window.innerWidth <= 520);
     if(small){
       if(_pipEnabled() && _pipHasRoute()) _pipShow();
-    } else {
-      _pipHide();
+      return;
     }
+    // ★ 네이티브가 'PiP 안'이라고 알려 준 상태면 크기만 보고 끄지 않는다.
+    //   (화면을 껐다 켤 때 큰 크기로 잠깐 튀는 경우가 있다)
+    if(window._pipInPip && _pipNativeAvailable()) return;
+    _pipHide();
   }catch(e){}
 }
 try{ window.addEventListener('resize', _pipOnResize); }catch(e){}
@@ -30459,6 +30543,11 @@ window._onForegroundResume = _onForegroundResume;
 
 /* 경로 종료 시 백그라운드 정리 */
 function _cleanupBgTracking(){
+  // ★ 2026-09-02: 여정이 끝나거나 취소되면 작은 요약 화면도 같이 내린다
+  try{ if(typeof _pipTripClear === 'function') _pipTripClear(); }catch(e){}
+  try{ if(typeof _pipHide === 'function') _pipHide(); }catch(e){}
+  try{ if(typeof _pipNativeSync === 'function') _pipNativeSync(); }catch(e){}
+
   _stopBgGeolocation();
   _clearForegroundNotif();
   _resetAlertFired && _resetAlertFired();
