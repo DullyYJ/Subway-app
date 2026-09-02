@@ -1,201 +1,118 @@
-/**
- * 길동무 버스 프록시 워커
- *  - 공공데이터 API의 serviceKey를 서버에서 주입 (앱에 키가 노출되지 않음)
- *  - TAGO / 서울 TOPIS / 경기 GBIS 도메인만 허용
- *  - XML·JSON 응답을 그대로 전달 (앱이 text로 받아 파싱)
- *
- * 사용법:  GET /tago?url=<인코딩된 원본 API URL>
- * 예시:    /tago?url=http%3A%2F%2Fws.bus.go.kr%2Fapi%2Frest%2Farrive%2FgetArrInfoByUid%3FarsId%3D02123
- *
- * ★ 2026-08-31: 응답 캐시 추가
- *   증상: 노선 정류장·차량 위치 조회가 10초 넘게 걸리거나 실패한다.
- *   원인: 공공 API(TAGO/GBIS) 자체가 느리고 간헐적으로 응답을 안 준다.
- *        앱 → Worker → 원본 왕복을 매번 그대로 하니 그 지연이 그대로 드러난다.
- *   대응: 요청 성격별로 짧게 캐시한다.
- *     · 노선 경유정류장 = 거의 안 바뀜    → 24시간
- *     · 노선/정류장 목록 = 하루 단위       → 6시간
- *     · 차량 위치·도착정보 = 실시간        → 5초 (중복 호출만 흡수, 신선도는 유지)
- *   캐시가 맞으면 원본을 아예 안 부르므로 응답이 수십 ms로 떨어진다.
- *   원본이 죽어 있을 때는 마지막 성공분을 돌려준다(stale-while-error).
- */
+// ══════════════════════════════════════════════════════════════
+// /kakao-local 프록시 + D1 캐시
+//   gentle-lab-7e47subway-api 워커(worker/index.js)에 붙여 넣는 조각.
+//   같은 질문은 카카오에 다시 묻지 않는다 → 호출량이 실사용의 5~10% 수준으로 떨어진다.
+//
+//   필요한 것: 시크릿 KAKAO_REST_KEY  (npx wrangler secret put KAKAO_REST_KEY)
+//              D1 바인딩 env.DB       (이미 subway-db 로 연결돼 있음)
+// ══════════════════════════════════════════════════════════════
 
-const ALLOWED_HOSTS = [
-  'apis.data.go.kr',    // TAGO(국토부), 경기 GBIS, 소상공인 상가정보
-  'api.odcloud.kr',     // 일부 data.go.kr 신규 API
-  'ws.bus.go.kr',       // 서울 TOPIS (버스도착·정류소)
-  'openapi.gbis.go.kr', // 경기 GBIS 예비 엔드포인트
-  'apis.data.go.kr.'    // 끝에 점이 붙는 변형 방어
-];
+const KAKAO_TTL_MS   = 90 * 24 * 3600 * 1000;   // 저장 90일
+const KAKAO_CACHE_MAX = 20000;                  // 정리 기준 행 수
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type'
-};
-
-function hostAllowed(hostname) {
-  const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
-  return ALLOWED_HOSTS.some(a => h === a.replace(/\.$/, ''));
+// 캐시 테이블 (최초 1회만 만들어짐)
+let _kakaoTableReady = false;
+async function ensureKakaoCache(env) {
+  if (_kakaoTableReady) return;
+  await env.DB.prepare(
+    'CREATE TABLE IF NOT EXISTS kakao_cache (k TEXT PRIMARY KEY, v TEXT, ts INTEGER)'
+  ).run();
+  await env.DB.prepare(
+    'CREATE INDEX IF NOT EXISTS idx_kakao_ts ON kakao_cache(ts)'
+  ).run();
+  _kakaoTableReady = true;
 }
 
-/* ── 응답 캐시 ────────────────────────────────────────────── */
-const CACHE = new Map();
-const TTL_STATIONS = 24 * 3600 * 1000;   // 노선 경유정류장
-const TTL_LIST     = 6 * 3600 * 1000;    // 노선·정류장 목록
-const TTL_LIVE     = 5 * 1000;           // 차량위치·도착정보
-const STALE_MAX    = 10 * 60 * 1000;     // 원본 실패 시 이만큼 낡은 값까지 허용
-const CACHE_MAX    = 600;
-
-function ttlFor(pathname) {
-  if (/getRouteAcctoThrghSttnList|getBusRouteStationList|busRouteLineList/i.test(pathname)) {
-    return TTL_STATIONS;
+// ★ 좌표는 100m 격자(소수 3자리)로 뭉친다.
+//   지오코딩 결과는 몇 십 m 움직인다고 달라지지 않는다.
+//   앱에서도 같은 규칙으로 키를 만들기 때문에 두 겹이 서로 어긋나지 않는다.
+function kakaoCacheKey(path, qs) {
+  let q = String(qs || '');
+  if (/coord2/.test(String(path || ''))) {
+    q = q.replace(/(^|&)(x|y)=(-?\d+(?:\.\d+)?)/g,
+      (_m, pre, k, v) => pre + k + '=' + (Math.round(parseFloat(v) * 1000) / 1000).toFixed(3));
   }
-  if (/getRouteNoList|getCtyCodeList|getSttnNoList|getRouteInfoItem/i.test(pathname)) {
-    return TTL_LIST;
-  }
-  return TTL_LIVE;   // 위치·도착정보는 짧게
+  return String(path || '') + '?' + q;
 }
 
-function cacheKey(u) {
-  // serviceKey는 키에서 제외 (같은 질의는 같은 캐시)
-  const params = [...u.searchParams.entries()]
-    .filter(([n]) => n.toLowerCase() !== 'servicekey')
-    .map(([n, v]) => n + '=' + v)
-    .sort()
-    .join('&');
-  return u.hostname + u.pathname + '?' + params;
-}
+async function handleKakaoLocal(request, env) {
+  const url  = new URL(request.url);
+  const path = url.searchParams.get('path') || '';
+  const qs   = url.searchParams.get('qs')   || '';
 
-function cacheSet(key, body, ct) {
-  CACHE.set(key, { t: Date.now(), v: body, ct });
-  if (CACHE.size > CACHE_MAX) {
-    let oldestKey = null, oldestT = Infinity;
-    for (const [k, v] of CACHE) { if (v.t < oldestT) { oldestT = v.t; oldestKey = k; } }
-    if (oldestKey) CACHE.delete(oldestKey);
-  }
-}
-
-export default {
-  async fetch(request, env) {
-    const reqUrl = new URL(request.url);
-
-    // CORS preflight
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: CORS });
-    }
-
-    // 상태 확인용
-    if (reqUrl.pathname === '/' || reqUrl.pathname === '/health') {
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          service: 'gildongmu-bus-proxy',
-          keySet: !!env.DATA_GO_KR_KEY,
-          keyType: env.DATA_GO_KR_KEY
-            ? (/%[0-9A-Fa-f]{2}/.test(env.DATA_GO_KR_KEY) ? 'encoding(자동 디코드 적용)' : 'decoding')
-            : 'none',
-          cached: CACHE.size,
-          allowed: ALLOWED_HOSTS
-        }),
-        { headers: { 'Content-Type': 'application/json; charset=utf-8', ...CORS } }
-      );
-    }
-
-    if (reqUrl.pathname !== '/tago') {
-      return new Response('Not found', { status: 404, headers: CORS });
-    }
-
-    const target = reqUrl.searchParams.get('url');
-    if (!target) {
-      return new Response('Missing url', { status: 400, headers: CORS });
-    }
-
-    let u;
-    try {
-      u = new URL(target);
-    } catch (e) {
-      return new Response('Bad url', { status: 400, headers: CORS });
-    }
-
-    if (!hostAllowed(u.hostname)) {
-      return new Response('Forbidden host: ' + u.hostname, { status: 403, headers: CORS });
-    }
-
-    if (!env.DATA_GO_KR_KEY) {
-      return new Response('Server key not configured', { status: 500, headers: CORS });
-    }
-
-    // ★ serviceKey 주입 (앱은 빈 값으로 보냄)
-    //   data.go.kr 키는 Encoding(%2B..) / Decoding(+..) 두 형태가 있다.
-    //   Encoding 키를 그대로 넣으면 searchParams.set이 다시 인코딩해(%252B) 인증 실패한다.
-    //   → 퍼센트 인코딩이 보이면 한 번 디코드해 원본으로 되돌린 뒤 넣는다.
-    let key = String(env.DATA_GO_KR_KEY || '');
-    if (/%[0-9A-Fa-f]{2}/.test(key)) {
-      try { key = decodeURIComponent(key); } catch (e) { /* 디코드 실패 시 원본 사용 */ }
-    }
-    u.searchParams.set('serviceKey', key);
-    // 서울 TOPIS(ws.bus.go.kr)는 "변수명은 대소문자를 구분"한다고 문서에 명시돼 있어
-    // 대문자 S 형태도 함께 넣어 둔다(무시되면 그만, 필요하면 이쪽이 인식된다).
-    if (/(^|\.)ws\.bus\.go\.kr$/.test(u.hostname)) {
-      u.searchParams.set('ServiceKey', key);
-      u.searchParams.set('resultType', 'json');
-    }
-
-    // ── 캐시 조회 ──────────────────────────────────────────
-    const ck  = cacheKey(u);
-    const ttl = ttlFor(u.pathname);
-    const now = Date.now();
-    const hit = CACHE.get(ck);
-    if (hit && (now - hit.t) < ttl) {
-      return new Response(hit.v, {
-        headers: { 'Content-Type': hit.ct, ...CORS, 'X-Cache': 'HIT' }
-      });
-    }
-
-    // 서울 TOPIS는 https를 지원하지 않는 경우가 있어 http로 시도 후 실패 시 https 재시도
-    const tryFetch = async (urlStr) => {
-      return await fetch(urlStr, {
-        method: 'GET',
-        headers: { 'Accept': '*/*', 'User-Agent': 'gildongmu/1.0' },
-        cf: { cacheTtl: Math.max(5, Math.floor(ttl / 1000)), cacheEverything: true }
-      });
-    };
-
-    let upstream;
-    try {
-      upstream = await tryFetch(u.toString());
-      if (!upstream.ok && u.protocol === 'https:') {
-        const alt = new URL(u.toString());
-        alt.protocol = 'http:';
-        upstream = await tryFetch(alt.toString());
-      }
-    } catch (e) {
-      try {
-        const alt = new URL(u.toString());
-        alt.protocol = u.protocol === 'https:' ? 'http:' : 'https:';
-        upstream = await tryFetch(alt.toString());
-      } catch (e2) {
-        // ★ 원본이 죽었으면 낡은 값이라도 돌려준다 (빈 화면보다 낫다)
-        if (hit && (now - hit.t) < STALE_MAX) {
-          return new Response(hit.v, {
-            headers: { 'Content-Type': hit.ct, ...CORS, 'X-Cache': 'STALE' }
-          });
-        }
-        return new Response('Upstream error: ' + (e2.message || e2), { status: 502, headers: CORS });
-      }
-    }
-
-    const body = await upstream.text();
-    const ct = upstream.headers.get('Content-Type') || 'text/xml; charset=utf-8';
-
-    // 정상 응답만 캐시한다(에러 XML을 굳히면 더 나쁘다)
-    if (upstream.ok && body && body.length > 40 && !/<returnReasonCode>(?!00)/.test(body)) {
-      cacheSet(ck, body, ct);
-    }
-
-    return new Response(body, {
-      status: upstream.status,
-      headers: { 'Content-Type': ct, ...CORS, 'X-Cache': 'MISS' }
+  // 허용 경로만 (임의 경로 프록시 방지)
+  if (!/^(search\/(keyword|address|category)\.json|geo\/(coord2regioncode|coord2address|transcoord)\.json)$/.test(path)) {
+    return new Response(JSON.stringify({ error: 'path not allowed' }), {
+      status: 400, headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' }
     });
   }
-};
+
+  const key = kakaoCacheKey(path, qs);
+  const now = Date.now();
+
+  // 1) 캐시 먼저
+  try {
+    await ensureKakaoCache(env);
+    const row = await env.DB.prepare('SELECT v, ts FROM kakao_cache WHERE k = ?').bind(key).first();
+    if (row && (now - Number(row.ts || 0)) < KAKAO_TTL_MS) {
+      return new Response(row.v, {
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'access-control-allow-origin': '*',
+          'x-cache': 'HIT'
+        }
+      });
+    }
+  } catch (e) { /* 캐시가 실패해도 원본 호출로 진행 */ }
+
+  // 2) 카카오 호출
+  const key_ = env.KAKAO_REST_KEY;
+  if (!key_) {
+    return new Response(JSON.stringify({ error: 'KAKAO_REST_KEY not set' }), {
+      status: 500, headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' }
+    });
+  }
+
+  let body = '', status = 502;
+  try {
+    const r = await fetch('https://dapi.kakao.com/v2/local/' + path + (qs ? ('?' + qs) : ''), {
+      headers: { Authorization: 'KakaoAK ' + key_ }
+    });
+    status = r.status;
+    body   = await r.text();
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e && e.message || e) }), {
+      status: 502, headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' }
+    });
+  }
+
+  // 3) 성공하고 결과가 있을 때만 저장 — 빈 응답·오류를 90일 붙들지 않는다
+  if (status === 200) {
+    try {
+      const j = JSON.parse(body);
+      if (j && Array.isArray(j.documents) && j.documents.length) {
+        await env.DB.prepare(
+          'INSERT INTO kakao_cache (k, v, ts) VALUES (?, ?, ?) ' +
+          'ON CONFLICT(k) DO UPDATE SET v = excluded.v, ts = excluded.ts'
+        ).bind(key, body, now).run();
+      }
+    } catch (e) { /* 저장 실패는 무시 */ }
+  }
+
+  return new Response(body, {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'access-control-allow-origin': '*',
+      'x-cache': 'MISS'
+    }
+  });
+}
+
+// 오래된 캐시 정리 (cron 이나 /admin/kakao-purge 에서 호출)
+async function purgeKakaoCache(env) {
+  await ensureKakaoCache(env);
+  const cut = Date.now() - KAKAO_TTL_MS;
+  const r = await env.DB.prepare('DELETE FROM kakao_cache WHERE ts < ?').bind(cut).run();
+  return (r && r.meta && r.meta.changes) || 0;
+}
