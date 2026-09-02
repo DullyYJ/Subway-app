@@ -16075,6 +16075,19 @@ window.addEventListener('unhandledrejection', function(e) {
         <button onclick="_cmTestFire()" style="width:100%;margin-top:12px;padding:11px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--text);">🔔 지금 미리보기</button>
       </div>
 
+      <!-- ★ 하차 10분 전 추천 테스트 -->
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-top:12px;">
+        <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">🚉 하차 10분 전 추천</div>
+        <p style="font-size:12px;color:var(--sub);margin-bottom:12px;">도착 10분 전에 시간대별로 보내는 추천이에요. 실제 알림과 같은 내용으로 바로 확인해 볼 수 있어요.</p>
+        <div style="display:flex;gap:8px;margin-bottom:8px;">
+          <button onclick="_arrTestUI('morning')" style="flex:1;padding:11px 4px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--text);font-family:inherit;">☕ 커피</button>
+          <button onclick="_arrTestUI('night')" style="flex:1;padding:11px 4px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--text);font-family:inherit;">🍗 야식</button>
+          <button onclick="_arrTestUI('shop')" style="flex:1;padding:11px 4px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--text);font-family:inherit;">🛍 쇼핑</button>
+        </div>
+        <button onclick="_arrStatusShow()" style="width:100%;padding:11px;border-radius:10px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:var(--gold);color:#121214;font-family:inherit;">상태 확인</button>
+        <div id="arrTestStat" style="margin-top:10px;background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px;font-size:11.5px;line-height:1.7;color:var(--text);font-family:monospace;white-space:pre-wrap;">'상태 확인'을 누르면 감시 상태와 남은 시간이 표시됩니다.</div>
+      </div>
+
       <!-- ★ 백그라운드 위치추적 진단 -->
       <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-top:12px;">
         <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">🛰 백그라운드 추적 진단</div>
@@ -25198,6 +25211,52 @@ window._arrTestFire = function(hour, minute){
   window._arrAlertAt  = 0;
   _arrFireAlert(_arrDestName() || '아라', d.getTime());
 };
+
+// ★ 2026-09-02: 설정 화면에서 추천을 바로 확인하는 버튼용.
+//   실제 알림과 같은 경로(_arrFireAlert)를 그대로 태우고, 시간대만 강제로 맞춘다.
+function _arrTestUI(kind){
+  try{
+    var hour = (kind === 'morning') ? 8 : (kind === 'night') ? 19 : 21;
+    var label = (kind === 'morning') ? '☕ 커피' : (kind === 'night') ? '🍗 야식' : '🛍 쇼핑';
+    if(typeof toast === 'function') toast(label + ' 추천을 보냅니다');
+    window._arrTestFire(hour, 0);
+    setTimeout(_arrStatusShow, 400);
+  }catch(e){
+    if(typeof toast === 'function') toast('추천 테스트 실패: ' + (e && e.message));
+  }
+}
+window._arrTestUI = _arrTestUI;
+
+// 감시 상태 표시
+function _arrStatusShow(){
+  var box = document.getElementById('arrTestStat');
+  if(!box) return;
+  var L = [];
+  try{
+    L.push('감시 타이머: ' + (window._arrWatchTimer ? '동작 중 (20초마다)' : '없음'));
+    var hasRoute = (typeof S !== 'undefined' && S && S.route && S.boardedAt);
+    L.push('현재 경로: ' + (hasRoute ? (_arrDestName() || '-') + ' 도착 예정' : '없음 (탑승 상태 아님)'));
+    if(window._arrLastRemSec != null){
+      var r = window._arrLastRemSec;
+      L.push('남은 시간: ' + Math.floor(r/60) + '분 ' + (r%60) + '초'
+             + (r > _ARR_PRE_MIN*60 ? '  (10분 되면 발사)' : '  (발사 구간)'));
+    } else {
+      L.push('남은 시간: 아직 측정 전');
+    }
+    var slot = (typeof _arrSlot === 'function') ? _arrSlot(Date.now()) : '?';
+    var slotTxt = slot === 'morning' ? '커피 (07:01~10:00)'
+                : slot === 'night'   ? '야식 (17:00~19:30)'
+                : slot === 'shop'    ? '쇼핑 (19:31~)'
+                : '추천 없는 시간대 (00:00~07:00, 10:01~16:59)';
+    L.push('지금 시간대: ' + slotTxt);
+    L.push('마지막 발송: ' + (window._arrAlertAt
+      ? new Date(window._arrAlertAt).toLocaleTimeString() + '  (30분간 재발송 안 함)'
+      : '없음'));
+    L.push('알림 정책: ' + ((typeof _notifAllowed === 'function' && _notifAllowed('arrive_reco')) ? '허용됨' : '차단됨'));
+  }catch(e){ L.push('상태 확인 오류: ' + (e && e.message)); }
+  box.textContent = L.join('\n');
+}
+window._arrStatusShow = _arrStatusShow;
 
 function _showBriefingModal(title, body, route, action){
   function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
