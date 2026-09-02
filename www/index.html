@@ -15143,6 +15143,22 @@ window._bgDiag = async function(){
           + (_q != null && _q > 180 ? ' ← 멈춤 의심' : ''));
       add('서버 대화 모드: ' + (window._serverTalksActive ? '켜짐(로컬 생성 보류)' : '꺼짐(로컬 생성)'));
       add('대화 타이머: ' + (window._ltWatchdog ? '감시 중' : '없음'));
+    // ★ 도착 10분 전 추천(커피·야식) 상태
+    try{
+      var _aw = window._arrWatchTimer ? '감시 중' : '없음';
+      var _ar = (window._arrLastRemSec == null) ? '경로 없음'
+                : (Math.floor(window._arrLastRemSec/60) + '분 ' + (window._arrLastRemSec%60) + '초 남음');
+      var _as = '?';
+      try{
+        if(typeof _arrSlot === 'function' && window._arrLastRemSec != null)
+          _as = _arrSlot(Date.now() + window._arrLastRemSec*1000);
+        else if(typeof _arrSlot === 'function') _as = _arrSlot(Date.now());
+      }catch(e2){}
+      var _af = window._arrAlertAt
+                ? (Math.round((Date.now() - window._arrAlertAt)/60000) + '분 전 발송')
+                : '아직 없음';
+      add('도착 추천: ' + _aw + ' · ' + _ar + ' · 시간대 ' + _as + ' · ' + _af);
+    }catch(e2){}
     // ★ 지난 실행에서 멈춘 흔적
     try{
       var _st = JSON.parse(localStorage.getItem('lastStall') || 'null');
@@ -25139,16 +25155,47 @@ function _arrCheckPreAlert(arrMs, remSecs){
     var dest = _arrDestName();
     var key  = String(arrMs) + '|' + (dest||'');
     if(window._arrAlertKey === key) return;                               // 이번 여정 1회
+    // ★ 2026-09-02: 재동기화로 도착 예정 시각이 조금 바뀌면 key 가 달라져 두 번 뜰 수 있었다.
+    //   30분 안에 이미 보냈으면 건너뛴다(같은 여정으로 본다).
+    if(window._arrAlertAt && (Date.now() - window._arrAlertAt) < 30*60*1000) return;
     window._arrAlertKey = key;
+    window._arrAlertAt  = Date.now();
     _arrFireAlert(dest, arrMs);
   }catch(e){}
 }
 window._arrCheckPreAlert = _arrCheckPreAlert;
+
+// ★ 2026-09-02: 도착 10분 전 추천(커피·야식)이 안 뜨던 원인 수정.
+//   _arrCheckPreAlert 는 calcETA 안에서만 호출되는데, calcETA 는 주기 실행이 아니라
+//   역 이동·탑승·재동기화 같은 '사건'이 있을 때만 돈다. 마지막 10분 사이에 그런 사건이
+//   없으면(막 구간이 길거나 하차역까지 남은 역이 없거나 화면을 꺼둔 경우) 10분 창을
+//   그냥 지나쳐 알림이 영영 나가지 않았다.
+//   → 20초마다 남은 시간을 직접 재는 감시 타이머를 둔다. 계산식은 calcETA 와 동일하고,
+//     발사 판정·시간대 제한은 기존 _arrCheckPreAlert 를 그대로 쓴다(동작 변경 없음).
+var _ARR_WATCH_MS = 20000;
+function _arrWatchTick(){
+  try{
+    if(typeof S === 'undefined' || !S || !S.route || !S.boardedAt) return;
+    if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return;
+    var total = (S.route.tp || []).reduce(function(a, b){ return a + (b || 0); }, 0);
+    if(!total) return;
+    var arrMs = S.boardedAt + total * 1000;
+    var rem   = Math.round((arrMs - Date.now()) / 1000);
+    window._arrLastRemSec = rem;                 // 설정>진단에서 확인용
+    if(rem <= 0) return;
+    _arrCheckPreAlert(arrMs, rem);
+  }catch(e){}
+}
+window._arrWatchTick = _arrWatchTick;
+if(!window._arrWatchTimer){
+  try{ window._arrWatchTimer = setInterval(_arrWatchTick, _ARR_WATCH_MS); }catch(e){}
+}
 // 테스트: _arrTestFire(21) 또는 _arrTestFire(19, 45)
 window._arrTestFire = function(hour, minute){
   var d=new Date();
   if(hour!=null) d.setHours(hour, minute || 0, 0, 0);
   window._arrAlertKey = null;
+  window._arrAlertAt  = 0;
   _arrFireAlert(_arrDestName() || '아라', d.getTime());
 };
 
@@ -27074,7 +27121,16 @@ function _fetchNewsFeed(cb){
     .then(function(r){ return r.json(); })
     .then(function(d){
       if(d && d.ok && d.items && d.items.length){
-        _NEWSFEED.items = _newsApplyCats(d.items);   // ★ 제목 기반 카테고리 재분류
+        // ★ 2026-09-02: 여기서 목록을 통째로 갈아엎고 있었다.
+        //   저장본과 D1 서버에서 받아 둔 기사(카테고리당 100건 이상)가 이 한 줄에 전부 날아가고,
+        //   종합 피드 몇 건만 남았다. 증시 탭이 갑자기 몇 건으로 줄어들던 원인.
+        //   → 교체가 아니라 병합한다. 중복은 _newsMerge 의 제목+링크 필터가 막는다.
+        if(!_NEWSFEED.items) _NEWSFEED.items = [];
+        _newsMerge(d.items.map(function(x){
+          return { title:x.title, link:x.link, desc:x.desc, source:x.source,
+                   ts:x.ts, pubDate:x.pubDate, cat:x.cat };
+        }));
+        _newsApplyCats(_NEWSFEED.items);   // 제목 기반 카테고리 재분류
         _NEWSFEED.ts = Date.now();
       }
       // ★ 증시 뉴스 보강 후 다시 렌더
@@ -27122,12 +27178,28 @@ var _NEWS_RULES = [
   { cat:'사회', re:/(경찰|검찰|법원|재판|판결|구속|기소|사건|사고|화재|지진|태풍|호우|폭염|한파|미세먼지|교통사고|음주운전|학교|교육|입시|수능|의료|병원|의사|간호|코로나|감염|백신|복지|출산율|고령화|지하철|버스\s*파업|철도|공항|산불|실종|구조|폭우|대설|주의보|경보)/ }
 ];
 
-function _newsClassify(it){
+// ★ 2026-09-02: 규칙에 걸렸을 때만 카테고리를 돌려준다(안 걸리면 빈 문자열).
+//   '기본값 사회'와 '진짜로 사회 기사'를 구분해야 서버 분류를 언제 믿을지 판단할 수 있다.
+function _newsRuleCat(text){
   try{
-    var t = String((it && it.title) || '') + ' ' + String((it && it.desc) || '');
+    var t = String(text || '');
     for(var i=0;i<_NEWS_RULES.length;i++){
       if(_NEWS_RULES[i].re.test(t)) return _NEWS_RULES[i].cat;
     }
+  }catch(e){}
+  return '';
+}
+window._newsRuleCat = _newsRuleCat;
+
+function _newsClassify(it){
+  try{
+    // ★ 2026-09-02: 제목으로 먼저 판단한다.
+    //   요약문에는 관련기사 목록이 통째로 딸려오는 경우가 있어(구글 뉴스·종합 피드),
+    //   연예 기사가 요약에 섞인 '코스피' 한 단어 때문에 증시로 넘어가곤 했다.
+    var byTitle = _newsRuleCat(String((it && it.title) || ''));
+    if(byTitle) return byTitle;
+    var byBoth = _newsRuleCat(String((it && it.title) || '') + ' ' + String((it && it.desc) || ''));
+    if(byBoth) return byBoth;
   }catch(e){}
   // 규칙에 안 걸리면 서버가 준 분류 유지 (단, 우리 카테고리에 있는 값만)
   var sv = (it && it.cat) ? String(it.cat).trim() : '';
@@ -27414,6 +27486,15 @@ function _fetchCatNews(cat, cb, force){
 window._fetchCatNews = _fetchCatNews;
 
 // 새 기사를 중복 없이 합친다. 제목과 링크 둘 다로 걸러낸다.
+// ★ 2026-09-02: 기사 목록에 섞이는 잡음 제거.
+//   '[연합뉴스 이 시각 헤드라인]'(내용 없는 묶음 기사), 부고·인사 같은 사고(社告)성 항목이
+//   증시 탭 상단을 차지하고 있었다. 제목만으로 걸러낸다.
+var _NEWS_NOISE = /(이\s*시각\s*헤드라인|헤드라인\s*모음|주요\s*뉴스\s*브리핑|오늘의\s*주요\s*뉴스|뉴스\s*브리핑)|^\s*\[(부고|인사|동정|알림|공지|정정|사고)\]/;
+function _newsNoise(title){
+  try{ return _NEWS_NOISE.test(String(title || '')); }catch(e){ return false; }
+}
+window._newsNoise = _newsNoise;
+
 function _newsMerge(news, hintCat){
   try{
     var have = {};
@@ -27425,6 +27506,7 @@ function _newsMerge(news, hintCat){
     var add = [];
     news.forEach(function(n){
       if(!n || !n.title) return;
+      if(_newsNoise(n.title)) return;            // 묶음·사고성 항목은 목록에 넣지 않는다
       var k = n.title.replace(/\s/g,'');
       if(have[k] || (n.link && have['L:' + n.link])) return;
       have[k] = 1; if(n.link) have['L:' + n.link] = 1;
@@ -27432,8 +27514,12 @@ function _newsMerge(news, hintCat){
       if(!_ts && n.pubDate){ var _p = Date.parse(n.pubDate); if(isFinite(_p)) _ts = _p; }
       // 서버가 카테고리를 확정해 준 기사는 다시 분류하지 않는다
       if(n._srvCat){
+        // ★ 2026-09-02: 서버 카테고리를 무조건 믿지 않는다.
+        //   서버는 '어느 피드로 받았는지'로 분류하므로, 증시 검색 피드에 섞여 온
+        //   연예·정치 기사까지 증시로 저장된다. 제목이 분명히 다른 말을 하면 제목을 따른다.
+        var _srvRule = (typeof _newsRuleCat === 'function') ? _newsRuleCat(n.title) : '';
         var sItem = { title:n.title, link:n.link || '', desc:'', ts:_ts || Date.now(),
-                      source:n.source || '', cat:n._srvCat };
+                      source:n.source || '', cat:_srvRule || n._srvCat };
         add.push(sItem);
         return;
       }
