@@ -5943,6 +5943,69 @@ function _optimizeAlight(segs){
 }
 window._optimizeAlight = _optimizeAlight;
 
+// ★ 2026-09-03: 버스 하차 정류장을 '다음 승차지점에 가장 빨리 닿는 곳'으로 바꾼다.
+//   증상: 아라역4번출구에서 내리면 될 것을 한 정거장 더 가서 아라역1번출구에 내리고
+//        거기서 3분을 걸었다.
+//   원인: 하차 정류장을 경로 엔진이 준 '마지막 정류장'으로 고정했다. 엔진은 버스 노선
+//        기준으로만 자르기 때문에, 환승할 역에 더 가까운 앞 정류장을 보지 않는다.
+//   → 버스 구간의 각 정류장마다 '거기까지 타는 시간 + 거기서 다음 승차지점까지 걷는 시간'을
+//     계산해서 합이 가장 작은 곳에서 내린다. 사람이 실제로 하는 판단과 같다.
+var _WALK_MPS_ALIGHT   = 1.1;    // 도보 속도(m/s) ≈ 66m/분
+var _ALIGHT_MAX_WALK_M = 800;    // 이보다 멀면 하차 후보로 보지 않는다
+var _ALIGHT_MIN_GAIN_S = 60;     // 1분 이상 이득일 때만 바꾼다(잦은 흔들림 방지)
+
+function _busAlightOptimize(segs){
+  if(!segs || !segs.length) return;
+  for(var i=0;i<segs.length;i++){
+    var bs = segs[i];
+    if(!bs || bs.type !== 2 || !bs.stops || bs.stops.length < 3) continue;
+
+    // 이 버스 다음에 오는 '도보 구간'과 '다음 교통수단' 찾기
+    var wIdx = -1, ns = null;
+    for(var j=i+1;j<segs.length;j++){
+      if(segs[j].type === 3){ if(wIdx < 0) wIdx = j; continue; }
+      ns = segs[j]; break;
+    }
+    if(wIdx < 0 || !ns || !ns.stops || !ns.stops.length) continue;   // 도보로 갈아타는 경우만
+
+    var tgt = ns.stops[0];
+    var tLat = tgt.lat, tLng = (tgt.lon != null ? tgt.lon : tgt.lng);
+    if(tLat == null || tLng == null) continue;
+    if(typeof haversineM !== 'function') continue;
+
+    var off = _segStopOffsets(bs);          // 승차 기준 정류장별 누적 초
+    var last = bs.stops.length - 1;
+
+    var best = -1, bestCost = Infinity, bestWalk = 0, bestDist = 0, curCost = Infinity;
+    for(var k=1;k<=last;k++){
+      var st = bs.stops[k];
+      var la = st.lat, ln = (st.lon != null ? st.lon : st.lng);
+      if(la == null || ln == null) continue;
+      var d = haversineM(la, ln, tLat, tLng);
+      var w = d / _WALK_MPS_ALIGHT;
+      var ride = (off[k] != null) ? off[k] : (bs.dur || 0);
+      var cost = ride + w;
+      if(k === last) curCost = cost;                       // 지금 방식(끝까지 타기)의 비용
+      if(d > _ALIGHT_MAX_WALK_M) continue;                 // 너무 멀리 걷게 되는 곳은 제외
+      if(cost < bestCost){ bestCost = cost; best = k; bestWalk = w; bestDist = d; }
+    }
+
+    if(best < 0 || best === last) continue;
+    if(!(curCost - bestCost >= _ALIGHT_MIN_GAIN_S)) continue;   // 이득이 뚜렷할 때만
+
+    console.log('[버스하차] ' + (bs.name||'') + ' — '
+      + _stopNm(bs.stops[last]) + '(' + Math.round(curCost/60) + '분) → '
+      + _stopNm(bs.stops[best]) + '(' + Math.round(bestCost/60) + '분)에 하차');
+
+    bs.stops = bs.stops.slice(0, best + 1);
+    bs.dur   = Math.max(60, Math.round(off[best]));
+    segs[wIdx].dur  = Math.max(0, Math.round(bestWalk));
+    segs[wIdx].dist = Math.round(bestDist);
+  }
+}
+function _stopNm(st){ return String((st && st.stationName) || ''); }
+window._busAlightOptimize = _busAlightOptimize;
+
 function _segStopOffsets(sg){
   var stops = (sg && sg.stops) || [];
   var n = stops.length;
@@ -6110,6 +6173,9 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
       + Math.round(_busLegDistM(_bs)||0) + 'm, 워커 속도 ' + (Math.round((_busLegKmh(_bs)||0)*10)/10) + 'km/h)');
     _bs.dur = _fx + _bw;
   }
+
+  // ★ 2026-09-03: 버스에서 '가장 빨리 닿는 정류장'에 내린다.
+  try{ if(typeof _busAlightOptimize === 'function') _busAlightOptimize(segs); }catch(e){}
 
   for(var wi=0;wi<segs.length;wi++){
     if(segs[wi].type!==3) continue;
@@ -7747,7 +7813,11 @@ window._hideRouteLoading = _hideRouteLoading;
     if(rtw) console.log('[route-v2-rtw]', rtw);
 
     // 자체 경로엔진(route-v2): 1회 호출로 3모드(minTime/minTransfer/minWalk) 반환
-    var urls = [ _routeV2Url(_coordQs + (rtw ? ('&rtw=' + encodeURIComponent(rtw)) : '')) ];
+    // ★ 승차 후보를 앱이 보여 준 정류장으로 맞춘다
+    var _sp = (typeof _stopsParam === 'function') ? _stopsParam() : '';
+    var urls = [ _routeV2Url(_coordQs
+                  + (rtw ? ('&rtw=' + encodeURIComponent(rtw)) : '')
+                  + (_sp ? ('&stops=' + encodeURIComponent(_sp)) : '')) ];
 
     // ★ 주변 정류장별로 후보를 넓힌다 (2026-08-27)
     //   route-v2 는 Dijkstra 라 모드당 최적해 **하나씩**만 돌려주고,
@@ -8060,6 +8130,31 @@ window._applyRealtimeWaits = _applyRealtimeWaits;
 var _RTW_STOPS   = 3;      // 출발지에서 가까운 정류장 이 개수만 조회
 var _RTW_MAX     = 25;     // URL 길이 보호 — 노선 수 상한
 var _RTW_TIMEOUT = 1500;   // 이 안에 못 모으면 모은 만큼만 보내고 진행 (탐색 지연 최소화)
+// ★ 2026-09-03: 노선도 버스 탭에 보이는 '주변 정류장'을 경로 엔진에 넘긴다.
+//   증상: 목록에 없는 정류장에서 버스를 타는 경로가 나왔다.
+//   원인: 엔진이 승차 후보를 반경(900→1600→2500m)만으로 뽑아, 앱 화면과 어긋났다.
+//   → 화면에 보여 준 정류장의 좌표를 그대로 보내 승차 후보를 거기로 맞춘다.
+//     엔진은 이 목록과 하나도 안 맞으면 예전 방식으로 되돌아가므로 경로가 끊기지 않는다.
+var _STOPS_MAX = 12;   // 너무 길면 주소가 길어져 잘릴 수 있다
+
+function _stopsParam(){
+  try{
+    var c = window._nearStopsCache;
+    if(!c || !c.stops || !c.stops.length) return '';
+    var out = [];
+    for(var i=0;i<c.stops.length && out.length < _STOPS_MAX;i++){
+      var st = c.stops[i];
+      var la = (st.gpslati != null) ? st.gpslati : st.lat;
+      var ln = (st.gpslong != null) ? st.gpslong : st.lng;
+      la = parseFloat(la); ln = parseFloat(ln);
+      if(!isFinite(la) || !isFinite(ln)) continue;
+      out.push(la.toFixed(5) + ',' + ln.toFixed(5));
+    }
+    return out.join(';');
+  }catch(e){ return ''; }
+}
+window._stopsParam = _stopsParam;
+
 function _collectRTW(lat, lng, cb){
   var done = false;
   var finish = function(str){ if(done) return; done = true; cb(str || ''); };
