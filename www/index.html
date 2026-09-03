@@ -5954,6 +5954,8 @@ var _WALK_MPS_ALIGHT   = 1.1;    // 도보 속도(m/s) ≈ 66m/분
 var _ALIGHT_MAX_WALK_M = 800;    // 이보다 멀면 하차 후보로 보지 않는다
 var _ALIGHT_MIN_GAIN_S = 60;     // 1분 이상 이득일 때만 바꾼다(잦은 흔들림 방지)
 
+// ⚠ 2026-09-03부터 사용하지 않음 — 하차 정류장 선정은 엔진(optimizeAlight)이 한다.
+//   되살리지 말 것. 앱에서 또 계산하면 화면 시각과 엔진 계산이 어긋난다.
 function _busAlightOptimize(segs){
   if(!segs || !segs.length) return;
   for(var i=0;i<segs.length;i++){
@@ -6176,8 +6178,8 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
     _bs.dur = _fx + _bw;
   }
 
-  // ★ 2026-09-03: 버스에서 '가장 빨리 닿는 정류장'에 내린다.
-  try{ if(typeof _busAlightOptimize === 'function') _busAlightOptimize(segs); }catch(e){}
+  // ★ 2026-09-03: 하차 정류장 선정은 엔진(optimizeAlight)이 한다.
+  //   앱에서 또 손대면 화면의 시각과 엔진이 계산한 시각이 어긋난다.
 
   for(var wi=0;wi<segs.length;wi++){
     if(segs[wi].type!==3) continue;
@@ -7981,9 +7983,16 @@ window._hideRouteLoading = _hideRouteLoading;
       //   같은 일을 두 번 하는 셈이고, 도착정보를 다시 받느라 최대 3.5초가 더 걸린다.
       var _rtwDone = 0;
       try{ (results || []).forEach(function(r){ if(r && r.rtwApplied) _rtwDone += r.rtwApplied; }); }catch(e){}
-      var _rankStep = _rtwDone > 0
-        ? function(paths, cb){ console.log('[순위] 엔진이 실시간 반영함(' + _rtwDone + '개 노선) → 앱 재순위 생략'); cb(); }
-        : _applyRealtimeWaits;
+      // ★ 2026-09-03: 앱은 경로를 다시 줄 세우지 않는다.
+      //   증상: 같은 구간인데 볼 때마다 순위와 소요시간이 바뀌었다.
+      //   원인: 엔진이 정한 순서를 앱이 실시간 도착정보로 또 뒤집었다.
+      //        그 도착정보는 몇 초 사이에도 달라져서 결과가 매번 흔들린다.
+      //   → 순위는 엔진이 정한다. 앱은 받은 순서를 그대로 쓴다.
+      //     실시간 대기는 이미 rtw 로 엔진에 넘겨 반영되고 있다.
+      var _rankStep = function(paths, cb){
+        if(_rtwDone > 0) console.log('[순위] 엔진이 실시간 대기를 반영함(' + _rtwDone + '개 노선)');
+        cb();
+      };
 
       // ★ 노선도가 늦게 뜨던 이유: 재순위(_applyRealtimeWaits, 최대 3.5초)가
       //   끝나야 비로소 그렸다. 앞단 실시간 대기 수집(1.5초)까지 합치면
@@ -8662,6 +8671,8 @@ window._walkEdgeMin = _walkEdgeMin;
 //     정당하게 비교되도록 한다. 10분 이하 도보는 벌점 0이라 기존 순서 그대로다.
 var _WALK_FREE_MIN = 10;   // 이만큼은 그냥 걷는 것으로 본다
 var _WALK_WEIGHT   = 1.5;  // 넘는 시간에 붙는 가중치
+// ⚠ 2026-09-03부터 사용하지 않음 — 도보 가중치는 엔진(WPEN.minTime)이 담당한다.
+//   양쪽에서 더하면 같은 도보를 두 번 세게 된다.
 function _walkPenalty(p){
   try{
     var w = _walkEdgeMin(p);
@@ -8671,10 +8682,13 @@ function _walkPenalty(p){
 }
 window._walkPenalty = _walkPenalty;
 
+// ★ 2026-09-03: 도보 가중치를 앱에서 빼고 엔진(WPEN.minTime=1.6)에만 맡긴다.
+//   양쪽에서 각자 더하면 같은 도보가 두 번 세어져 순위가 엇갈린다.
+//   여기 남는 것은 '즐겨찾기 정류장 감면'뿐이다. 이건 사용자 설정이라 앱의 몫이다.
 function _favCost(p){
   var t=((p&&p.info)||{}).totalTime;
   if(t==null) t=999;
-  return t - _favPathBonus(p) + _walkPenalty(p);
+  return t - _favPathBonus(p);
 }
 window._favPathBonus=_favPathBonus;
 window._favCost=_favCost;
