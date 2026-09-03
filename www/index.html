@@ -30717,8 +30717,19 @@ function _pipStations(){
       path = S.route.path;
       idx  = (S.curIdx != null) ? S.curIdx : 0;
     } else if(typeof _transitNodeData !== 'undefined' && _transitNodeData && _transitNodeData.length){
-      path = _transitNodeData.map(function(n){ return n.name; });
-      idx  = (window._gpsMaxIdx != null) ? window._gpsMaxIdx : 0;
+      // ★ 2026-09-03: '도보' 같은 이동 구간은 역이 아니다.
+      //   그대로 쓰면 '내 위치 – 도보' 처럼 역 자리에 엉뚱한 말이 들어간다.
+      var keep = [], hit = -1;
+      var raw = (window._gpsMaxIdx != null) ? window._gpsMaxIdx : 0;
+      for(var i=0;i<_transitNodeData.length;i++){
+        var nd = _transitNodeData[i];
+        var nm = String((nd && nd.name) || '');
+        if(!nm || (nd && nd.isWalk) || /^(도보|환승|이동)$/.test(nm)) continue;
+        if(i <= raw) hit = keep.length;      // 지나온 곳까지의 위치를 기억
+        keep.push(nm);
+      }
+      path = keep;
+      idx  = (hit >= 0) ? hit : 0;
     }
     if(!path || !path.length) return out;
     if(idx < 0) idx = 0;
@@ -30771,15 +30782,16 @@ function _pipEl(){
   //   4줄  (도착 10분 전이면) 추천 + 버튼 — 이때만 아래로 늘어난다
   //   가장자리는 안쪽으로 20%까지 서서히 투명해지도록 mask 를 씌운다.
   var NOWRAP = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;';
-  var FADE   = 'linear-gradient(to right, transparent 0%, #000 20%, #000 80%, transparent 100%),'
-             + 'linear-gradient(to bottom, transparent 0%, #000 20%, #000 80%, transparent 100%)';
+  // ★ 2026-09-03: mask-composite:intersect 를 이 웹뷰가 지원하지 않아
+  //   두 그라데이션이 합집합으로 처리되면서 가장자리가 전혀 흐려지지 않았다.
+  //   합성이 필요 없는 방사형 마스크 하나로 바꾼다. 바깥 20% 가 서서히 사라진다.
+  var FADE   = 'radial-gradient(ellipse closest-side, #000 60%, rgba(0,0,0,0.55) 82%, rgba(0,0,0,0) 100%)';
   el.style.cssText =
     'position:fixed;inset:0;z-index:2147483000;display:none;'
     + 'flex-direction:column;align-items:center;justify-content:center;gap:min(0.9vh,5px);'
-    + 'background:#0e0e10;color:#fff;padding:min(2vw,12px);text-align:center;'
+    + 'background:rgba(10,10,12,0.88);color:#fff;padding:min(2vw,12px);text-align:center;'
     + 'font-family:inherit;overflow:hidden;'
-    + '-webkit-mask-image:' + FADE + ';mask-image:' + FADE + ';'
-    + '-webkit-mask-composite:source-in;mask-composite:intersect;';
+    + '-webkit-mask-image:' + FADE + ';mask-image:' + FADE + ';';
   el.innerHTML =
       // 앱 상단과 같은 응원 문구가 오른쪽에서 왼쪽으로 흐른다
       '<div style="width:100%;overflow:hidden;height:min(3.4vh,20px);position:relative;">'
@@ -30816,9 +30828,18 @@ function _pipCheerPaint(){
     var el = document.getElementById('pipCheerText');
     if(!el) return;
     if(!el.textContent){
-      if(typeof _refreshMarqueeList === 'function') _refreshMarqueeList();
-      var msg = (typeof _marqueeList !== 'undefined' && _marqueeList.length)
-              ? _marqueeList[(_marqueeIdx || 0) % _marqueeList.length] : '';
+      var msg = '';
+      try{
+        if(typeof _refreshMarqueeList === 'function') _refreshMarqueeList();
+        if(typeof _marqueeList !== 'undefined' && _marqueeList.length)
+          msg = _marqueeList[(_marqueeIdx || 0) % _marqueeList.length] || '';
+      }catch(e0){}
+      // 목록을 못 읽으면 화면 상단에 이미 떠 있는 문구를 그대로 가져온다
+      if(!msg){
+        var src = document.getElementById('hdrMarqueeText');
+        if(src) msg = src.textContent || '';
+      }
+      if(!msg) msg = '오늘도 안전하게 다녀오세요';
       el.textContent = (typeof _stripEmoji === 'function') ? _stripEmoji(msg) : String(msg || '');
     }
     var tr = document.getElementById('pipCheerTrack');
