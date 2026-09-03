@@ -7976,6 +7976,16 @@ window._hideRouteLoading = _hideRouteLoading;
         var _cd = { result: { path: allPaths } };
         window._favSearchStart = start;
         if(first) window._favToastKey = null;
+        // ★ 2026-09-03: 경로 엔진이 보내 준 진단을 보관한다(설정>진단에서 확인)
+        try{
+          window._routeDiag = {
+            v: _cd.engineVersion || '(구버전)',
+            stopsAllowed: _cd.stopsAllowed,
+            busDiag: _cd.busDiag,
+            rtwApplied: _cd.rtwApplied,
+            at: Date.now()
+          };
+        }catch(e){}
         _allRouteResults = _parseRouteOptions(_cd);
         window._routeResultReady = _reqToken;
         var tabDiv = document.getElementById('routeOptionTabs');
@@ -15418,6 +15428,21 @@ window._bgDiag = async function(){
           + (_q != null && _q > 180 ? ' ← 멈춤 의심' : ''));
       add('서버 대화 모드: ' + (window._serverTalksActive ? '켜짐(로컬 생성 보류)' : '꺼짐(로컬 생성)'));
       add('대화 타이머: ' + (window._ltWatchdog ? '감시 중' : '없음'));
+    // ★ 경로 엔진 상태
+    try{
+      var _rd = window._routeDiag;
+      if(!_rd) add('경로 엔진: 아직 탐색 안 함');
+      else {
+        add('경로 엔진: ' + _rd.v
+            + ' · 승차후보 ' + (_rd.stopsAllowed == null ? '미전달' : _rd.stopsAllowed + '곳'));
+        if(_rd.busDiag){
+          add('  버스 데이터: 근처노선 ' + _rd.busDiag.nearRoutes + '개 · 정류장 '
+              + _rd.busDiag.rows + '개' + (_rd.busDiag.capped ? ' (상한 도달)' : ''));
+        } else {
+          add('  버스 데이터: 정보 없음 — 워커가 옛 버전입니다');
+        }
+      }
+    }catch(e2){}
     try{
       var _klN = Object.keys(JSON.parse(localStorage.getItem('kakaoLocalCache') || '{}')).length;
       add('장소 API(kakao-local): ' + (window._kakaoDead ? '없음(404) — 폴백 사용' : '정상 또는 미사용')
