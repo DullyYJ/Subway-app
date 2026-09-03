@@ -7988,9 +7988,14 @@ window._hideRouteLoading = _hideRouteLoading;
             v: _rr.engineVersion || '(구버전)',
             stopsAllowed: _rr.stopsAllowed,
             busDiag: _rr.busDiag,
+            warnings: _rr.warnings || [],
             rtwApplied: _rr.rtwApplied,
             at: Date.now()
           };
+          // 엔진이 이상을 신고하면 콘솔에도 남긴다
+          try{
+            (_rr.warnings || []).forEach(function(w){ console.warn('[경로엔진] ' + w); });
+          }catch(e){}
         }catch(e){}
         _allRouteResults = _parseRouteOptions(_cd);
         window._routeResultReady = _reqToken;
@@ -15446,6 +15451,11 @@ window._bgDiag = async function(){
               + _rd.busDiag.rows + '개' + (_rd.busDiag.capped ? ' (상한 도달)' : ''));
         } else {
           add('  버스 데이터: 정보 없음 — 워커가 옛 버전입니다');
+        }
+        if(_rd.warnings && _rd.warnings.length){
+          _rd.warnings.forEach(function(w){ add('  ⚠ ' + w); });
+        } else if(_rd.busDiag){
+          add('  자기점검: 이상 없음');
         }
       }
     }catch(e2){}
