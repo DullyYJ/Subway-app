@@ -6106,7 +6106,36 @@ function _segStopOffsets(sg){
 }
 window._segStopOffsets = _segStopOffsets;
 
+// ★ 2026-09-03: 경로 카드의 시각을 살아 있게 유지한다.
+//   증상: 21:53 에 보는데 첫 정류장이 21:32(이미 지난 시각)로 남아 있고,
+//        같은 구간인데 볼 때마다 총 소요시간이 83분·146분처럼 크게 달랐다.
+//   원인: 타임라인은 '탐색한 순간'을 기준으로 한 번 그리고 그대로 굳는다.
+//        카드를 띄워 둔 채 시간이 흐르면 화면의 시각이 과거가 되고,
+//        재탐색 때마다 기준이 달라져 총합도 함께 튄다.
+//   → 기준시각이 '현재'이고 아직 확정하지 않은 카드는 1분마다 다시 그린다.
+//     확정한 경로(_routeLocked)와 '예상 시각' 모드는 건드리지 않는다.
+var _HTL_REFRESH_MS = 60000;
+function _htlAutoRefresh(){
+  try{
+    if(window._routeLocked) return;                       // 확정된 경로는 그대로
+    if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return;   // 예상 시각 모드
+    var card = document.getElementById('transitResultCard');
+    if(!card || card.style.display === 'none') return;     // 카드가 없으면 할 일 없음
+    var sec = window._lastHtlSections;
+    if(!sec || !sec.length) return;
+    var a = window._lastHtlArgs;
+    if(!a) return;
+    // 마지막으로 그린 지 1분이 안 됐으면 건너뛴다
+    if(window._htlDrawnAt && (Date.now() - window._htlDrawnAt) < _HTL_REFRESH_MS - 2000) return;
+    _renderHtlTrack(sec, a.start, a.dest, a.totalMin);
+  }catch(e){}
+}
+window._htlAutoRefresh = _htlAutoRefresh;
+try{ if(!window._htlRefreshTimer) window._htlRefreshTimer = setInterval(_htlAutoRefresh, _HTL_REFRESH_MS); }catch(e){}
+
 function _renderHtlTrack(sections, start, dest, totalMin) {
+  // 다시 그릴 때 쓰도록 인자를 기억해 둔다
+  try{ window._lastHtlArgs = { start: start, dest: dest, totalMin: totalMin }; window._htlDrawnAt = Date.now(); }catch(e){}
   var track = document.getElementById('transitHtlTrack');
   if(!track) return;
 
@@ -30782,16 +30811,14 @@ function _pipEl(){
   //   4줄  (도착 10분 전이면) 추천 + 버튼 — 이때만 아래로 늘어난다
   //   가장자리는 안쪽으로 20%까지 서서히 투명해지도록 mask 를 씌운다.
   var NOWRAP = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;';
-  // ★ 2026-09-03: mask-composite:intersect 를 이 웹뷰가 지원하지 않아
-  //   두 그라데이션이 합집합으로 처리되면서 가장자리가 전혀 흐려지지 않았다.
-  //   합성이 필요 없는 방사형 마스크 하나로 바꾼다. 바깥 20% 가 서서히 사라진다.
-  var FADE   = 'radial-gradient(ellipse closest-side, #000 60%, rgba(0,0,0,0.55) 82%, rgba(0,0,0,0) 100%)';
+  // ★ 2026-09-03: 가장자리 페이드를 뺀다.
+  //   이 웹뷰에서 mask 합성이 제대로 안 먹어 타원 얼룩처럼 보였다.
+  //   어설픈 반투명보다 깔끔한 검정 바탕이 글자도 잘 읽힌다.
   el.style.cssText =
     'position:fixed;inset:0;z-index:2147483000;display:none;'
     + 'flex-direction:column;align-items:center;justify-content:center;gap:min(0.9vh,5px);'
-    + 'background:rgba(10,10,12,0.88);color:#fff;padding:min(2vw,12px);text-align:center;'
-    + 'font-family:inherit;overflow:hidden;'
-    + '-webkit-mask-image:' + FADE + ';mask-image:' + FADE + ';';
+    + 'background:#000;color:#fff;padding:min(2vw,12px);text-align:center;'
+    + 'font-family:inherit;overflow:hidden;';
   el.innerHTML =
       // 앱 상단과 같은 응원 문구가 오른쪽에서 왼쪽으로 흐른다
       '<div style="width:100%;overflow:hidden;height:min(3.4vh,20px);position:relative;">'
@@ -30822,39 +30849,46 @@ function _pipEl(){
 }
 
 // ★ 2026-09-03: 앱 상단과 같은 응원 문구를 작은 화면에도 흘린다.
-//   한 바퀴 돌 때마다 다음 문구로 바꾼다(앱 헤더와 같은 목록을 쓴다).
+//   앞선 시도는 animationiteration 이벤트로 문구를 바꿨는데, 배경에서 애니메이션이
+//   멈추면 이벤트도 안 와서 줄이 통째로 비어 보였다.
+//   → 이벤트에 기대지 않는다. 15초 단위로 시계에서 번호를 뽑아 문구를 고르므로
+//     언제 그리든 항상 뭔가가 들어 있다.
+var _PIP_CHEER_MS = 15000;
+var _PIP_CHEER_FALLBACK = [
+  '오늘도 안전하게 다녀오세요',
+  '조금만 더 가면 도착이에요',
+  '창밖 한 번 보고 가세요',
+  '수고 많으셨어요',
+  '가는 길이 편안하길 바라요',
+  '잠시 어깨 펴고 숨 한 번',
+  '무사히 도착하실 거예요'
+];
+
+function _pipCheerList(){
+  // ① 앱 헤더가 쓰는 목록  ② 헤더에 떠 있는 문구  ③ 내장 문구
+  try{
+    if(typeof _refreshMarqueeList === 'function') _refreshMarqueeList();
+    if(typeof _marqueeList !== 'undefined' && _marqueeList && _marqueeList.length)
+      return _marqueeList;
+  }catch(e){}
+  try{
+    var src = document.getElementById('hdrMarqueeText');
+    var t = src && src.textContent;
+    if(t && t.trim()) return [t.trim()];
+  }catch(e){}
+  return _PIP_CHEER_FALLBACK;
+}
+
 function _pipCheerPaint(){
   try{
     var el = document.getElementById('pipCheerText');
     if(!el) return;
-    if(!el.textContent){
-      var msg = '';
-      try{
-        if(typeof _refreshMarqueeList === 'function') _refreshMarqueeList();
-        if(typeof _marqueeList !== 'undefined' && _marqueeList.length)
-          msg = _marqueeList[(_marqueeIdx || 0) % _marqueeList.length] || '';
-      }catch(e0){}
-      // 목록을 못 읽으면 화면 상단에 이미 떠 있는 문구를 그대로 가져온다
-      if(!msg){
-        var src = document.getElementById('hdrMarqueeText');
-        if(src) msg = src.textContent || '';
-      }
-      if(!msg) msg = '오늘도 안전하게 다녀오세요';
-      el.textContent = (typeof _stripEmoji === 'function') ? _stripEmoji(msg) : String(msg || '');
-    }
-    var tr = document.getElementById('pipCheerTrack');
-    if(tr && !tr._pipBound){
-      tr._pipBound = true;
-      tr.addEventListener('animationiteration', function(){
-        try{
-          if(typeof _refreshMarqueeList === 'function') _refreshMarqueeList();
-          if(typeof _marqueeList === 'undefined' || !_marqueeList.length) return;
-          _marqueeIdx = (_marqueeIdx || 0) + 1;
-          var m2 = _marqueeList[_marqueeIdx % _marqueeList.length] || '';
-          el.textContent = (typeof _stripEmoji === 'function') ? _stripEmoji(m2) : String(m2);
-        }catch(e){}
-      });
-    }
+    var list = _pipCheerList();
+    if(!list.length) return;
+    var idx = Math.floor(Date.now() / _PIP_CHEER_MS) % list.length;
+    var msg = String(list[idx] || '');
+    if(typeof _stripEmoji === 'function'){ try{ msg = _stripEmoji(msg); }catch(e){} }
+    if(el.textContent !== msg) el.textContent = msg;
   }catch(e){}
 }
 window._pipCheerPaint = _pipCheerPaint;
