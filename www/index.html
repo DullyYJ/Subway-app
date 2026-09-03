@@ -8819,17 +8819,48 @@ window._routeArriveMs = _routeArriveMs;
 //        서로 다른 근거에서 따로 계산됐다.
 //   → 도착시각이 있으면 남은시간을 거기서 역산한다. 두 값이 구조적으로 어긋날 수 없다.
 //     화면·PiP·알림이 모두 이 함수를 쓴다.
-function _etaPair(){
-  var out = { arrMs: null, rem: null };
+// 'HH:MM' → 오늘 기준 밀리초 (자정을 넘긴 값은 다음 날로 본다)
+function _etaHmToMs(hm){
   try{
-    var am = (typeof _routeArriveMs === 'function') ? _routeArriveMs() : null;
-    var rm = (typeof _routeRemainingMin === 'function') ? _routeRemainingMin() : null;
+    var m = String(hm || '').match(/^(\d{1,2}):(\d{2})$/);
+    if(!m) return null;
+    var h = +m[1], mi = +m[2];
+    if(h > 23 || mi > 59) return null;
+    var d = new Date(); d.setSeconds(0, 0); d.setHours(h, mi);
+    var t = d.getTime();
+    if(t < Date.now() - 6*3600000) t += 86400000;   // 자정 넘김
+    return t;
+  }catch(e){ return null; }
+}
+
+function _etaPair(){
+  var out = { arrMs: null, rem: null, src: 'none' };
+  try{
+    // ★ 2026-09-03: 화면에 그려진 타임라인을 최우선으로 삼는다.
+    //   증상: 타임라인은 아라 18:46 인데 AI 승무원과 작은 화면은 18:52 로 6분을 더 잡았다.
+    //   원인: _routeArriveMs() 가 값을 못 내면 '지금 + 남은시간'으로 도착을 만들었고,
+    //        그 남은시간이 타임라인과 다른 근거에서 나온 값이었다.
+    //   → 사용자가 보고 있는 숫자가 기준이다. 타임라인 → 경로 도착시각 → 남은시간 순.
+    var t = (typeof _htlDepArrTimes === 'function') ? _htlDepArrTimes() : null;
+    var am = t && t.arr ? _etaHmToMs(t.arr) : null;
+    if(am) out.src = 'timeline';
+
+    if(!am && typeof _routeArriveMs === 'function'){
+      am = _routeArriveMs();
+      if(am) out.src = 'route';
+    }
+
     if(am){
       out.arrMs = am;
       out.rem   = Math.max(0, Math.round((am - Date.now()) / 60000));   // 도착시각이 기준
-    } else if(rm != null){
+      return out;
+    }
+
+    var rm = (typeof _routeRemainingMin === 'function') ? _routeRemainingMin() : null;
+    if(rm != null){
       out.rem   = rm;
       out.arrMs = Date.now() + rm * 60000;
+      out.src   = 'remain';
     }
   }catch(e){}
   return out;
@@ -15439,6 +15470,18 @@ window._bgDiag = async function(){
           + (_q != null && _q > 180 ? ' ← 멈춤 의심' : ''));
       add('서버 대화 모드: ' + (window._serverTalksActive ? '켜짐(로컬 생성 보류)' : '꺼짐(로컬 생성)'));
       add('대화 타이머: ' + (window._ltWatchdog ? '감시 중' : '없음'));
+    // ★ 도착시각 계산 근거
+    try{
+      var _ep9 = (typeof _etaPair === 'function') ? _etaPair() : null;
+      if(_ep9 && _ep9.arrMs){
+        var _d9 = new Date(_ep9.arrMs), _p9 = function(n){ return (n<10?'0':'')+n; };
+        var _srcNm = { timeline:'타임라인', route:'경로 도착시각', remain:'남은시간 추정' }[_ep9.src] || _ep9.src;
+        add('도착 계산: ' + _p9(_d9.getHours()) + ':' + _p9(_d9.getMinutes())
+            + ' · ' + _ep9.rem + '분 남음 · 근거 ' + _srcNm);
+      } else {
+        add('도착 계산: 경로 없음');
+      }
+    }catch(e2){}
     // ★ 경로 엔진 상태
     try{
       var _rd = window._routeDiag;
@@ -25010,13 +25053,21 @@ var _notifId = 1000;
 //   commute_brief= 출퇴근 브리핑 알림(설정에서 켠 경우만 발생) — 탭하면 팝업+경로탐색 버튼
 //   fg_service   = 이동 중 상주 알림(현재역 · 남은시간) — 잠금화면/알림창에서 확인
 //   arrive/near_arrive/transfer = 하차·환승 임박 (2정거장·1정거장·도착에서만)
-// ★ 2026-09-03: 작은 요약 화면(PiP)이 진행 상황을 계속 보여주므로,
-//   같은 내용을 알림으로 또 보낼 이유가 없다. 환승·도착 임박 알림이
-//   같은 문구로 여러 번 쌓이던 문제도 이걸로 사라진다.
-//   남기는 것: 도착 10분 전 추천(커피·야식) · 출퇴근 브리핑 · 상주 안내
-var _NOTIF_ALLOW = { arrive_reco:1, commute_brief:1, fg_service:1,
+// ★ 2026-09-03: 상단 알림을 전부 끈다.
+//   작은 요약 화면(PiP)이 현재역·남은시간·도착시각·추천까지 다 보여 주므로
+//   같은 내용을 알림으로 또 보낼 이유가 없다.
+var _NOTIF_ALLOW = { arrive_reco:0, commute_brief:0, fg_service:0,
                      arrive:0, near_arrive:0, near_arrive2:0,
                      transfer:0, transfer2:0, arrival:0 };
+
+// ★ 진동은 알림과 별개로 둔다.
+//   화면을 안 보고 있어도 '환승'과 '하차'는 몸으로 알아야 한다.
+//   알림 정책을 껐다고 진동까지 사라지면 안 되므로 판단 기준을 분리한다.
+var _VIBE_ALLOW = { transfer:1, transfer2:1,
+                    arrive:1, arrival:1, near_arrive:1, near_arrive2:1,
+                    arrive_reco:0, commute_brief:0, fg_service:0 };
+function _vibeAllowed(type){ return !!_VIBE_ALLOW[String(type || '')]; }
+window._vibeAllowed = _vibeAllowed;
 function _notifAllowed(type){ return !!_NOTIF_ALLOW[String(type||'')]; }
 window._notifAllowed = _notifAllowed;
 
@@ -25028,7 +25079,7 @@ window._notifAllowed = _notifAllowed;
 //   → 모든 경로 진동은 이 함수를 거친다. 허용되지 않은 종류는 울리지 않는다.
 function _vibrateFor(type, pattern){
   try{
-    if(!_notifAllowed(type)) return false;
+    if(!_vibeAllowed(type)) return false;   // ★ 알림이 아니라 진동 정책을 본다
     if('vibrate' in navigator) navigator.vibrate(pattern);
     return true;
   }catch(e){ return false; }
@@ -25037,9 +25088,15 @@ window._vibrateFor = _vibrateFor;
 
 function showNotification(title, body, opts){
   opts = opts || {};
-  // ★ 허용되지 않은 알림은 발송하지 않음
-  if(!_notifAllowed(opts.type)) return;
   var vibPat = opts.vibrate || [300,100,300];
+
+  // ★ 2026-09-03: 상단 알림은 껐지만 환승·하차는 몸으로 알아야 한다.
+  //   알림을 내보내지 않더라도 진동은 여기서 먼저 울린다.
+  //   (진동 여부는 _VIBE_ALLOW 가 따로 정한다)
+  try{ if(typeof _vibrateFor === 'function') _vibrateFor(opts.type, vibPat); }catch(e){}
+
+  // 허용되지 않은 알림은 발송하지 않음
+  if(!_notifAllowed(opts.type)) return;
 
   // 1) Capacitor LocalNotifications (시스템 상단 알림 + 진동)
   try {
@@ -25348,8 +25405,9 @@ window._arrAiCopy = _arrAiCopy;
 function _arrSlot(arrMs){
   var d = new Date(arrMs);
   var m = d.getHours()*60 + d.getMinutes();
-  if(m >= 17*60   && m <= 19*60+30) return 'night';
-  if(m >= 19*60+31)                 return 'shop';
+  // ★ 2026-09-03: 야식은 21:00 까지, 그 뒤부터 쇼핑
+  if(m >= 17*60   && m <= 21*60)    return 'night';
+  if(m >= 21*60+1)                  return 'shop';
   if(m >= 7*60+1  && m <= 10*60)    return 'morning';
   return 'none';
 }
@@ -25510,6 +25568,21 @@ function _arrFireAlert(destStn, arrMs){
     var icon = (slot === 'shop') ? '🛍' : (slot === 'morning' ? '☕' : '🍗');
 
     var send = function(body){
+      // ★ 작은 화면(PiP)에도 같은 추천을 싣는다
+      try{
+        var _btns = [];
+        if(slot === 'night'){
+          _btns = [{ label:'배달의민족', call:"_dlvOpen('baemin', window._arrOrderMenu)", color:'#2AC1BC', fg:'#fff' },
+                   { label:'요기요',     call:"_dlvOpen('yogiyo', window._arrOrderMenu)", color:'#FA0050', fg:'#fff' }];
+        } else if(slot === 'shop'){
+          _btns = [{ label:'상품 보기', call:'_arrShopOpen()' }];
+        } else {
+          _btns = [{ label:'맛집 보기', call:'_arrGoFoodTab()' }];
+        }
+        var _line = String(body || '').split('\n').filter(function(x){ return x.trim(); })[0] || '';
+        if(typeof _pipRecoSet === 'function') _pipRecoSet(icon + ' ' + a.title, _line, _btns);
+      }catch(e){}
+
       var vib = [300,120,300];
       try { if('vibrate' in navigator) navigator.vibrate(vib); } catch(e){}
       if(typeof showNotification==='function')
@@ -25609,6 +25682,7 @@ function _arrWatchTick(){
     var arrMs = S.boardedAt + total * 1000;
     var rem   = Math.round((arrMs - Date.now()) / 1000);
     window._arrLastRemSec = rem;                 // 설정>진단에서 확인용
+    try{ if(typeof _pipTick === 'function') _pipTick(); }catch(e){}   // 작은 화면 갱신 기회
     if(rem <= 0) return;
     _arrCheckPreAlert(arrMs, rem);
   }catch(e){}
@@ -30123,6 +30197,10 @@ function _startBgGeolocation(){
       }
       if(!location) return;
 
+      // ★ 2026-09-03: 배경에서는 JS 타이머가 멈춰 작은 화면(PiP)의 숫자가 굳는다.
+      //   위치 콜백은 운영체제가 깨워 주므로, 올 때마다 화면을 다시 그린다.
+      try{ if(typeof _pipTick === 'function') _pipTick(); }catch(e){}
+
       // startWatch()의 GPS 처리와 동일한 로직 재사용
       var rawLat = location.latitude;
       var rawLng = location.longitude;
@@ -30564,7 +30642,10 @@ function _pipTripSet(){
 }
 window._pipTripSet = _pipTripSet;
 
-function _pipTripClear(){ try{ window._pipTrip = null; }catch(e){} }
+function _pipTripClear(){
+  try{ window._pipTrip = null; }catch(e){}
+  try{ if(typeof _pipRecoClear === 'function') _pipRecoClear(); }catch(e){}
+}
 window._pipTripClear = _pipTripClear;
 
 // ★ 2026-09-03: 여정이 아직 살아 있는지 매번 확인한다.
@@ -30625,6 +30706,31 @@ function _pipMood(m){
   return '여유 있게 가고 있어요';
 }
 
+// ★ 2026-09-03: 작은 화면에 이전·현재·다음 역을 함께 보여 준다.
+//   현재역만 보면 어디쯤인지 감이 안 온다. 앞뒤를 같이 보여 주면
+//   '다음이 내릴 역인가'를 한눈에 알 수 있다.
+function _pipStations(){
+  var out = { prev:'', cur:'', next:'' };
+  try{
+    var path = null, idx = -1;
+    if(typeof S !== 'undefined' && S && S.route && S.route.path && S.route.path.length){
+      path = S.route.path;
+      idx  = (S.curIdx != null) ? S.curIdx : 0;
+    } else if(typeof _transitNodeData !== 'undefined' && _transitNodeData && _transitNodeData.length){
+      path = _transitNodeData.map(function(n){ return n.name; });
+      idx  = (window._gpsMaxIdx != null) ? window._gpsMaxIdx : 0;
+    }
+    if(!path || !path.length) return out;
+    if(idx < 0) idx = 0;
+    if(idx > path.length - 1) idx = path.length - 1;
+    out.prev = (idx > 0) ? String(path[idx-1] || '') : '';
+    out.cur  = String(path[idx] || '');
+    out.next = (idx < path.length - 1) ? String(path[idx+1] || '') : '';
+  }catch(e){}
+  return out;
+}
+window._pipStations = _pipStations;
+
 function _pipData(){
   var out = { cur:'', from:'', dest:'', min:null, arr:null };
   try{
@@ -30658,38 +30764,106 @@ function _pipEl(){
   el.id = 'pipView';
   // ★ 2026-09-02: 창이 작아지면 글자가 잘리고 겹쳤다.
   //   고정 px 대신 창 크기(vw/vh)에 맞춰 줄어드는 값을 쓰고, 모든 줄을 한 줄로 고정한다.
-  // ★ 2026-09-02: 창을 낮추면서 다섯 줄이 넘쳤다. 글자 크기는 그대로 두고 줄만 셋으로 합친다.
-  //   1줄 경로(+현재 위치) · 2줄 소요시간 · 3줄 도착예정 + 한마디
+  // ★ 2026-09-03: 구성 변경
+  //   1줄  이전역(흐리게) – 현재역(진하게) – 다음역(흐리게)
+  //   2줄  예상 소요시간
+  //   3줄  도착 예정시간
+  //   4줄  (도착 10분 전이면) 추천 + 버튼 — 이때만 아래로 늘어난다
+  //   가장자리는 안쪽으로 20%까지 서서히 투명해지도록 mask 를 씌운다.
   var NOWRAP = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;';
+  var FADE   = 'linear-gradient(to right, transparent 0%, #000 20%, #000 80%, transparent 100%),'
+             + 'linear-gradient(to bottom, transparent 0%, #000 20%, #000 80%, transparent 100%)';
   el.style.cssText =
     'position:fixed;inset:0;z-index:2147483000;display:none;'
-    + 'flex-direction:column;align-items:center;justify-content:center;gap:min(0.8vh,4px);'
-    + 'background:#0e0e10;color:#fff;padding:min(1.5vw,10px);text-align:center;'
-    + 'font-family:inherit;overflow:hidden;';
+    + 'flex-direction:column;align-items:center;justify-content:center;gap:min(0.9vh,5px);'
+    + 'background:#0e0e10;color:#fff;padding:min(2vw,12px);text-align:center;'
+    + 'font-family:inherit;overflow:hidden;'
+    + '-webkit-mask-image:' + FADE + ';mask-image:' + FADE + ';'
+    + '-webkit-mask-composite:source-in;mask-composite:intersect;';
   el.innerHTML =
-      '<div id="pipRoute" style="font-size:min(5.2vw,17px);font-weight:800;line-height:1.2;' + NOWRAP + '"></div>'
-    + '<div id="pipMin"   style="font-size:min(9vw,30px);font-weight:900;line-height:1.15;color:#ffd60a;' + NOWRAP + '"></div>'
-    + '<div id="pipArr"   style="font-size:min(4.4vw,15px);font-weight:600;color:#d8d8dd;line-height:1.2;' + NOWRAP + '"></div>';
+      // 앱 상단과 같은 응원 문구가 오른쪽에서 왼쪽으로 흐른다
+      '<div style="width:100%;overflow:hidden;height:min(3.4vh,20px);position:relative;">'
+    +   '<div id="pipCheerTrack" style="display:inline-block;white-space:nowrap;padding-left:100%;'
+    +     'animation:pipCheer 15s linear infinite;">'
+    +     '<span id="pipCheerText" style="font-size:min(3.8vw,13px);font-weight:800;color:#9aa0ff;"></span>'
+    +   '</div>'
+    + '</div>'
+    + '<div id="pipStn" style="font-size:min(5vw,17px);line-height:1.25;' + NOWRAP + '"></div>'
+    + '<div id="pipMin" style="font-size:min(5.6vw,19px);font-weight:800;line-height:1.25;color:#ffd60a;' + NOWRAP + '"></div>'
+    + '<div id="pipArr" style="font-size:min(5.6vw,19px);font-weight:800;line-height:1.25;color:#d8d8dd;' + NOWRAP + '"></div>'
+    + '<div id="pipReco" style="display:none;width:100%;margin-top:min(1.4vh,8px);'
+    +   'padding-top:min(1.4vh,8px);border-top:1px solid rgba(255,255,255,.16);"></div>';
   // ★ 2026-09-03: 탭하면 숨기던 동작을 뺐다.
   //   PiP 창을 탭하는 건 '앱으로 돌아가고 싶다'는 뜻이라 안드로이드가 알아서 처리한다.
   //   여기서 숨겨 버리면 작은 창에 앱 화면이 비쳐 고장난 것처럼 보인다.
+  // 흐르는 애니메이션 정의(한 번만)
+  try{
+    if(!document.getElementById('pipCheerCss')){
+      var st0 = document.createElement('style');
+      st0.id = 'pipCheerCss';
+      st0.textContent = '@keyframes pipCheer{0%{transform:translateX(0);}100%{transform:translateX(-100%);}}';
+      document.head.appendChild(st0);
+    }
+  }catch(e){}
   document.body.appendChild(el);
   return el;
 }
+
+// ★ 2026-09-03: 앱 상단과 같은 응원 문구를 작은 화면에도 흘린다.
+//   한 바퀴 돌 때마다 다음 문구로 바꾼다(앱 헤더와 같은 목록을 쓴다).
+function _pipCheerPaint(){
+  try{
+    var el = document.getElementById('pipCheerText');
+    if(!el) return;
+    if(!el.textContent){
+      if(typeof _refreshMarqueeList === 'function') _refreshMarqueeList();
+      var msg = (typeof _marqueeList !== 'undefined' && _marqueeList.length)
+              ? _marqueeList[(_marqueeIdx || 0) % _marqueeList.length] : '';
+      el.textContent = (typeof _stripEmoji === 'function') ? _stripEmoji(msg) : String(msg || '');
+    }
+    var tr = document.getElementById('pipCheerTrack');
+    if(tr && !tr._pipBound){
+      tr._pipBound = true;
+      tr.addEventListener('animationiteration', function(){
+        try{
+          if(typeof _refreshMarqueeList === 'function') _refreshMarqueeList();
+          if(typeof _marqueeList === 'undefined' || !_marqueeList.length) return;
+          _marqueeIdx = (_marqueeIdx || 0) + 1;
+          var m2 = _marqueeList[_marqueeIdx % _marqueeList.length] || '';
+          el.textContent = (typeof _stripEmoji === 'function') ? _stripEmoji(m2) : String(m2);
+        }catch(e){}
+      });
+    }
+  }catch(e){}
+}
+window._pipCheerPaint = _pipCheerPaint;
 
 function _pipPaint(){
   try{
     var el = document.getElementById('pipView');
     if(!el || el.style.display === 'none') return;
     var d = _pipData();
-    var R = document.getElementById('pipRoute');
+    var esc = function(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+    var st = _pipStations();
+    var R = document.getElementById('pipStn');
     var m = document.getElementById('pipMin');
     var a = document.getElementById('pipArr');
-    var head = (d.from || '내 위치') + ' → ' + (d.dest || '목적지');
-    if(d.cur && d.cur !== d.from) head += '  (현재 ' + d.cur + ')';
-    if(R) R.textContent = head;
-    if(m) m.textContent = (d.min != null) ? ('소요시간 ' + _pipMinText(d.min)) : '안내 중';
-    if(a) a.textContent = (d.arr ? ('도착예정 ' + d.arr + ' · ') : '') + _pipMood(d.min);
+
+    // 이전역(흐리게) – 현재역(진하게) – 다음역(흐리게)
+    if(R){
+      var dim = 'color:#8e8e96;font-weight:600;';
+      var on  = 'color:#fff;font-weight:900;';
+      var sep = '<span style="color:#5a5a62;margin:0 6px;">–</span>';
+      var cur = st.cur || d.cur || (d.from || '이동 중');
+      R.innerHTML = (st.prev ? '<span style="' + dim + '">' + esc(st.prev) + '</span>' + sep : '')
+                  + '<span style="' + on + '">' + esc(cur) + '</span>'
+                  + (st.next ? sep + '<span style="' + dim + '">' + esc(st.next) + '</span>' : '');
+    }
+    window._pipPaintAt = Date.now();
+    if(m) m.textContent = '예상 소요시간: ' + ((d.min != null) ? _pipMinText(d.min) : '-');
+    if(a) a.textContent = '도착 예정시간: ' + (d.arr || '-');
+    _pipCheerPaint();
+    _pipRecoPaint();
   }catch(e){}
 }
 
@@ -30700,6 +30874,50 @@ function _pipPaint(){
 //     이 플래그는 네이티브의 PiP 전환/복귀 통지(_pipShow/_pipHide)로만 바뀐다.
 // 네이티브가 'PiP 로 들어갔다/나왔다'를 알려 줄 때 부르는 자리.
 // 표시 여부는 감시 루프가 정하므로 여기서는 상태만 바꾸고 즉시 한 번 맞춘다.
+// ★ 2026-09-03: 도착 10분 전 추천을 작은 화면 아래에 붙인다.
+//   알림으로만 보내면 PiP 를 보고 있을 때 놓친다. 화면이 아래로 늘어나며 버튼까지 보여 준다.
+var _PIP_RECO_TTL = 20*60*1000;   // 20분이 지나면 내린다
+
+function _pipRecoSet(title, body, buttons){
+  try{
+    window._pipReco = { title: title || '', body: body || '', btns: buttons || [], at: Date.now() };
+    if(typeof _pipTick === 'function') _pipTick();
+  }catch(e){}
+}
+window._pipRecoSet = _pipRecoSet;
+function _pipRecoClear(){ try{ window._pipReco = null; }catch(e){} }
+window._pipRecoClear = _pipRecoClear;
+
+function _pipRecoPaint(){
+  var box = document.getElementById('pipReco');
+  if(!box) return;
+  var r = window._pipReco;
+  if(r && r.at && (Date.now() - r.at) > _PIP_RECO_TTL){ window._pipReco = null; r = null; }
+  if(!r){ box.style.display = 'none'; box.innerHTML = ''; return; }
+
+  var esc = function(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                                                     .replace(/"/g,'&quot;'); };
+  var html = '<div style="font-size:min(4.6vw,15px);font-weight:800;line-height:1.3;margin-bottom:min(0.8vh,5px);">'
+           + esc(r.title) + '</div>';
+  if(r.body){
+    html += '<div style="font-size:min(3.9vw,13px);color:#c6c6cc;line-height:1.4;margin-bottom:min(1.1vh,7px);'
+          + 'white-space:pre-line;">' + esc(r.body) + '</div>';
+  }
+  if(r.btns && r.btns.length){
+    html += '<div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap;">';
+    r.btns.forEach(function(b){
+      html += '<button onclick="' + esc(b.call) + '" style="padding:min(1.2vh,8px) min(3.5vw,14px);'
+            + 'border-radius:999px;border:none;cursor:pointer;font-family:inherit;'
+            + 'font-size:min(3.9vw,13px);font-weight:800;background:' + (b.color || '#ffd60a') + ';'
+            + 'color:' + (b.fg || '#141416') + ';">' + esc(b.label) + '</button>';
+    });
+    html += '</div>';
+  }
+  box.innerHTML = html;
+  box.style.display = 'block';
+}
+window._pipRecoPaint = _pipRecoPaint;
+
 function _pipShow(){
   try{ window._pipInPip = true;  _pipTick(); }catch(e){}
 }
