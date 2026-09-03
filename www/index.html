@@ -7977,12 +7977,18 @@ window._hideRouteLoading = _hideRouteLoading;
         window._favSearchStart = start;
         if(first) window._favToastKey = null;
         // ★ 2026-09-03: 경로 엔진이 보내 준 진단을 보관한다(설정>진단에서 확인)
+        //   ※ _cd 는 앱이 조립한 껍데기라 엔진 정보가 없다. 원본 응답(results)에서 읽는다.
         try{
+          var _rr = null;
+          (results || []).forEach(function(r){
+            if(!_rr && r && (r.engineVersion || r.busDiag || r.stopsAllowed != null)) _rr = r;
+          });
+          if(!_rr) _rr = (results || [])[0] || {};
           window._routeDiag = {
-            v: _cd.engineVersion || '(구버전)',
-            stopsAllowed: _cd.stopsAllowed,
-            busDiag: _cd.busDiag,
-            rtwApplied: _cd.rtwApplied,
+            v: _rr.engineVersion || '(구버전)',
+            stopsAllowed: _rr.stopsAllowed,
+            busDiag: _rr.busDiag,
+            rtwApplied: _rr.rtwApplied,
             at: Date.now()
           };
         }catch(e){}
