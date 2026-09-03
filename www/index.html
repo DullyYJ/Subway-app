@@ -3715,8 +3715,8 @@ function _renderHomeConductorBrief(fromName, toName, hour, congPct, serverMsg){
         // (실시간 추적 모드) 도착 예정 시각 — 남은시간 갱신에 따라 실시간 업데이트
         try {
           // ★ 타임라인과 같은 값을 쓴다(없으면 종전처럼 계산)
-          var _am = (typeof _routeArriveMs==='function') ? _routeArriveMs() : null;
-          var arr=new Date(_am || (Date.now()+mins*60000)); var pad2=function(n){return(n<10?'0':'')+n;};
+          var _ep = (typeof _etaPair==='function') ? _etaPair() : null;
+          var arr=new Date((_ep && _ep.arrMs) || (Date.now()+mins*60000)); var pad2=function(n){return(n<10?'0':'')+n;};
           ps.push('<span id="homeAiArr">도착은 <b>' + pad2(arr.getHours()) + ':' + pad2(arr.getMinutes()) + '</b>경으로 예상됩니다.</span>');
         } catch(e){}
       }
@@ -8697,6 +8697,29 @@ function _routeArriveMs(){
 }
 window._routeArriveMs = _routeArriveMs;
 
+// ★ 2026-09-03: 남은시간과 도착시각을 한 함수에서 만든다.
+//   증상: 카드는 '남은시간 28분'인데 도착은 07:21 로, 두 값이 20분 어긋났다.
+//   원인: 남은시간은 _routeRemainingMin(), 도착시각은 _routeArriveMs() 로
+//        서로 다른 근거에서 따로 계산됐다.
+//   → 도착시각이 있으면 남은시간을 거기서 역산한다. 두 값이 구조적으로 어긋날 수 없다.
+//     화면·PiP·알림이 모두 이 함수를 쓴다.
+function _etaPair(){
+  var out = { arrMs: null, rem: null };
+  try{
+    var am = (typeof _routeArriveMs === 'function') ? _routeArriveMs() : null;
+    var rm = (typeof _routeRemainingMin === 'function') ? _routeRemainingMin() : null;
+    if(am){
+      out.arrMs = am;
+      out.rem   = Math.max(0, Math.round((am - Date.now()) / 60000));   // 도착시각이 기준
+    } else if(rm != null){
+      out.rem   = rm;
+      out.arrMs = Date.now() + rm * 60000;
+    }
+  }catch(e){}
+  return out;
+}
+window._etaPair = _etaPair;
+
 function _highlightRouteTab(type){
   ['fast','less','sub','bus'].forEach(function(t) {
     var btn = document.getElementById('routeTab' + t.charAt(0).toUpperCase() + t.slice(1));
@@ -11564,6 +11587,11 @@ function _syncHomeBriefRemaining(rem){
   // ★ 전체 재렌더 대신 제자리 갱신: 출발역 표기 고정 + 깜박임 방지
   try {
     var titleEl = document.getElementById('homeAiTitle');
+    // ★ 도착시각이 있으면 남은시간도 거기서 역산해 둘을 맞춘다
+    try{
+      var _ep0 = (typeof _etaPair==='function') ? _etaPair() : null;
+      if(_ep0 && _ep0.rem != null) rem = _ep0.rem;
+    }catch(e0){}
     if(titleEl && rem != null && rem >= 0){
       var _fN = window._journeyFromFixed || (typeof _transitResultStart!=='undefined' && _transitResultStart && _transitResultStart.name) || '';
       var _tN = (typeof _transitResultDest!=='undefined' && _transitResultDest && _transitResultDest.name) || '';
@@ -11576,8 +11604,8 @@ function _syncHomeBriefRemaining(rem){
     var arrEl = document.getElementById('homeAiArr');
     if(arrEl && rem != null && rem >= 0){
       // ★ 갱신할 때도 타임라인 기준을 우선한다
-      var _am2 = (typeof _routeArriveMs==='function') ? _routeArriveMs() : null;
-      var arr = new Date(_am2 || (Date.now() + rem*60000));
+      var _ep2 = (typeof _etaPair==='function') ? _etaPair() : null;
+      var arr = new Date((_ep2 && _ep2.arrMs) || (Date.now() + rem*60000));
       var pad = function(n){ return (n<10?'0':'')+n; };
       arrEl.innerHTML = '도착은 <b>' + pad(arr.getHours()) + ':' + pad(arr.getMinutes()) + '</b>경으로 예상됩니다.';
     }
@@ -16316,7 +16344,7 @@ window.addEventListener('unhandledrejection', function(e) {
       <!-- ★ 실시간 열차위치 진단 -->
       <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-top:12px;">
         <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">🚆 실시간 열차위치 진단</div>
-        <p style="font-size:12px;color:var(--sub);margin-bottom:12px;"><b>열차위치</b>(1순위): 1~9호선 · 경의중앙 · 수인분당 · 공항철도 · 경춘 · 신분당<br><b>도착정보</b>(2순위): 위 노선 + 서해 · 경강 · 신림 · 우이신설<br><b>미제공</b>: 인천1·2호선, 김포골드라인, 의정부경전철, 에버라인, GTX-A → 시각표+GPS+연착추정<br>1차=열차위치 · 2차=역 도착정보 (각 10~15초)</p>
+        <p style="font-size:12px;color:var(--sub);margin-bottom:12px;"><b>열차위치</b>: 1~9호선 · 경의중앙 · 수인분당 · 공항철도 · 경춘 · 신분당 · <b>GTX-A</b><br><b>도착정보</b>: 위 노선 + 경강 · 서해 · 신림 · 우이신설<br><b>미제공</b>: 인천1·2호선, 김포골드라인, 의정부경전철, 에버라인 → 시각표+GPS+연착추정<br>1차=열차위치 · 2차=역 도착정보 (각 10~15초)</p>
         <div style="display:flex;gap:8px;margin-bottom:10px;">
           <button onclick="_rtProbeUI2()" style="flex:1;padding:11px;border-radius:10px;border:none;cursor:pointer;font-size:13px;font-weight:800;background:var(--gold);color:#121214;font-family:inherit;">진단 실행</button>
           <button onclick="_rtProbeReset()" style="padding:11px 14px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;font-size:13px;font-weight:700;background:transparent;color:var(--sub);font-family:inherit;">초기화</button>
@@ -21430,6 +21458,64 @@ function _ttGridFor(lineName){
 }
 
 // ── 미보유 노선: 기점격자 + 실측 역간시간 누적 오프셋 → 승차역 다음열차 ──
+// ★ 2026-09-03: 시각표 없는 역의 시각을 '이웃 역에서 평행 이동'으로 만든다.
+//   증상: 아라역(인천1호선 검단연장 신설역)처럼 공식 시각표에 없는 역은
+//        경로를 바꿀 때마다 출발 시각이 달라졌다(06:13 → 06:11 → …).
+//   원인: 폴백인 _genNextDep 이 방향에 따라 기점을 바꿔가며(상행이면 종점부터)
+//        누적 시간을 더하고, 실측 역간시간이 없으면 120초를 가정한다.
+//        같은 역이라도 경로·방향이 달라지면 값이 흔들릴 수밖에 없다.
+//   → 같은 노선에서 공식 시각표를 가진 '가장 가까운 역'을 찾아,
+//     그 역의 시각표를 실측 역간시간만큼 앞뒤로 옮겨 쓴다.
+//     기준이 노선 시각표 하나로 고정되므로 경로가 달라져도 값이 변하지 않는다.
+var _TT_DERIVED_CACHE = {};
+var _TT_DERIVE_MAX = 8;      // 이웃을 몇 역까지 찾아볼지
+
+function _ttDerivedTimes(lineName, stnNm, dk, isHol){
+  try{
+    var nm = _ttNm(stnNm);
+    var ck = lineName + '|' + nm + '|' + dk + '|' + (isHol ? 'H' : 'D');
+    if(_TT_DERIVED_CACHE[ck] !== undefined) return _TT_DERIVED_CACHE[ck];
+
+    var ord = (typeof _ttOrderOf === 'function') ? _ttOrderOf(lineName) : null;
+    if(!ord || ord.length < 2){ _TT_DERIVED_CACHE[ck] = null; return null; }
+    var i = ord.indexOf(nm);
+    if(i < 0){ _TT_DERIVED_CACHE[ck] = null; return null; }
+
+    // 가장 가까운 '시각표 보유' 역 찾기 (양방향으로 한 칸씩 넓혀 간다)
+    var j = -1;
+    for(var d = 1; d <= _TT_DERIVE_MAX && j < 0; d++){
+      if(i - d >= 0 && _ttOfficialTimes(lineName, ord[i-d], dk, isHol)) j = i - d;
+      else if(i + d < ord.length && _ttOfficialTimes(lineName, ord[i+d], dk, isHol)) j = i + d;
+    }
+    if(j < 0){ _TT_DERIVED_CACHE[ck] = null; return null; }
+
+    var base = _ttOfficialTimes(lineName, ord[j], dk, isHol);
+    if(!base || !base.length){ _TT_DERIVED_CACHE[ck] = null; return null; }
+
+    // 두 역 사이 실측 소요시간(초)
+    var lo = Math.min(i, j), hi = Math.max(i, j), sec = 0;
+    for(var k = lo; k < hi; k++){
+      var v = (typeof _realSeg === 'function') ? _realSeg(lineName, ord[k], ord[k+1]) : null;
+      sec += (v != null ? v : 120);
+    }
+    var shift = Math.round(sec / 60);
+
+    // 진행 방향에 따라 부호가 갈린다.
+    //   하행(ord 증가 방향): 기준역이 뒤(j>i)면 이 역이 먼저 → 빼기
+    //   상행(ord 감소 방향): 기준역이 앞(j<i)면 이 역이 먼저 → 빼기
+    var down = (dk !== '상');
+    var earlier = down ? (j > i) : (j < i);
+    var delta = earlier ? -shift : shift;
+
+    var out = base.map(function(t){ return t + delta; })
+                  .filter(function(t){ return t >= 0; })
+                  .sort(function(a, b){ return a - b; });
+    _TT_DERIVED_CACHE[ck] = out.length ? out : null;
+    return _TT_DERIVED_CACHE[ck];
+  }catch(e){ return null; }
+}
+window._ttDerivedTimes = _ttDerivedTimes;
+
 function _genNextDep(lineName, stops, baseMin){
   var grid = _ttGridFor(lineName);
   if(!grid || !grid.length) return null;
@@ -21481,7 +21567,16 @@ function _ttNextDepForSeg(sg, baseMin){
     var v = getNextDepartureMins(line, stn, dir, baseMin);
     if(v != null) return v;
   }
-  // ③ 생성 시각표(기점 배차 + 실측 역간시간)
+  // ③ 파생 시각표 — 공식 시각표를 가진 이웃 역에서 평행 이동
+  //    (신설역·연장구간처럼 시각표에 아직 없는 역을 위해)
+  dir = dir || _ttSegDir(line, sg.stops, isHol) || '하행';
+  var dv = _ttDerivedTimes(line, stn, (dir === '상행') ? '상' : '하', isHol);
+  if(dv && dv.length){
+    for(var di=0; di<dv.length; di++){ if(dv[di] >= baseMin) return dv[di]; }
+    return dv[0] + 1440;
+  }
+
+  // ④ 생성 시각표(기점 배차 + 실측 역간시간)
   return _genNextDep(line, sg.stops, baseMin);
 }
 window._ttNextDepForSeg = _ttNextDepForSeg;
@@ -24779,9 +24874,13 @@ var _notifId = 1000;
 //   commute_brief= 출퇴근 브리핑 알림(설정에서 켠 경우만 발생) — 탭하면 팝업+경로탐색 버튼
 //   fg_service   = 이동 중 상주 알림(현재역 · 남은시간) — 잠금화면/알림창에서 확인
 //   arrive/near_arrive/transfer = 하차·환승 임박 (2정거장·1정거장·도착에서만)
+// ★ 2026-09-03: 작은 요약 화면(PiP)이 진행 상황을 계속 보여주므로,
+//   같은 내용을 알림으로 또 보낼 이유가 없다. 환승·도착 임박 알림이
+//   같은 문구로 여러 번 쌓이던 문제도 이걸로 사라진다.
+//   남기는 것: 도착 10분 전 추천(커피·야식) · 출퇴근 브리핑 · 상주 안내
 var _NOTIF_ALLOW = { arrive_reco:1, commute_brief:1, fg_service:1,
-                     arrive:1, near_arrive:1, near_arrive2:1,
-                     transfer:1, transfer2:1, arrival:1 };
+                     arrive:0, near_arrive:0, near_arrive2:0,
+                     transfer:0, transfer2:0, arrival:0 };
 function _notifAllowed(type){ return !!_NOTIF_ALLOW[String(type||'')]; }
 window._notifAllowed = _notifAllowed;
 
@@ -30332,15 +30431,41 @@ window._pipTripSet = _pipTripSet;
 function _pipTripClear(){ try{ window._pipTrip = null; }catch(e){} }
 window._pipTripClear = _pipTripClear;
 
-// 안내할 경로가 있나 (없으면 띄우지 않는다)
+// ★ 2026-09-03: 여정이 아직 살아 있는지 매번 확인한다.
+//   증상: 경로를 취소하거나 도착한 뒤에도 작은 화면이 계속 떠 있었다.
+//   원인: 여정 스냅샷을 '정리 함수가 불릴 때만' 지웠다. 경로 카드의 X 버튼처럼
+//        그 함수를 안 거치는 경로가 있으면 스냅샷이 남는다.
+//   → 이벤트에 기대지 않고, 물어볼 때마다 아래 네 가지를 검사해 스스로 정리한다.
 function _pipHasRoute(){
   try{
     if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return false;  // 예상 시각 모드
     if(window._metroRouteMode === true) return false;                            // 노선도 미리보기
+
     var trip = window._pipTrip;
     if(!trip || !trip.to) return false;                                          // 확정된 여정만
-    // 화면에 설정된 목적지가 이 여정과 다르면 지난 여정이다
-    if(typeof S !== 'undefined' && S && S.dest && S.dest.name && !_stnSame(S.dest.name, trip.to)) return false;
+
+    // ① 안내할 경로가 통째로 사라졌다 = 취소됨
+    var hasPath = false;
+    try{
+      if(typeof S !== 'undefined' && S && S.route && S.route.path && S.route.path.length) hasPath = true;
+      if(!hasPath && typeof _transitNodeData !== 'undefined' && _transitNodeData && _transitNodeData.length) hasPath = true;
+    }catch(e1){}
+    if(!hasPath){ _pipTripClear(); return false; }
+
+    // ② 목적지가 바뀌었다 = 지난 여정
+    if(typeof S !== 'undefined' && S && S.dest && S.dest.name && !_stnSame(S.dest.name, trip.to)){
+      _pipTripClear(); return false;
+    }
+
+    // ③ 도착 예정 시각이 5분 넘게 지났다 = 이미 끝난 여정
+    try{
+      var ep = (typeof _etaPair === 'function') ? _etaPair() : null;
+      if(ep && ep.arrMs && (Date.now() - ep.arrMs) > 5*60000){ _pipTripClear(); return false; }
+    }catch(e2){}
+
+    // ④ 안내를 시작한 지 6시간이 넘었다 = 잊힌 여정
+    if(trip.at && (Date.now() - trip.at) > 6*3600000){ _pipTripClear(); return false; }
+
     return true;
   }catch(e){}
   return false;
@@ -30375,7 +30500,10 @@ function _pipData(){
       out.dest = out.dest || r.dest || '';
       out.min  = (r.min != null) ? r.min : null;
     }
-    var ms = (typeof _routeArriveMs === 'function') ? _routeArriveMs() : null;
+    // ★ 화면과 같은 함수를 쓴다 — 앱 카드와 작은 화면의 숫자가 어긋나지 않게
+    var _ep = (typeof _etaPair === 'function') ? _etaPair() : null;
+    var ms = (_ep && _ep.arrMs) || null;
+    if(_ep && _ep.rem != null) out.min = _ep.rem;
     if(!ms && out.min != null) ms = Date.now() + out.min*60000;
     if(ms){
       var d = new Date(ms), p2 = function(n){ return (n<10?'0':'') + n; };
@@ -30406,7 +30534,9 @@ function _pipEl(){
       '<div id="pipRoute" style="font-size:min(5.2vw,17px);font-weight:800;line-height:1.2;' + NOWRAP + '"></div>'
     + '<div id="pipMin"   style="font-size:min(9vw,30px);font-weight:900;line-height:1.15;color:#ffd60a;' + NOWRAP + '"></div>'
     + '<div id="pipArr"   style="font-size:min(4.4vw,15px);font-weight:600;color:#d8d8dd;line-height:1.2;' + NOWRAP + '"></div>';
-  el.addEventListener('click', function(){ _pipHide(); });
+  // ★ 2026-09-03: 탭하면 숨기던 동작을 뺐다.
+  //   PiP 창을 탭하는 건 '앱으로 돌아가고 싶다'는 뜻이라 안드로이드가 알아서 처리한다.
+  //   여기서 숨겨 버리면 작은 창에 앱 화면이 비쳐 고장난 것처럼 보인다.
   document.body.appendChild(el);
   return el;
 }
@@ -30432,33 +30562,48 @@ function _pipPaint(){
 //         그 뒤로는 크기가 그대로라 다시 켜 줄 사건이 없었다.
 //   → '지금 PiP 안인가'를 플래그(_pipInPip)로 붙들고, 1초마다 다시 확인해 되살린다.
 //     이 플래그는 네이티브의 PiP 전환/복귀 통지(_pipShow/_pipHide)로만 바뀐다.
+// 네이티브가 'PiP 로 들어갔다/나왔다'를 알려 줄 때 부르는 자리.
+// 표시 여부는 감시 루프가 정하므로 여기서는 상태만 바꾸고 즉시 한 번 맞춘다.
 function _pipShow(){
-  try{
-    window._pipInPip = true;
-    var el = _pipEl();
-    el.style.display = 'flex';
-    _pipPaint();
-    if(!_pipTimer) _pipTimer = setInterval(_pipTick, 1000);
-  }catch(e){}
+  try{ window._pipInPip = true;  _pipTick(); }catch(e){}
 }
 function _pipHide(){
   try{
     window._pipInPip = false;
     var el = document.getElementById('pipView');
     if(el) el.style.display = 'none';
-    if(_pipTimer){ clearInterval(_pipTimer); _pipTimer = null; }
   }catch(e){}
 }
 
-// 1초마다: 값 갱신 + 숨겨졌으면 되살리기
+// ★ 2026-09-03: 이벤트를 놓쳐도 스스로 제자리를 찾는 감시 루프.
+//   증상: 화면을 껐다 켜면 작은 창에 앱 화면이 그대로 보였다.
+//   원인: 보여줄지 말지를 '사건이 올 때만' 정했다. 화면이 꺼진 동안 타이머가 멈추거나
+//        복귀 통지를 놓치면, 다시 켜 줄 계기가 없어 그 상태로 굳는다.
+//   → 1초마다 '지금 어때야 하는가'를 계산해서 화면을 거기에 맞춘다.
+//     어떤 사건을 놓쳐도 늦어도 1초 뒤 제자리로 돌아온다.
+function _pipWant(){
+  try{
+    var small = (window.innerHeight <= 340 && window.innerWidth <= 520);
+    if(!(window._pipInPip || small)) return false;      // 작은 창도 아니고 PiP도 아님
+    return !!(_pipEnabled() && _pipHasRoute());
+  }catch(e){ return false; }
+}
+
 function _pipTick(){
   try{
-    if(!window._pipInPip) return;
     var el = document.getElementById('pipView');
-    if(el && el.style.display === 'none') el.style.display = 'flex';   // 화면 껐다 켠 뒤 복구
-    _pipPaint();
+    var shown = !!(el && el.style.display !== 'none');
+    var want  = _pipWant();
+    if(want){
+      if(!shown){ var e2 = _pipEl(); e2.style.display = 'flex'; }
+      _pipPaint();
+    } else if(shown){
+      if(el) el.style.display = 'none';                 // 취소·도착·복귀 — 어느 쪽이든 내린다
+    }
   }catch(e){}
 }
+// 감시 루프는 항상 돈다(가벼운 검사뿐이라 부담이 없다)
+try{ if(!window._pipWatchTimer) window._pipWatchTimer = setInterval(_pipTick, 1000); }catch(e){}
 try{
   document.addEventListener('visibilitychange', function(){
     if(!document.hidden && window._pipInPip) _pipTick();
@@ -30511,17 +30656,8 @@ try{ setInterval(_pipNativeSync, 10000); setTimeout(_pipNativeSync, 2000); }catc
 // ★ 창 크기로 PiP 여부를 판단한다.
 //   안드로이드가 PiP로 만들면 웹뷰가 작아진다. 그때만 요약 화면을 남긴다.
 function _pipOnResize(){
-  try{
-    var small = (window.innerHeight <= 340 && window.innerWidth <= 520);
-    if(small){
-      if(_pipEnabled() && _pipHasRoute()) _pipShow();
-      return;
-    }
-    // ★ 네이티브가 'PiP 안'이라고 알려 준 상태면 크기만 보고 끄지 않는다.
-    //   (화면을 껐다 켤 때 큰 크기로 잠깐 튀는 경우가 있다)
-    if(window._pipInPip && _pipNativeAvailable()) return;
-    _pipHide();
-  }catch(e){}
+  // 크기가 바뀌면 즉시 한 번 맞춘다(나머지는 감시 루프가 이어서 본다)
+  try{ _pipTick(); }catch(e){}
 }
 try{ window.addEventListener('resize', _pipOnResize); }catch(e){}
 
