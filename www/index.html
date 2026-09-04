@@ -6157,8 +6157,19 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
     return {type:tr.type||3, name:tr.name||'',
             dur:sec.duration||0, dist:sec.distance||0,
             waitSec:(sec.waitSec!=null ? sec.waitSec : null),
+            arriveSec:(sec.arriveSec!=null ? sec.arriveSec : null),
+            startSec:(sec.startSec!=null ? sec.startSec : null),
+            endSec:(sec.endSec!=null ? sec.endSec : null),
             stops:stops.slice()};
   });
+
+  // ★ 2026-09-04: 엔진이 구간별 시각을 직접 준 경우에만 true.
+  //   이때 앱은 시간 계산에 손대지 않고 그리기만 한다.
+  //   구버전 워커를 쓰는 동안은 false 가 되어 기존 보정이 그대로 동작한다.
+  var _engTimes = segs.length > 0 && segs.every(function(sg){
+    return sg.startSec != null && sg.endSec != null && isFinite(sg.startSec) && isFinite(sg.endSec);
+  });
+  window._engineHasTimes = _engTimes;
 
   for(var i=1;i<segs.length;i++){
     var c=segs[i], p=segs[i-1];
@@ -6175,14 +6186,19 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
   //   → 버스 구간의 경유 정류장 중 '다음 승차역에 가장 가까운 곳'을 찾아,
   //     의미 있게 짧아질 때만(_ALIGHT_GAIN_M 이상) 그 정류장으로 하차를 앞당긴다.
   //   구간 자체를 지우지 않으므로 기존 표시·계산은 그대로 유지된다.
-  try{ _optimizeAlight(segs); }catch(e){}
+  //   ★ 2026-09-04: 엔진이 시각을 준 경우엔 엔진도 같은 일을 이미 했다.
+  //   여기서 또 줄이면 구간 길이와 엔진 시각이 서로 어긋난다.
+  if(!_engTimes){ try{ _optimizeAlight(segs); }catch(e){} }
 
   // ★ 버스 구간 소요시간 실측 검증 — 시각을 쌓기 전에 바로잡는다.
   //   워커(route-v2)가 준 sectionTime 이 정류장 좌표로 잰 거리와 크게 어긋나면
   //   (예: 한진→테크노파크 순환43 이 카카오 21분인데 45분으로 옴)
   //   실측 거리 기준으로 다시 계산한다. 정류장 중복 제거 뒤에 해야 정확하다.
+  //   ★ 2026-09-04: 이 검증은 route-v2 워커(fixBusLegs)로 옮겼다.
+  //   엔진에서 고쳐야 sectionTime·총시간·순위가 함께 맞는다.
+  //   여기는 구버전 워커용 폴백으로만 남긴다.
   window._busFixLog = [];
-  for(var bi=0;bi<segs.length;bi++){
+  for(var bi=0; !_engTimes && bi<segs.length; bi++){
     var _bs = segs[bi];
     if(_bs.type !== 2) continue;
     // ★ 보정 여부와 무관하게 전 구간을 기록한다(전수조사용)
@@ -6232,7 +6248,8 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
   // ── 포인트 목록 ──
   var allStops=[]; segs.forEach(function(sg){ if(sg.type!==3) allStops=allStops.concat(sg.stops); });
   var totalCnt=allStops.length;
-  var cumMs=_htlBaseMs();   // ★ 이번 탐색의 단일 시간축(탭을 바꿔도 같다)
+  var _base0=_htlBaseMs();  // ★ 이번 탐색의 단일 시간축(탭을 바꿔도 같다)
+  var cumMs=_base0;
   // ★ 지하철 세그먼트: 승차역 도착시각 기준 '다음 열차 출발시각'까지 대기 반영(Bug2)
   //    시각표 미보유·막차 지남·대기 30분 초과 시에는 기존 방식(즉시 탑승) 유지
   // 엔진이 대기시간을 구간 시간에 이미 포함해 주므로 앱이 따로 더할 것이 없다
@@ -6243,7 +6260,8 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
     // ★ 승차역(첫 대중교통 구간)에 '실제로 도착하는 시각' — 대기 반영 전 값.
     //   이후 모든 재동기화가 이 값을 기준으로 다음 열차를 찾는다(단일 시간축).
     if(sg.type!==3 && _boardArriveMin===null){
-      var _d0=new Date(t); _boardArriveMin=_d0.getHours()*60+_d0.getMinutes()+_d0.getSeconds()/60;
+      var _at = (_engTimes && sg.arriveSec!=null) ? (_base0 + sg.arriveSec*1000) : t;
+      var _d0=new Date(_at); _boardArriveMin=_d0.getHours()*60+_d0.getMinutes()+_d0.getSeconds()/60;
     }
     // ★ 2026-09-03: 앱에서 출발 시각을 다시 맞추지 않는다.
     //   증상: 12:08 에 탐색했는데 최단시간 탭은 13:13 출발, 최소환승 탭은 12:31 출발로
@@ -6253,6 +6271,15 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
     //        계산 주체가 둘이라 그릴 때마다 다른 값이 나온다.
     //   → 시각은 엔진이 준 구간 시간만 누적해서 만든다. 앱은 그리기만 한다.
 
+    //   ★ 2026-09-04: 엔진이 구간별 시각을 주면 그걸 그대로 쓴다.
+    //   증상: 17:08 에 탐색하면 도보 2분 뒤인 17:10 승차로 나왔는데,
+    //        실제 순혰3은 6분48초 뒤에 온다. 대기가 구간시간 안에 숨어
+    //        있어서 '정류장에 도착하는 시각'을 승차 시각처럼 그렸다.
+    if(_engTimes){
+      t = _base0 + sg.startSec*1000;      // 실제 출발(버스는 대기를 마친 뒤)
+      cumMs = _base0 + sg.endSec*1000;
+      return t;
+    }
     cumMs=t+sg.dur*1000;
     return t;
   });
@@ -9073,6 +9100,11 @@ function _convertSinglePathToRoute(path) {
       // ★ route-v2 워커가 실어 보내는 '승차 대기 초'. sectionTime 안에
       //   이미 들어 있어서, 이걸 모르면 대기시간을 정류장 사이에 나눠 넣게 된다.
       waitSec: (sp.waitSec!=null ? sp.waitSec : null),
+      // ★ 2026-09-04: 엔진이 계산한 구간별 시각(초 오프셋).
+      //   arriveSec=정류장·역 도착, startSec=실제 출발(버스는 대기 포함), endSec=도착
+      arriveSec: (sp.arriveSec!=null ? sp.arriveSec : null),
+      startSec:  (sp.startSec!=null  ? sp.startSec  : null),
+      endSec:    (sp.endSec!=null    ? sp.endSec    : null),
       passStopList: stops.length ? { stationList: stops } : null
     };
   });
@@ -9107,6 +9139,9 @@ function _convertEngineRoutes(engineData) {
         duration: (sp.sectionTime || 0) * 60,
         distance: sp.distance || 0,
         waitSec: (sp.waitSec!=null ? sp.waitSec : null),
+        arriveSec: (sp.arriveSec!=null ? sp.arriveSec : null),
+        startSec:  (sp.startSec!=null  ? sp.startSec  : null),
+        endSec:    (sp.endSec!=null    ? sp.endSec    : null),
         passStopList: stops.length ? { stationList: stops.map(_normStop) } : null
       };
     });
