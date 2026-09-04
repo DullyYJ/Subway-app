@@ -2,8 +2,12 @@ name = "gentle-lab-7e47subway-api"
 main = "worker/index.js"
 compatibility_date = "2024-01-01"
 
+# 뉴스 수집: 매시 정각에 카테고리 하나씩(10개 피드) — 7개가 7시간에 한 바퀴.
+#   한꺼번에 70개를 쏘면 구글 뉴스가 워커 IP를 503으로 막는다(2026-08-25 확인).
+# 정리: 04:20 에 30일 지난 기사 + 오래된 카카오 캐시 삭제.
+#   worker/index.js 의 scheduled 는 cron 이 '20 4 ' 로 시작하면 삭제, 아니면 수집이다.
 [triggers]
-crons = ["0 18 * * *", "* * * * *"]
+crons = ["0 * * * *", "20 4 * * *"]
 
 [[d1_databases]]
 binding = "DB"
