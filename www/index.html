@@ -8269,9 +8269,41 @@ window._applyRealtimeWaits = _applyRealtimeWaits;
 //   엔진은 원래 '배차 평균(busHW/2)'으로 대기를 가정해서, 지금 어떤 차가 먼저 오는지와
 //   무관하게 늘 같은 노선을 골랐다. 출발지 주변 정류장의 실제 도착정보를 넘기면
 //   엔진이 그 값으로 탐색하므로 '순위 보정'이 아니라 최적 경로 자체가 달라진다.
-var _RTW_STOPS   = 3;      // 출발지에서 가까운 정류장 이 개수만 조회
-var _RTW_MAX     = 25;     // URL 길이 보호 — 노선 수 상한
-var _RTW_TIMEOUT = 1500;   // 이 안에 못 모으면 모은 만큼만 보내고 진행 (탐색 지연 최소화)
+// ★ 2026-09-04: 스샷 진단 — 20:59 탐색에 인천e음89 승차가 21:03 으로 나왔는데
+//   실제 그 정류장(89m)의 인천e음89 는 22분50초 뒤였다. 21:03 = 도보1분 + 3분.
+//   3분은 실측이 아니라 엔진의 배차 가정치(BUS_WAIT) 이다.
+//   즉 rtw(실시간 대기)가 아예 안 넘어갔다. 원인 두 가지:
+//   (1) 도착정보 조회가 1.5초를 넘겨 빈 문자열로 진행됐다.
+//   (2) 25개 상한을 '빨리 오는 순'으로 잘라서, 정작 위험한 느린 노선이 먼저 버려졌다.
+//   → 상한을 늘리고, 잘라야 한다면 '느린 노선부터' 남긴다.
+//     느린 노선을 빼면 엔진이 그걸 3분으로 보고 공치로 골라버린다.
+var _RTW_STOPS   = 4;      // 출발지에서 가까운 정류장 이 개수만 조회
+var _RTW_MAX     = 60;     // URL 길이 보호 — 노선 수 상한
+var _RTW_TIMEOUT = 3000;   // 이 안에 못 모으면 모은 만큼만 보내고 진행
+var _RTW_CACHE_MS = 90000; // 다른 화면에서 받아둔 도착정보를 이 시간까지 재사용
+
+// 앱 어디서든 버스 도착정보를 받으면 여기에 쌓인다(노선번호 → 남은초).
+// 노선도 버스탭을 보고 바로 경로탐색하는 경우가 많아, 대개 녹은 값이 이미 있다.
+window._rtwCache = window._rtwCache || {};
+function _rtwNote(rows){
+  try{
+    var now = Date.now();
+    (rows || []).forEach(function(r){
+      var no = String((r && r.routeno) || '').trim();
+      var t  = parseInt(r && r.arrtime, 10);
+      if(!no || !isFinite(t) || t < 0 || t > 3600) return;
+      var cur = window._rtwCache[no];
+      if(!cur || cur.at < now - _RTW_CACHE_MS || t < _rtwAged(cur, now)) window._rtwCache[no] = { sec: t, at: now };
+    });
+  }catch(e){}
+}
+// 쌓아둔 값은 시간이 지난 만큼 줄여서 쓴다
+function _rtwAged(rec, now){
+  if(!rec) return null;
+  var left = rec.sec - Math.round(((now || Date.now()) - rec.at) / 1000);
+  return left;
+}
+window._rtwNote = _rtwNote;
 // ★ 2026-09-03: 노선도 버스 탭에 보이는 '주변 정류장'을 경로 엔진에 넘긴다.
 //   증상: 목록에 없는 정류장에서 버스를 타는 경로가 나왔다.
 //   원인: 엔진이 승차 후보를 반경(900→1600→2500m)만으로 뽑아, 앱 화면과 어긋났다.
@@ -8299,9 +8331,22 @@ window._stopsParam = _stopsParam;
 
 function _collectRTW(lat, lng, cb){
   var done = false;
-  var finish = function(str){ if(done) return; done = true; cb(str || ''); };
+  var finish = function(str){
+    if(done) return; done = true;
+    try{ window._rtwLast = { str: str || '', n: (str ? str.split(',').length : 0), at: Date.now() }; }catch(e){}
+    cb(str || '');
+  };
   var timer = setTimeout(function(){ finish(_rtwBuild(bag)); }, _RTW_TIMEOUT);
   var bag = {};   // 노선번호 → 가장 빠른 도착(초)
+
+  // ★ 2026-09-04: 먼저 캐시로 채운다. 조회가 늦어도 번 값을 보내지 않기 위해서.
+  try{
+    var _now = Date.now();
+    for(var _k in window._rtwCache){
+      var _left = _rtwAged(window._rtwCache[_k], _now);
+      if(_left != null && _left >= 0 && _left <= 3600 && window._rtwCache[_k].at > _now - _RTW_CACHE_MS) bag[_k] = _left;
+    }
+  }catch(e){}
 
   try{
     if(lat == null || lng == null || typeof _fetchNearStops !== 'function'){ clearTimeout(timer); finish(''); return; }
@@ -8315,6 +8360,7 @@ function _collectRTW(lat, lng, cb){
         var after = function(){ if(--pending <= 0){ clearTimeout(timer); finish(_rtwBuild(bag)); } };
         if(typeof _busArrFetchMerged !== 'function'){ after(); return; }
         _busArrFetchMerged(cc, st).then(function(rows){
+          _rtwNote(rows);
           (rows || []).forEach(function(r){
             var no = String(r.routeno || '').trim();
             var t  = parseInt(r.arrtime, 10);
@@ -8331,7 +8377,9 @@ function _rtwBuild(bag){
   try{
     var keys = Object.keys(bag || {});
     if(!keys.length) return '';
-    keys.sort(function(a,b){ return bag[a] - bag[b]; });      // 빨리 오는 순
+    // ★ 느린 노선부터 남긴다 — 빠른 노선을 빼면 엔진이 조금 손해볼 뿐이지만,
+    //   느린 노선을 빼면 엔진이 그걸 '3분 뒤 도착'으로 보고 공치로 골라버린다.
+    keys.sort(function(a,b){ return bag[b] - bag[a]; });
     return keys.slice(0, _RTW_MAX).map(function(k){ return k + ':' + Math.round(bag[k]); }).join(',');
   }catch(e){ return ''; }
 }
@@ -15152,6 +15200,19 @@ function _busArrFetchMerged(cityCode, stop){
     });
   });
 }
+// ★ 2026-09-04: 앱 어디서든 받은 도착정보를 rtw 캐시에 쌓아둔다.
+//   노선도 버스탭을 보고 바로 경로탐색하는 흐름이라, 그때 이미 녹은 값이 있다.
+//   그러면 탐색 순간 도착정보 조회가 늦어도 실시간 대기를 쓸 수 있다.
+(function(){
+  try{
+    var _origBusArrMerged = _busArrFetchMerged;
+    _busArrFetchMerged = function(cityCode, stop){
+      var pr = _origBusArrMerged(cityCode, stop);
+      try{ return pr.then(function(rows){ try{ _rtwNote(rows); }catch(e){} return rows; }); }
+      catch(e){ return pr; }
+    };
+  }catch(e){}
+})();
 window._busArrFetchMerged = _busArrFetchMerged;
 
 // 도착행이 하나도 없을 때 안내 행을 반드시 남긴다(빈 카드 방지)
