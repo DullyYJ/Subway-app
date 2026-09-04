@@ -6011,6 +6011,18 @@ window._busAlightOptimize = _busAlightOptimize;
 function _segStopOffsets(sg){
   var stops = (sg && sg.stops) || [];
   var n = stops.length;
+
+  // ★ 2026-09-04: 엔진이 정류장별 시각을 준 경우 앱은 그걸 그대로 쓴다.
+  //   이 아래로 이어지는 거리 배분·속도 보정은 엔진 값이 없을 때만 쓴다.
+  //   (정류장 중복 제거로 앞이 잘렸을 수 있어 뒤에서부터 맞춘다)
+  if(sg && Array.isArray(sg.stopSec) && sg.stopSec.length && sg.startSec != null){
+    var _ss = sg.stopSec;
+    if(_ss.length > n) _ss = _ss.slice(_ss.length - n);
+    if(_ss.length === n || n === 0){
+      return _ss.map(function(v){ return Math.max(0, v - sg.startSec); });
+    }
+  }
+
   if(n < 2) return [0];
   var dur = sg.dur || 0;
   var i, off, c;
@@ -6160,16 +6172,31 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
             arriveSec:(sec.arriveSec!=null ? sec.arriveSec : null),
             startSec:(sec.startSec!=null ? sec.startSec : null),
             endSec:(sec.endSec!=null ? sec.endSec : null),
+            stopSec:(Array.isArray(sec.stopSec) ? sec.stopSec.slice() : null),
             stops:stops.slice()};
   });
 
-  // ★ 2026-09-04: 엔진이 구간별 시각을 직접 준 경우에만 true.
-  //   이때 앱은 시간 계산에 손대지 않고 그리기만 한다.
-  //   구버전 워커를 쓰는 동안은 false 가 되어 기존 보정이 그대로 동작한다.
-  var _engTimes = segs.length > 0 && segs.every(function(sg){
-    return sg.startSec != null && sg.endSec != null && isFinite(sg.startSec) && isFinite(sg.endSec);
-  });
+  // ★ 2026-09-04: 엔진이 구간별 시각을 준 경우 앱은 그리기만 한다.
+  //   이전엔 '모든 구간에 시각이 있을 때만' 썼는데(every),
+  //   한 구간이라도 빠지면(노선도 BFS 경로 등) 통째로 옆리면서
+  //   다시 앱이 누적 계산해 버렸다 — 승차 시각이 '정류장 도착 시각'로 찍힌 원인.
+  //   → 있는 구간은 엔진 값을 그대로, 없는 구간만 앞 구간에 이어 붙인다.
+  function _segHasEng(sg){
+    return sg && sg.startSec != null && sg.endSec != null && isFinite(sg.startSec) && isFinite(sg.endSec);
+  }
+  var _engTimes = segs.some(_segHasEng);   // 하나라도 있으면 엔진이 시간을 계산한 응답이다
   window._engineHasTimes = _engTimes;
+  // 진단용: 첫 대중교통 구간의 대기가 얼마였는지, 그게 실측이었는지
+  try{
+    var _fb = null;
+    for(var _fi=0; _fi<segs.length; _fi++){ if(segs[_fi].type===2){ _fb=segs[_fi]; break; } }
+    window._htlFirstBus = _fb ? {
+      name: _fb.name,
+      waitSec: _fb.waitSec,
+      hasEng: _segHasEng(_fb),
+      gapSec: (_segHasEng(_fb) && _fb.arriveSec!=null) ? (_fb.startSec - _fb.arriveSec) : null
+    } : null;
+  }catch(e){}
 
   for(var i=1;i<segs.length;i++){
     var c=segs[i], p=segs[i-1];
@@ -6260,7 +6287,7 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
     // ★ 승차역(첫 대중교통 구간)에 '실제로 도착하는 시각' — 대기 반영 전 값.
     //   이후 모든 재동기화가 이 값을 기준으로 다음 열차를 찾는다(단일 시간축).
     if(sg.type!==3 && _boardArriveMin===null){
-      var _at = (_engTimes && sg.arriveSec!=null) ? (_base0 + sg.arriveSec*1000) : t;
+      var _at = (_segHasEng(sg) && sg.arriveSec!=null) ? (_base0 + sg.arriveSec*1000) : t;
       var _d0=new Date(_at); _boardArriveMin=_d0.getHours()*60+_d0.getMinutes()+_d0.getSeconds()/60;
     }
     // ★ 2026-09-03: 앱에서 출발 시각을 다시 맞추지 않는다.
@@ -6275,7 +6302,7 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
     //   증상: 17:08 에 탐색하면 도보 2분 뒤인 17:10 승차로 나왔는데,
     //        실제 순혰3은 6분48초 뒤에 온다. 대기가 구간시간 안에 숨어
     //        있어서 '정류장에 도착하는 시각'을 승차 시각처럼 그렸다.
-    if(_engTimes){
+    if(_segHasEng(sg)){
       t = _base0 + sg.startSec*1000;      // 실제 출발(버스는 대기를 마친 뒤)
       cumMs = _base0 + sg.endSec*1000;
       return t;
@@ -8119,6 +8146,7 @@ window._hideRouteLoading = _hideRouteLoading;
       //   같은 일을 두 번 하는 셈이고, 도착정보를 다시 받느라 최대 3.5초가 더 걸린다.
       var _rtwDone = 0;
       try{ (results || []).forEach(function(r){ if(r && r.rtwApplied) _rtwDone += r.rtwApplied; }); }catch(e){}
+      try{ window._rtwApplied = _rtwDone; }catch(e){}   // ★ 진단용
       // ★ 2026-09-03: 앱은 경로를 다시 줄 세우지 않는다.
       //   증상: 같은 구간인데 볼 때마다 순위와 소요시간이 바뀌었다.
       //   원인: 엔진이 정한 순서를 앱이 실시간 도착정보로 또 뒤집었다.
@@ -9230,6 +9258,7 @@ function _convertSinglePathToRoute(path) {
       arriveSec: (sp.arriveSec!=null ? sp.arriveSec : null),
       startSec:  (sp.startSec!=null  ? sp.startSec  : null),
       endSec:    (sp.endSec!=null    ? sp.endSec    : null),
+      stopSec:   (Array.isArray(sp.stopSec) ? sp.stopSec.slice() : null),
       passStopList: stops.length ? { stationList: stops } : null
     };
   });
@@ -9267,6 +9296,7 @@ function _convertEngineRoutes(engineData) {
         arriveSec: (sp.arriveSec!=null ? sp.arriveSec : null),
         startSec:  (sp.startSec!=null  ? sp.startSec  : null),
         endSec:    (sp.endSec!=null    ? sp.endSec    : null),
+        stopSec:   (Array.isArray(sp.stopSec) ? sp.stopSec.slice() : null),
         passStopList: stops.length ? { stationList: stops.map(_normStop) } : null
       };
     });
@@ -15926,6 +15956,31 @@ window._bgDiag = async function(){
       add('위치 상태: ' + LOCFSM.state + (LOCFSM.anchor ? (' (' + LOCFSM.anchor.src + ')') : ''));
       add('튐으로 버린 GPS: ' + LOCFSM.rejected + '건');
     }
+    // ★ 2026-09-04: 시간 계산을 누가 했는지 바로 보이게 한다.
+    //   이게 없어서 '워커가 배포된 건지' '실측이 반영된 건지'를 스샷으로 추측했다.
+    try{
+      add('── 경로 시각 진단 ──');
+      add('엔진 구간시각: ' + (window._engineHasTimes === true ? '사용 중'
+          : window._engineHasTimes === false ? '없음 — route-v2 워커 배포 필요'
+          : '아직 경로 안 그림'));
+      var _rl = window._rtwLast;
+      if(_rl){
+        var _parts = _rl.str ? _rl.str.split(',') : [];
+        var _withStop = _parts.filter(function(x){ return x.indexOf('@') > 0; }).length;
+        add('실시간 대기 전송: ' + _parts.length + '건 (정류장 지정 ' + _withStop + '건, '
+            + Math.round((Date.now()-_rl.at)/1000) + '초 전)');
+        if(_parts.length) add('  · 예: ' + _parts.slice(0,3).join(' / '));
+      } else add('실시간 대기 전송: 아직 없음');
+      add('엔진 반영 노선: ' + (window._rtwApplied == null ? '모름' : window._rtwApplied + '개'));
+      var _fb2 = window._htlFirstBus;
+      if(_fb2){
+        add('첫 버스(' + (_fb2.name||'?') + ') 대기: '
+            + (_fb2.gapSec != null ? (Math.floor(_fb2.gapSec/60) + '분 ' + (_fb2.gapSec%60) + '초')
+               : (_fb2.waitSec != null ? (Math.round(_fb2.waitSec/60) + '분 (엔진시각 없음)') : '모름')));
+      } else add('첫 버스 대기: 버스 구간 없음');
+      add('진행도 / 근거: ' + (window._gpsMaxIdx==null?-1:window._gpsMaxIdx) + ' / '
+          + (typeof _progEvidenceIdx==='function' ? _progEvidenceIdx() : '?'));
+    }catch(e){}
   }catch(e){}
   add('마지막 뉴스 열기 방식: ' + (window._newsOpenMode || '아직 없음'));
   // 알림 권한
