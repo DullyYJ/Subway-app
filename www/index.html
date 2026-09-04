@@ -6173,6 +6173,7 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
             startSec:(sec.startSec!=null ? sec.startSec : null),
             endSec:(sec.endSec!=null ? sec.endSec : null),
             stopSec:(Array.isArray(sec.stopSec) ? sec.stopSec.slice() : null),
+            boardStopId:(sec.boardStopId || null), waitReal:!!sec.waitReal,
             stops:stops.slice()};
   });
 
@@ -6194,6 +6195,8 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
       name: _fb.name,
       waitSec: _fb.waitSec,
       hasEng: _segHasEng(_fb),
+      real: !!_fb.waitReal,
+      stopId: _fb.boardStopId || null,
       gapSec: (_segHasEng(_fb) && _fb.arriveSec!=null) ? (_fb.startSec - _fb.arriveSec) : null
     } : null;
   }catch(e){}
@@ -8146,7 +8149,13 @@ window._hideRouteLoading = _hideRouteLoading;
       //   같은 일을 두 번 하는 셈이고, 도착정보를 다시 받느라 최대 3.5초가 더 걸린다.
       var _rtwDone = 0;
       try{ (results || []).forEach(function(r){ if(r && r.rtwApplied) _rtwDone += r.rtwApplied; }); }catch(e){}
-      try{ window._rtwApplied = _rtwDone; }catch(e){}   // ★ 진단용
+      try{ window._rtwApplied = _rtwDone; }catch(e){}
+      // ★ 2026-09-05: 어느 워커가 동작 중인지, rtw 가 정류장 단위로 맞았는지
+      try{
+        var _r0 = (results || []).find(function(r){ return r && (r.engVer || r.rtwStat); });
+        window._engVer  = _r0 && _r0.engVer  ? _r0.engVer  : null;
+        window._rtwStat = _r0 && _r0.rtwStat ? _r0.rtwStat : null;
+      }catch(e){}   // ★ 진단용
       // ★ 2026-09-03: 앱은 경로를 다시 줄 세우지 않는다.
       //   증상: 같은 구간인데 볼 때마다 순위와 소요시간이 바뀌었다.
       //   원인: 엔진이 정한 순서를 앱이 실시간 도착정보로 또 뒤집었다.
@@ -8351,10 +8360,13 @@ window._applyRealtimeWaits = _applyRealtimeWaits;
 //   (2) 25개 상한을 '빨리 오는 순'으로 잘라서, 정작 위험한 느린 노선이 먼저 버려졌다.
 //   → 상한을 늘리고, 잘라야 한다면 '느린 노선부터' 남긴다.
 //     느린 노선을 빼면 엔진이 그걸 3분으로 보고 공치로 골라버린다.
-var _RTW_STOPS   = 4;      // 출발지에서 가까운 정류장 이 개수만 조회
+// ★ 2026-09-05: 4곳으로는 승차 정류장을 놓친다.
+//   스샷에서 주변 정류장은 6곳이었고, 엔진이 고른 75번 승차 정류장은
+//   그 안에 있었는데 전송된 9건에는 75번이 없었다 → 4분 가정치로 밀렸다.
+var _RTW_STOPS   = 8;      // 출발지에서 가까운 정류장 이 개수만 조회
 var _RTW_MAX     = 80;   // 정류장 지정 항목 + 폴백 항목을 함께 보내므로 상한을 늘렸다     // URL 길이 보호 — 노선 수 상한
 var _RTW_TIMEOUT = 3000;   // 이 안에 못 모으면 모은 만큼만 보내고 진행
-var _RTW_CACHE_MS = 90000; // 다른 화면에서 받아둔 도착정보를 이 시간까지 재사용
+var _RTW_CACHE_MS = 180000; // 다른 화면에서 받아둔 도착정보를 이 시간까지 재사용
 
 // 앱 어디서든 버스 도착정보를 받으면 여기에 쌓인다(노선번호 → 남은초).
 // 노선도 버스탭을 보고 바로 경로탐색하는 경우가 많아, 대개 녹은 값이 이미 있다.
@@ -9259,6 +9271,8 @@ function _convertSinglePathToRoute(path) {
       startSec:  (sp.startSec!=null  ? sp.startSec  : null),
       endSec:    (sp.endSec!=null    ? sp.endSec    : null),
       stopSec:   (Array.isArray(sp.stopSec) ? sp.stopSec.slice() : null),
+      boardStopId: (sp.boardStopId || null),
+      waitReal:  !!sp.waitReal,
       passStopList: stops.length ? { stationList: stops } : null
     };
   });
@@ -9297,6 +9311,8 @@ function _convertEngineRoutes(engineData) {
         startSec:  (sp.startSec!=null  ? sp.startSec  : null),
         endSec:    (sp.endSec!=null    ? sp.endSec    : null),
         stopSec:   (Array.isArray(sp.stopSec) ? sp.stopSec.slice() : null),
+        boardStopId: (sp.boardStopId || null),
+        waitReal:  !!sp.waitReal,
         passStopList: stops.length ? { stationList: stops.map(_normStop) } : null
       };
     });
@@ -15971,12 +15987,26 @@ window._bgDiag = async function(){
             + Math.round((Date.now()-_rl.at)/1000) + '초 전)');
         if(_parts.length) add('  · 예: ' + _parts.slice(0,3).join(' / '));
       } else add('실시간 대기 전송: 아직 없음');
+      add('엔진 버전: ' + (window._engVer || '모름 — 구버전 워커가 동작 중'));
       add('엔진 반영 노선: ' + (window._rtwApplied == null ? '모름' : window._rtwApplied + '개'));
+      var _rs = window._rtwStat;
+      if(_rs){
+        add('rtw 적중: 정류장 지정 ' + _rs.stopHit + '회 / 번호만 ' + _rs.anyHit + '회 / 못 찾음 ' + _rs.miss + '회');
+      }
       var _fb2 = window._htlFirstBus;
       if(_fb2){
         add('첫 버스(' + (_fb2.name||'?') + ') 대기: '
-            + (_fb2.gapSec != null ? (Math.floor(_fb2.gapSec/60) + '분 ' + (_fb2.gapSec%60) + '초')
-               : (_fb2.waitSec != null ? (Math.round(_fb2.waitSec/60) + '분 (엔진시각 없음)') : '모름')));
+            + (_fb2.gapSec != null ? (Math.floor(_fb2.gapSec/60) + '분 ' + Math.round(_fb2.gapSec%60) + '초')
+               : (_fb2.waitSec != null ? (Math.round(_fb2.waitSec/60) + '분 (엔진시각 없음)') : '모름'))
+            + (_fb2.real ? ' [실측]' : ' [배차 가정치]'));
+        add('  · 승차 정류장 id: ' + (_fb2.stopId || '없음'));
+        // 그 정류장·노선으로 실제 보낸 값이 있었는지 대조
+        try{
+          var _key = (_fb2.name||'') + '@' + (_fb2.stopId||'');
+          var _sent = (window._rtwLast && window._rtwLast.str ? window._rtwLast.str.split(',') : [])
+                        .filter(function(x){ return x.indexOf(_key + ':') === 0; });
+          add('  · 그 정류장으로 보낸 값: ' + (_sent.length ? _sent[0] : '없음'));
+        }catch(e){}
       } else add('첫 버스 대기: 버스 구간 없음');
       add('진행도 / 근거: ' + (window._gpsMaxIdx==null?-1:window._gpsMaxIdx) + ' / '
           + (typeof _progEvidenceIdx==='function' ? _progEvidenceIdx() : '?'));
