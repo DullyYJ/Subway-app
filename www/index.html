@@ -6108,6 +6108,39 @@ function _segStopOffsets(sg){
 }
 window._segStopOffsets = _segStopOffsets;
 
+// ★ 2026-09-04: 타임라인이 쓰는 기준시각은 여기 하나뿐이다.
+//   · 사용자가 정한 예상 시각이 있으면 그 시각
+//   · 아니면 '이번 탐색이 나간 시각'(_routeBaseMs)
+//   · 그것도 너무 오래됐으면(카드를 오래 띄워 둔 경우) 기기 시계
+var _ROUTE_BASE_MAX_MS = 5*60*1000;    // 이보다 오래된 탐색 결과는 신선하지 않다
+function _routeBaseAgeMs(){
+  var b = window._routeBaseMs;
+  if(!b || !isFinite(b)) return null;
+  return Date.now() - b;
+}
+window._routeBaseAgeMs = _routeBaseAgeMs;
+function _routeBaseStale(){
+  var a = _routeBaseAgeMs();
+  return (a != null && a > _ROUTE_BASE_MAX_MS);
+}
+window._routeBaseStale = _routeBaseStale;
+function _htlBaseMs(){
+  if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return _baseTimeMs;
+  var b = window._routeBaseMs;
+  if(b && isFinite(b) && !_routeBaseStale()) return b;
+  return (typeof getBaseTimeMs==='function') ? getBaseTimeMs() : Date.now();
+}
+window._htlBaseMs = _htlBaseMs;
+
+// ★ 앱이 화면의 시각을 옮겨도 되는 때는 '확정한 경로를 실제로 타고 갈 때'뿐이다.
+//   고르는 중(탭 구경)에는 엔진이 준 시각을 그대로 보여준다.
+function _htlMayAdjustTime(){
+  if(window._metroRouteMode === true) return false;                          // 노선도 미리보기
+  if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return false; // 예상 시각 모드
+  return (window._routeLocked === true);                                      // 확정한 경로만
+}
+window._htlMayAdjustTime = _htlMayAdjustTime;
+
 function _renderHtlTrack(sections, start, dest, totalMin) {
   // 마지막으로 그린 시각과 인자 (진단용)
   try{ window._lastHtlArgs = { start: start, dest: dest, totalMin: totalMin }; window._htlDrawnAt = Date.now(); }catch(e){}
@@ -6199,7 +6232,7 @@ function _renderHtlTrack(sections, start, dest, totalMin) {
   // ── 포인트 목록 ──
   var allStops=[]; segs.forEach(function(sg){ if(sg.type!==3) allStops=allStops.concat(sg.stops); });
   var totalCnt=allStops.length;
-  var cumMs=(typeof getBaseTimeMs==='function')?getBaseTimeMs():Date.now();   // 기준시각 반영
+  var cumMs=_htlBaseMs();   // ★ 이번 탐색의 단일 시간축(탭을 바꿔도 같다)
   // ★ 지하철 세그먼트: 승차역 도착시각 기준 '다음 열차 출발시각'까지 대기 반영(Bug2)
   //    시각표 미보유·막차 지남·대기 30분 초과 시에는 기존 방식(즉시 탑승) 유지
   // 엔진이 대기시간을 구간 시간에 이미 포함해 주므로 앱이 따로 더할 것이 없다
@@ -6812,6 +6845,9 @@ window._htlBoardFixWait   = _htlBoardFixWait;
 
 // ── 실제 다음 차(버스 도착/지하철 시각표) 시각으로 타임라인 보정 ──
 function _applyRealBoardTime(opts){
+  // ★ 2026-09-04: 확정 전에는 실시간 도착으로 출발 시각을 밀거나 당기지 않는다.
+  //   엔진이 이미 배차·실시간 대기(rtw)를 구간 시간에 넣어서 준다.
+  if(typeof _htlMayAdjustTime==='function' && !_htlMayAdjustTime()) return;
   opts = opts || {};
   var _allowEarlier = !!opts.allowEarlier;
   var _maxWait = (opts.maxWait != null) ? opts.maxWait : 30;   // 반영할 최대 대기(분)
@@ -7591,6 +7627,8 @@ function _hideRouteLoading(){
 }
 window._hideRouteLoading = _hideRouteLoading;
   _allRouteResults = null;
+  // ★ 2026-09-04: 새 탐색이면 시간축도 새로 잡는다(요청이 나갈 때 찍는다).
+  window._routeBaseMs = null;
   window._transitResultData = null;
   window._lastHtlNodes = null;
   window._lastHtlSections = null;
@@ -7831,6 +7869,14 @@ window._hideRouteLoading = _hideRouteLoading;
     //   (앱을 껐다 켜야만 사라지던 '먹통' 증상의 정체)
     if(_routeStale()){ if(loading) loading.style.display = 'none'; return; }
     window._routeSentAt = Date.now();          // 워치독 기준 시각
+    // ★ 2026-09-04: 이 탐색의 시간축(기준시각). 탭을 바꿔도 이 값만 쓴다.
+    //   증상: 14:18 에 보는데 최단시간 탭은 12:47, 최소환승은 14:20, 지하철은 14:33 출발.
+    //   원인: 탭마다 '그 탭을 그린 순간의 시계'로 시각을 다시 쌓았다.
+    //        (지하철·버스 탭은 엔진에 따로 다시 물어보기까지 해서 더 벌어졌다)
+    //   → 시간축은 탐색 1회당 하나. 구간 시간은 엔진 값을 그대로 누적한다.
+    if(!window._routeBaseMs){
+      window._routeBaseMs = (typeof getBaseTimeMs==='function') ? getBaseTimeMs() : Date.now();
+    }
     if(rtw) console.log('[route-v2-rtw]', rtw);
 
     // 자체 경로엔진(route-v2): 1회 호출로 3모드(minTime/minTransfer/minWalk) 반환
@@ -8078,7 +8124,9 @@ window._hideRouteLoading = _hideRouteLoading;
         // 최단시간 탭 기본 표시 (팝업 없이 — 사용자가 탭 선택 시에만 고정)
         window._routeLocked = false;
         window._lockedRouteType = null;
-        _doSelectRouteOption('fast');
+        // ★ 2026-09-04: 오래돼서 자동으로 다시 탐색한 경우엔 보던 탭을 그대로 연다
+        var _rs = window._reselectAfterSearch; window._reselectAfterSearch = null;
+        _doSelectRouteOption(_rs || 'fast');
       }
       });   // 순위 단계 콜백 끝
     })
@@ -8755,6 +8803,22 @@ window._selectBusFavRoute=_selectBusFavRoute;
 
 function _doSelectRouteOption(type) {
   if(!_allRouteResults) return;
+
+  // ★ 2026-09-04: 탐색한 지 오래된 결과는 시각이 이미 지나 있다.
+  //   (14:18 에 보는데 12:47 출발) 앱이 숫자를 고쳐 그리는 게 아니라,
+  //   엔진에 다시 물어본 뒤 그 결과로 이 탭을 연다.
+  if(window._routeLocked !== true && typeof _routeBaseStale==='function' && _routeBaseStale()
+     && typeof fmapDoRoute==='function'){
+    var _rnow = Date.now();
+    if(!window._routeAutoAt || (_rnow - window._routeAutoAt) > 20000){
+      window._routeAutoAt = _rnow;
+      window._pendingRouteType = type;
+      window._reselectAfterSearch = type;     // 응답이 오면 이 탭으로 연다
+      _highlightRouteTab(type);
+      fmapDoRoute();
+      return;
+    }
+  }
 
   // 변환 성공하는(sections 있는) 첫 경로를 찾는 헬퍼
   function _tryConvert(p){
@@ -9679,6 +9743,8 @@ function _rtDwellRatio(elapsedMin, spanMin, dwellMin){
 // GPS로 정류장/역 통과가 확인되면 실제 시각을 기록하고,
 // 관측된 이동 속도(pace)로 이후 노드의 도착시간을 다시 계산한다.
 function _recalcArrivalsFrom(anchorIdx){
+  // ★ 2026-09-04: 실측 통과 기준 재계산은 '확정한 경로를 타고 갈 때'만.
+  if(typeof _htlMayAdjustTime==='function' && !_htlMayAdjustTime()) return;
   var passes = [];
   var pm = window._nodePassMs || {};
   for(var key in pm){
@@ -9738,6 +9804,8 @@ function _recalcArrivalsFrom(anchorIdx){
 var _HTL_SANITY_TOL_MIN = 40;
 function _htlSanityCheck(){
   try{
+    // ★ 2026-09-04: 확정 전 경로는 엔진 시각 그대로 둔다(여기서 당기면 탭마다 달라진다)
+    if(typeof _htlMayAdjustTime==='function' && !_htlMayAdjustTime()) return;
     if(window._metroRouteMode === true) return;                 // 노선도 미리보기 제외
     if(typeof _baseTimeMs !== 'undefined' && _baseTimeMs != null) return;   // 예상시각 모드 제외
     if(!_transitNodeData || !_transitNodeData.length) return;
@@ -9806,6 +9874,7 @@ window._fgNotifySync = _fgNotifySync;
 //   승차 전에는 기존 로직(_ttNextDepForSeg)이 담당하므로 건드리지 않는다.
 function _htlSnapBoardArr(){
   try{
+    if(typeof _htlMayAdjustTime==='function' && !_htlMayAdjustTime()) return;   // 확정 경로만
     if(!_transitNodeData || !_transitNodeData.length) return;
     // 승차 전이면 손대지 않는다
     var boarded = (typeof _htlNotDeparted==='function') ? !_htlNotDeparted() : false;
@@ -9940,6 +10009,7 @@ function _htlNodeMs(nd){
 // 잘못된 값 하나가 경로 전체를 몇 시간씩 밀어버릴 수 있었다).
 var _HTL_SHIFT_MAX_MIN = 90;
 function _htlShiftFrom(fromIdx, sec){
+  if(typeof _htlMayAdjustTime==='function' && !_htlMayAdjustTime()) return;   // 확정 경로만
   if(!sec || !isFinite(sec)) return;
   var mins = sec / 60;
   if(Math.abs(mins) > _HTL_SHIFT_MAX_MIN){
@@ -31214,6 +31284,21 @@ function _initAppStateListener(){
 function _onForegroundResume(){
   try {
     window._appInBackground = false;
+    // ★ 2026-09-04: 확정 전 경로 카드를 오래 띄워 뒀다면 시각이 지나 있다 → 다시 탐색한다
+    try{
+      if(window._routeLocked !== true && typeof _routeBaseStale==='function' && _routeBaseStale()
+         && typeof fmapDoRoute==='function'){
+        var _card = document.getElementById('transitResultCard');
+        if(_card && _card.style.display !== 'none'){
+          var _rn = Date.now();
+          if(!window._routeAutoAt || (_rn - window._routeAutoAt) > 20000){
+            window._routeAutoAt = _rn;
+            window._reselectAfterSearch = window._pendingRouteType || 'fast';
+            fmapDoRoute();
+          }
+        }
+      }
+    }catch(e){}
     // 복귀 후 첫 마커 배치는 애니메이션 없이 실제 위치로 '스냅'(이전역→현재역 왕복 애니메이션 제거)
     window._gpsMarkerNeedsSnap = true;
     // 백그라운드에 있는 동안 어긋난 시각을 복귀 즉시 한 번 맞춘다
