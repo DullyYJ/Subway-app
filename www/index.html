@@ -8656,18 +8656,14 @@ function _parseRouteOptions(engineData) {
     return _cost(a)-_cost(b);
   });
 
-  // 버스우선: pathType=2 있으면 그중 Cost 최소, 없으면 버스 구간 많은 것
+  // ★ 2026-09-05: 버스 탭은 버스만 타는 경로(pathType=2)만 보여준다.
+  //   증상: 버스 탭을 눌렀는데 77번 다음에 공항철도가 붙어 나왔다.
+  //   원인: 엔진이 버스 전용 경로를 못 찾았는데(pathType 2 없음)
+  //        앱이 '버스 구간이 가장 많은 경로'로 메꿔서 보여줬다.
+  //   → 없으면 null. 없는 걸 없다고 말하는 게 맞다.
   var busFirst = byType[2].length > 0
     ? byType[2].slice().sort(function(a,b){ return _cost(a)-_cost(b); })[0]
-    : paths.slice().sort(function(a,b){
-        var aB=(typeof _favPathBonus==='function')?_favPathBonus(a):0;
-        var bB=(typeof _favPathBonus==='function')?_favPathBonus(b):0;
-        if(aB!==bB) return bB-aB;                                  // 즐겨찾기 승차 경로 우선
-        var aBus = (a.subPath||[]).filter(function(s){return s.trafficType===2;}).length;
-        var bBus = (b.subPath||[]).filter(function(s){return s.trafficType===2;}).length;
-        if(bBus-aBus) return bBus-aBus;
-        return _cost(a)-_cost(b);
-      })[0];
+    : null;
 
   // ── 지하철 우선 경로 ──
   // 요청: "현재 위치에서 가장 가까운 역에서 지하철을 타는 경로"
@@ -8961,10 +8957,13 @@ function _renderNormalBus(){
   if(!_allRouteResults){ toast('경로를 찾을 수 없습니다.'); return; }
   var r=null;
   try{ r=_convertSinglePathToRoute(_allRouteResults.bus); }catch(e){}
-  ['less','fast','sub'].forEach(function(t){
-    if(!(r&&r.sections&&r.sections.length)){ try{ r=_convertSinglePathToRoute(_allRouteResults[t]); }catch(e){} }
-  });
-  if(!(r&&r.sections&&r.sections.length)){ toast('버스 경로를 찾을 수 없습니다.'); return; }
+  // ★ 2026-09-05: 다른 탭 경로로 메꾸지 않는다.
+  //   예전엔 버스 전용 경로가 없으면 less/fast/sub 를 대신 그렸고,
+  //   그래서 버스 탭에 공항철도가 섞인 경로가 나왔다.
+  if(!(r&&r.sections&&r.sections.length)){
+    toast('버스만으로 가는 경로가 없어요');
+    return;
+  }
   _renderTransitResultCard({routes:[r]}, _transitResultStart, _transitResultDest, 'engine_bus');
 }
 // 버스 탭: 500m 내 즐겨찾기 정류장에서 승차하는 경로 재탐색. 처리하면 true.
@@ -16000,7 +15999,8 @@ window._bgDiag = async function(){
       add('엔진 반영 노선: ' + (window._rtwApplied == null ? '모름' : window._rtwApplied + '개'));
       var _ls = window._liveStat;
       if(_ls){
-        add('엔진 직접조회: 정류장 ' + (_ls.liveStops||0) + '곳 → 경로 ' + (_ls.liveApplied||0) + '개 반영');
+        add('엔진 직접조회: 정류장 ' + (_ls.liveStops||0) + '곳 → 경로 ' + (_ls.liveApplied||0) + '개 반영'
+            + ' [' + (_ls.binding ? '서비스 바인딩' : _ls.keySet ? '키 직접호출' : '★경로 없음') + ']');
         (_ls.stops || []).forEach(function(st){
           add('  · ' + st.id + ': ' + (st.err ? ('오류 ' + st.err)
               : (st.n + '개 ' + (st.routes||[]).slice(0,6).join(','))));
