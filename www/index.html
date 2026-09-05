@@ -8157,6 +8157,11 @@ window._hideRouteLoading = _hideRouteLoading;
         window._rtwStat = _r0 && _r0.rtwStat ? _r0.rtwStat : null;
         var _r1 = (results || []).find(function(r){ return r && r.liveStat; });
         window._liveStat = _r1 ? _r1.liveStat : null;
+        // ★ 2026-09-05: 버스 탭이 버스를 안 태우는 이유는 대개 엔진이 이미 알고 있다.
+        //   자기점검(warnings)과 정류장 수집 현황(busDiag)을 그대로 꺼낸다.
+        var _r2 = (results || []).find(function(r){ return r && (r.warnings || r.busDiag); });
+        window._engWarn = _r2 && _r2.warnings ? _r2.warnings : null;
+        window._busDiag = _r2 && _r2.busDiag ? _r2.busDiag : null;
       }catch(e){}   // ★ 진단용
       // ★ 2026-09-03: 앱은 경로를 다시 줄 세우지 않는다.
       //   증상: 같은 구간인데 볼 때마다 순위와 소요시간이 바뀌었다.
@@ -15994,8 +15999,22 @@ window._bgDiag = async function(){
       add('엔진 버전: ' + (window._engVer || '모름 — 구버전 워커가 동작 중'));
       add('엔진 반영 노선: ' + (window._rtwApplied == null ? '모름' : window._rtwApplied + '개'));
       var _ls = window._liveStat;
-      if(_ls) add('엔진 직접조회: 정류장 ' + (_ls.liveStops||0) + '곳 → 경로 ' + (_ls.liveApplied||0) + '개 반영'
-                  + (_ls.liveErr ? (' / 오류 ' + _ls.liveErr) : ''));
+      if(_ls){
+        add('엔진 직접조회: 정류장 ' + (_ls.liveStops||0) + '곳 → 경로 ' + (_ls.liveApplied||0) + '개 반영');
+        (_ls.stops || []).forEach(function(st){
+          add('  · ' + st.id + ': ' + (st.err ? ('오류 ' + st.err)
+              : (st.n + '개 ' + (st.routes||[]).slice(0,6).join(','))));
+        });
+        if(_ls.want && _ls.want.length) add('  · 찾은 노선: ' + _ls.want.join(' / '));
+      }
+      if(window._engWarn && window._engWarn.length){
+        add('엔진 경고:');
+        window._engWarn.forEach(function(w){ add('  · ' + w); });
+      }
+      var _bd = window._busDiag;
+      if(_bd) add('정류장 수집: 노선 ' + (_bd.nearRoutes==null?'?':_bd.nearRoutes) + '개 / 행 ' + (_bd.rows==null?'?':_bd.rows)
+                  + (_bd.capped ? ' — ★상한 도달(노선 일부 누락)' : '')
+                  + (_bd.nearErr ? (' / 오류 ' + _bd.nearErr) : ''));
       var _rs = window._rtwStat;
       if(_rs){
         add('rtw 적중: 정류장 지정 ' + _rs.stopHit + '회 / 번호만 ' + _rs.anyHit + '회 / 못 찾음 ' + _rs.miss + '회');
