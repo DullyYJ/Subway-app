@@ -15998,6 +15998,13 @@ window._bgDiag = async function(){
       add('엔진 버전: ' + (window._engVer || '모름 — 구버전 워커가 동작 중'));
       add('엔진 반영 노선: ' + (window._rtwApplied == null ? '모름' : window._rtwApplied + '개'));
       var _ls = window._liveStat;
+      if(_ls && (_ls.preOk != null || _ls.preErr)){
+        add('탐색 전 사전조회: 정류장 ' + (_ls.preStops||0) + '곳 중 ' + (_ls.preOk||0) + '곳 응답'
+            + (_ls.preErr ? (' / 오류 ' + _ls.preErr) : ''));
+        (_ls.preDetail || []).forEach(function(d){ add('  · ' + d); });
+        if(_ls.cost) add('승차 비용 판정: 실측 ' + _ls.cost.hit + ' / 다놓침 ' + _ls.cost.missed
+            + ' / 안오는노선 ' + _ls.cost.notServed);
+      }
       if(_ls){
         add('엔진 직접조회: 정류장 ' + (_ls.liveStops||0) + '곳 → 경로 ' + (_ls.liveApplied||0) + '개 반영'
             + ' [' + (_ls.binding ? '서비스 바인딩' : _ls.keySet ? '키 직접호출' : '★경로 없음') + ']');
