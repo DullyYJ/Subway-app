@@ -16043,6 +16043,13 @@ window._bgDiag = async function(){
         (_ls.preDetail || []).forEach(function(d){ add('  · ' + d); });
         if(_ls.cost) add('승차 비용 판정: 실측 ' + _ls.cost.hit + ' / 다놓침 ' + _ls.cost.missed
             + ' / 모름 ' + (_ls.cost.unknown != null ? _ls.cost.unknown : '?'));
+        if(_ls.accessCand && _ls.accessCand.length){
+          add('승차 후보: ' + _ls.accessCand.join(' / '));
+        }
+        if(_ls.waitLog && _ls.waitLog.length){
+          add('대기 판정:');
+          _ls.waitLog.forEach(function(w){ add('  · ' + w); });
+        }
       }
       if(_ls){
         add('엔진 직접조회: 정류장 ' + (_ls.liveStops||0) + '곳 → 경로 ' + (_ls.liveApplied||0) + '개 반영'
