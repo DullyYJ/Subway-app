@@ -16047,6 +16047,7 @@ window._bgDiag = async function(){
       if(_ls){
         add('엔진 직접조회: 정류장 ' + (_ls.liveStops||0) + '곳 → 경로 ' + (_ls.liveApplied||0) + '개 반영'
             + ' [' + (_ls.binding ? '서비스 바인딩' : _ls.keySet ? '키 직접호출' : '★경로 없음') + ']');
+        if(_ls.aliasUsed) add('  · 다른 id 계열로 찾은 정류장: ' + _ls.aliasUsed + '곳');
         (_ls.stops || []).forEach(function(st){
           add('  · ' + st.id + ': ' + (st.err ? ('오류 ' + st.err)
               : (st.n + '개 ' + (st.routes||[]).slice(0,6).join(','))));
