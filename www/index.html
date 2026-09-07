@@ -16047,6 +16047,14 @@ window._bgDiag = async function(){
           add('승차 후보: ' + _ls.accessCand.join(' / ')
               + (_ls.candExtra ? (' [앱 목록 밖 ' + _ls.candExtra + '곳 포함]') : ''));
         }
+        // ★ 2026-09-07: 직행 빨간버스 추천이 실제로 도는지 보이게
+        if(_ls.directCand != null){
+          add('직행 후보: ' + ((_ls.directCand && _ls.directCand.length) ? _ls.directCand.join(', ') : '없음')
+              + (_ls.directPicked ? (' → 채택 ' + _ls.directPicked
+                  + '(대기 ' + Math.round((_ls.directWaitSec||0)/60) + '분)') : '')
+              + (_ls.directSkip ? ' [예산 초과로 건너뜀]' : '')
+              + (_ls.directErr ? (' / 오류 ' + _ls.directErr) : ''));
+        }
         if(_ls.waitLog && _ls.waitLog.length){
           add('대기 판정:');
           _ls.waitLog.forEach(function(w){ add('  · ' + w); });
