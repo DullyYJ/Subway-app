@@ -1,11 +1,12 @@
-name: Deploy Worker
+name: Deploy Worker (gentle-lab)
 
+# ★ 2026-09-07: 자동 배포를 껐다.
+#   사고 실측: route-v2 코드를 gentle-lab 에 붙여넣어 /tago 가 사라졌고,
+#   정류장·도착정보·맛집·뉴스·경로탐색이 한꺼번에 죽었다.
+#   push 트리거가 살아 있으면 worker/index.js 를 잘못 커밋하는 순간 같은 일이 자동으로 재현된다.
+#   → 손으로 돌릴 때만(workflow_dispatch) 배포한다.
+#     평소 gentle-lab 은 Cloudflare 대시보드에서 직접 배포한다.
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'worker/index.js'
-      - 'wrangler.toml'
   workflow_dispatch:
 
 jobs:
@@ -15,6 +16,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ★ 배포 전에 이 파일이 정말 gentle-lab 코드인지 확인한다.
+      #   route-v2 코드가 들어와 있으면 여기서 멈춘다.
+      - name: Guard - gentle-lab 코드인지 확인
+        run: |
+          set -e
+          F=worker/index.js
+          if [ ! -f "$F" ]; then echo "::error::$F 없음"; exit 1; fi
+
+          if ! grep -q "gildongmu-bus-proxy" "$F"; then
+            echo "::error::worker/index.js 가 gentle-lab 코드가 아닙니다 (gildongmu-bus-proxy 표식 없음)"
+            exit 1
+          fi
+          for R in "/tago" "/seoul" "/kakao-local" "/news/all"; do
+            if ! grep -q "$R" "$F"; then
+              echo "::error::필수 라우트 $R 가 없습니다. 배포를 중단합니다."
+              exit 1
+            fi
+          done
+          if grep -q "route_v2_worker_default\|handleRouteV2" "$F"; then
+            echo "::error::route-v2 코드가 섞여 있습니다. route-v2 는 별도 워커입니다."
+            exit 1
+          fi
+          node --check "$F"
+          echo "확인 완료 — gentle-lab 코드가 맞습니다."
+
+      - name: Guard - wrangler.toml 확인
+        run: |
+          set -e
+          grep -q 'name *= *"gentle-lab-7e47subway-api"' wrangler.toml \
+            || { echo "::error::wrangler.toml 의 name 이 gentle-lab 이 아닙니다"; exit 1; }
+          grep -q 'main *= *"worker/index.js"' wrangler.toml \
+            || { echo "::error::wrangler.toml 의 main 이 worker/index.js 가 아닙니다"; exit 1; }
+          echo "--- 배포될 cron ---"
+          sed -n '/\[triggers\]/,/^$/p' wrangler.toml
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -23,49 +59,20 @@ jobs:
       - name: Install Wrangler
         run: npm install -g wrangler
 
-      - name: Get D1 Database ID
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: |
-          DB_ID=$(wrangler d1 list --json 2>/dev/null | \
-            python3 -c "import sys,json; dbs=json.load(sys.stdin); \
-            print(next((d['uuid'] for d in dbs if d['name']=='subway-db'), ''))" \
-            || echo "")
-          if [ -n "$DB_ID" ]; then
-            sed -i "s/c06de2e6-d6bc-401c-be32-25fde0b5f747/$DB_ID/" wrangler.toml
-            echo "D1 DB ID: $DB_ID"
-          fi
-
-      - name: Create D1 tables
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: |
-          wrangler d1 execute subway-db --remote --command "CREATE TABLE IF NOT EXISTS restaurants (id INTEGER PRIMARY KEY AUTOINCREMENT, station_name TEXT NOT NULL, place_id TEXT NOT NULL, place_name TEXT NOT NULL, category_name TEXT DEFAULT '', address_name TEXT DEFAULT '', road_address_name TEXT DEFAULT '', distance INTEGER DEFAULT 0, place_url TEXT DEFAULT '', lat REAL DEFAULT 0, lng REAL DEFAULT 0, updated_at INTEGER NOT NULL, UNIQUE(station_name, place_id));" || echo "테이블 이미 존재"
-          wrangler d1 execute subway-db --remote --command "CREATE TABLE IF NOT EXISTS ai_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, line TEXT NOT NULL, nick TEXT NOT NULL, emoji TEXT DEFAULT '🚇', msg TEXT NOT NULL, ts INTEGER NOT NULL);" || echo "테이블 이미 존재"
-          wrangler d1 execute subway-db --remote --command "CREATE TABLE IF NOT EXISTS ai_daily_counter (date TEXT PRIMARY KEY, count INTEGER DEFAULT 0);" || echo "테이블 이미 존재"
-
       - name: Deploy Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: wrangler deploy
 
-      - name: Trigger AI station master (initial run)
+      # 배포 후 실제로 살아났는지 확인한다. 죽으면 여기서 실패로 잡힌다.
+      - name: 배포 확인
         run: |
-          echo "AI 역무원 초기 실행..."
-          sleep 3
-          curl -s "https://gentle-lab-7e47subway-api.phg0643.workers.dev/admin/ai-run" | python3 -c "
-          import sys, json
-          try:
-            d = json.load(sys.stdin)
-            print('결과:', d)
-          except:
-            print('응답:', sys.stdin.read()[:200])
-          " || echo "완료"
-
-      - name: Trigger food crawl
-        run: |
-          echo "맛집 수집 시작..."
-          curl -s -m 60 "https://gentle-lab-7e47subway-api.phg0643.workers.dev/admin/crawl-food" || echo "완료"
+          sleep 5
+          OUT=$(curl -s -m 20 "https://gentle-lab-7e47subway-api.phg0643.workers.dev/health" || echo "")
+          echo "$OUT"
+          echo "$OUT" | grep -q "gildongmu-bus-proxy" \
+            || { echo "::error::배포 후 /health 가 gentle-lab 응답이 아닙니다"; exit 1; }
+          echo "$OUT" | grep -q '"/tago"' \
+            || { echo "::error::/tago 라우트가 보이지 않습니다"; exit 1; }
+          echo "정상 배포 확인."
