@@ -8684,8 +8684,11 @@ function _parseRouteOptions(engineData) {
   });
 
   // 최소환승: transferCount 가장 적은 것 (동률이면 Cost가 작은 쪽)
+  // ★ 2026-09-08: `transferCount||99` 는 환승 0회를 99회로 바꿔 버렸다.
+  //   한 번에 가는 직행버스(1101, 환승 0)가 최소환승 탭에서 항상 꼴째로 밀렸던 원인.
+  var _xfOf = function(p){ var v=(p.info||{}).transferCount; return (v==null) ? 99 : v; };
   var lessXfer = paths.slice().sort(function(a,b){
-    var d=((a.info||{}).transferCount||99) - ((b.info||{}).transferCount||99);
+    var d=_xfOf(a) - _xfOf(b);
     if(d) return d;
     return _cost(a)-_cost(b);
   });
