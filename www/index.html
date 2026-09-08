@@ -16056,6 +16056,7 @@ window._bgDiag = async function(){
       if(_ls && (_ls.preOk != null || _ls.preErr)){
         add('탐색 전 사전조회: 정류장 ' + (_ls.preStops||0) + '곳 중 ' + (_ls.preOk||0) + '곳 응답'
             + (_ls.preErr ? (' / 오류 ' + _ls.preErr) : ''));
+        if(_ls.tabs && _ls.tabs.length){ add('탭별 결과:'); _ls.tabs.forEach(function(t){ add('  · ' + t); }); }
         if(_ls.stillMissing && _ls.stillMissing.length) add('  · 합쳐도 끝내 안 나온 노선: ' + _ls.stillMissing.join(' / '));
         if(_ls.aliasUsed) add('  · 형제 id 병합 ' + _ls.aliasUsed + '회');
         if(_ls.dirDropped) add('  · 방향 판정으로 반대편 ' + _ls.dirDropped + '곳 제외');
