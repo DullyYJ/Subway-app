@@ -31607,6 +31607,21 @@ function _pipNative(){
 }
 window._pipNativeAvailable = function(){ return !!_pipNative(); };
 
+// ★ 작은 창 크기를 한 곳에서 정한다.
+//   안드로이드 PiP 가 허용하는 최대 가로비는 2.39:1 이라 그보다 납작하게는 못 만든다.
+//   resizable/seamless 는 네이티브가 지원하면 '사용자가 늘리지 못하게' 쓰는 값이고,
+//   모르는 키는 플러그인이 그냥 무시하므로 넣어 두어도 안전하다.
+var PIP_W = 239, PIP_H = 100;
+function _pipSizeOpts(extra){
+  var o = extra || {};
+  o.width = PIP_W; o.height = PIP_H;
+  o.aspectWidth = PIP_W; o.aspectHeight = PIP_H;
+  o.resizable = false;          // 확대/축소 금지
+  o.seamless = false;           // 매끄러운 리사이즈 끄기(안드로이드 12+)
+  return o;
+}
+window._pipSizeOpts = _pipSizeOpts;
+
 // 배경으로 내려갈 때 호출
 function _pipEnter(){
   if(!_pipEnabled() || !_pipHasRoute()) return false;
@@ -31615,7 +31630,7 @@ function _pipEnter(){
   if(n && typeof n.enter === 'function'){
     // ★ 2026-09-02: 창 높이를 줄인다. 안드로이드가 허용하는 최대 가로비가 2.39:1 이라
     //   그보다 납작하게는 만들 수 없다(넘기면 PiP 진입 자체가 실패한다).
-    try{ n.enter({ width:239, height:100 }); }catch(e){}
+    try{ n.enter(_pipSizeOpts({})); }catch(e){}
     return true;
   }
   return false;                     // 네이티브 없음 → 상주 알림이 대신한다
@@ -31626,18 +31641,30 @@ window._pipEnter = _pipEnter;
 //   안드로이드는 홈 버튼을 누르는 순간(onUserLeaveHint)에만 PiP로 바꿀 수 있어서,
 //   그때 물어볼 시간이 없다. 미리 상태를 넘겨 두고 네이티브가 스스로 판단하게 한다.
 var _pipLastActive = null;
-function _pipNativeSync(){
+var _pipLastSyncAt = 0;
+var _PIP_RESEND_MS = 30000;
+// ★ 2026-09-08: 예전엔 '값이 바뀔 때 한 번'만 보냈다.
+//   플러그인이 아직 준비되기 전(첫 2초)이나 호출이 실패하면 네이티브는
+//   끝내 '안내 중'이라는 걸 모르고, 홈 버튼을 눌러도 PiP 로 안 바뀐다.
+//   액티비티가 다시 만들어지면 네이티브 쪽 상태도 초기화되는데 웹은 그걸 모른다.
+//   → 성공했을 때만 기억하고, 값이 같아도 30초마다 한 번은 다시 알린다.
+function _pipNativeSync(force){
   try{
     var n = _pipNative();
-    if(!n || typeof n.setActive !== 'function') return;
+    if(!n || typeof n.setActive !== 'function'){ _pipLastActive = null; return; }
     var v = !!(_pipEnabled() && _pipHasRoute());
-    if(v === _pipLastActive) return;
-    _pipLastActive = v;
-    n.setActive({ active: v });
-  }catch(e){}
+    var now = Date.now();
+    if(!force && v === _pipLastActive && (now - _pipLastSyncAt) < _PIP_RESEND_MS) return;
+    _pipLastSyncAt = now;
+    var r = n.setActive(_pipSizeOpts({ active: v }));
+    if(r && typeof r.then === 'function'){
+      r.then(function(){ _pipLastActive = v; window._pipArmed = v; })
+       .catch(function(){ _pipLastActive = null; window._pipArmed = null; });   // 실패하면 다음 틱에 재시도
+    } else { _pipLastActive = v; window._pipArmed = v; }
+  }catch(e){ _pipLastActive = null; window._pipArmed = null; }
 }
 window._pipNativeSync = _pipNativeSync;
-try{ setInterval(_pipNativeSync, 10000); setTimeout(_pipNativeSync, 2000); }catch(e){}
+try{ setInterval(_pipNativeSync, 10000); setTimeout(function(){ _pipNativeSync(true); }, 1200); setTimeout(function(){ _pipNativeSync(true); }, 4000); }catch(e){}
 
 // ★ 창 크기로 PiP 여부를 판단한다.
 //   안드로이드가 PiP로 만들면 웹뷰가 작아진다. 그때만 요약 화면을 남긴다.
@@ -31660,9 +31687,19 @@ function _pipSyncToggle(){
     if(kn)  kn.style.left = on ? '25px' : '3px';
     var st = document.getElementById('pipStat');
     if(st){
-      st.textContent = _pipNative()
-        ? '화면 위 축소 표시를 쓸 수 있어요.'
-        : '이 빌드에는 화면 축소 기능이 없어, 앱을 내리면 상단 알림으로 안내해요.';
+      if(!_pipNative()){
+        st.textContent = '이 빌드에는 화면 축소 기능이 없어, 앱을 내리면 상단 알림으로 안내해요.'
+                       + '\n(MainActivity 에 registerPlugin(PipPlugin.class) 가 있는지 확인하세요)';
+        st.style.whiteSpace = 'pre-line';
+      } else {
+        var _hasR = false;
+        try{ _hasR = !!(typeof _pipHasRoute==='function' && _pipHasRoute()); }catch(e2){}
+        st.textContent = '화면 위 축소 표시를 쓸 수 있어요.'
+          + '\n· 안내 중인 여정: ' + (_hasR ? '있음' : '없음(경로를 확정해야 떠요)')
+          + '\n· 네이티브에 알림: ' + (window._pipArmed === true ? '켜짐'
+              : (window._pipArmed === false ? '꺼짐' : '아직 전달 못 함'));
+        st.style.whiteSpace = 'pre-line';
+      }
     }
   }catch(e){}
 }
@@ -31692,6 +31729,9 @@ function _initAppStateListener(){
           // 포그라운드 진입
           console.log('[앱상태] 포그라운드');
           try{ if(typeof _pipHide === 'function') _pipHide(); }catch(e){}
+          // ★ 2026-09-08: 복귀할 때 네이티브 상태를 다시 알린다.
+          //   액티비티가 새로 만들어졌으면 네이티브의 '안내 중' 플래그가 지워져 있다.
+          try{ if(typeof _pipNativeSync === 'function') _pipNativeSync(true); }catch(e){}
           if(S.route && S.boarded){
             // 웹 GPS 재시작 (포그라운드에서는 더 빠른 업데이트)
             startWatch();
