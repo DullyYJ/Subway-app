@@ -7839,17 +7839,18 @@ window._hideRouteLoading = _hideRouteLoading;
       if(shown || errOn) return;
       if(window._routeRetried === _reqToken) return;                // 재시도는 1회만
       window._routeRetried = _reqToken;
-      // 요청이 나간 지 6초가 안 됐으면 그때부터 다시 센다
+      // ★ 2026-09-08: 6초 → 8.5초. 엔진이 승차 정류장 실측을 받고 다시 탐색하도록 바꿔서
+      //   응답이 조금 늦어질 수 있다. 대신 앱이 rtw 로 3초를 쓰던 게 없어져 체감은 더 빠르다.
       var sent = window._routeSentAt || 0;
-      if(sent && Date.now() - sent < 6000){
-        setTimeout(_watchdog, 6000 - (Date.now() - sent) + 200);
+      if(sent && Date.now() - sent < 8500){
+        setTimeout(_watchdog, 8500 - (Date.now() - sent) + 200);
         return;
       }
       console.log('[경로] 결과 없음 → 자동 재시도');
       if(typeof fmapDoRoute === 'function') fmapDoRoute();
     }catch(err){}
   };
-  setTimeout(_watchdog, 6000);
+  setTimeout(_watchdog, 8500);
 
   // 로딩 즉시 표시
   var box     = document.getElementById('transitResultBox');
@@ -16055,7 +16056,16 @@ window._bgDiag = async function(){
       if(_ls && (_ls.preOk != null || _ls.preErr)){
         add('탐색 전 사전조회: 정류장 ' + (_ls.preStops||0) + '곳 중 ' + (_ls.preOk||0) + '곳 응답'
             + (_ls.preErr ? (' / 오류 ' + _ls.preErr) : ''));
+        if(_ls.dirDropped) add('  · 방향 판정으로 반대편 ' + _ls.dirDropped + '곳 제외');
+        if(_ls.dirGain) add('  · 목적지 접근량: ' + _ls.dirGain.join(' / '));
         (_ls.preDetail || []).forEach(function(d){ add('  · ' + d); });
+        if(_ls.boardFetched || _ls.boardSkip || _ls.research){
+          add('승차 정류장 추가조회: ' + ((_ls.boardFetched||[]).length) + '곳'
+              + (_ls.research ? (' → 실측으로 재탐색') : '')
+              + (_ls.boardSkip ? (' [예산 부족으로 ' + _ls.boardSkip + '곳 건너뜀]') : ''));
+          (_ls.boardFetched || []).forEach(function(d){ add('  · ' + d); });
+          if(_ls.boardErr) add('  · 오류: ' + _ls.boardErr);
+        }
         if(_ls.cost) add('승차 비용 판정: 실측 ' + _ls.cost.hit + ' / 다놓침 ' + _ls.cost.missed
             + ' / 모름 ' + (_ls.cost.unknown != null ? _ls.cost.unknown : '?'));
         if(_ls.accessCand && _ls.accessCand.length){
