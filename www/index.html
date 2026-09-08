@@ -8480,6 +8480,18 @@ function _stopsParam(){
 window._stopsParam = _stopsParam;
 
 function _collectRTW(lat, lng, cb){
+  // ★ 2026-09-08: 앱은 더 이상 경로탐색을 위해 도착정보를 모으지 않는다.
+  //   2026-09-05부터 실측 조회는 엔진이 직접 한다(자기가 고른 승차 정류장을 아니까).
+  //   그런데 앱쪽 rtw 수집이 남아 있어서
+  //     - 탐색 전 3초를 더 기다렸고
+  //     - TAGO 동시세션(30개 상한)을 엔진과 서로 뺏었다
+  //   진단 실측: rtw 적중 정류장 지정 0회 / 번호만 0회 / 못 찾음 18840회,
+  //             그 사이 엔진은 ICB168001439 timeout + 예산 초과로 직행탐색을 건너뜀다.
+  //   → 보내지 않는다. 세션과 시간을 엔진에게 넘긴다.
+  try{ window._rtwLast = { str: '', n: 0, at: Date.now(), off: true }; }catch(e){}
+  cb('');
+  return;
+  /* eslint-disable no-unreachable */
   var done = false;
   var finish = function(str){
     if(done) return; done = true;
