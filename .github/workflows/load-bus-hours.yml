@@ -76,7 +76,7 @@ jobs:
         env:
           TAGO_KEY: ${{ secrets.TAGO_KEY }}
         run: |
-          python3 tools/load-bus-hours.py \
+          python3 -u tools/load-bus-hours.py \
             --routes routes.json --out fill.sql --chunk 2000 \
             ${{ inputs.interval && '--interval' || '' }}
           ls -la fill.*.sql || { echo "::error::SQL 이 하나도 안 만들어졌습니다"; exit 1; }
