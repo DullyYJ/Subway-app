@@ -26,9 +26,23 @@ import argparse, functools, json, os, sys, time, urllib.parse, urllib.request
 #   한 시간짜리 작업이 아무 것도 안 찍히면 멈춘 건지 도는 건지 알 수가 없다.
 print = functools.partial(print, flush=True)
 
-BASE = "http://apis.data.go.kr/1613000/BusRouteInfoInqireService"
+BASE = "https://apis.data.go.kr/1613000/BusRouteInfoInqireService"
 PAGE = 1000          # 명세상 페이지당 최대
 SLEEP = 0.12         # 초당 30tps 상한을 넉넉히 밑돈다
+
+# D1 bus_routes 에 실제로 들어 있는 도시코드 (2026-09-08 기준 137곳 / 21,485 노선).
+#   --routes 로 목록을 주지 않으면 이걸 쓴다. D1 을 내보낼 필요가 없어진다.
+DEFAULT_CITIES = ("12 21 22 23 24 25 26 31010 31020 31030 31040 31050 31060 31070 31080 31090 "
+                  "31100 31110 31120 31130 31140 31150 31160 31170 31180 31190 31200 31210 31220 "
+                  "31230 31240 31250 31260 31270 31320 31350 31370 31380 32010 32020 32050 32310 "
+                  "32360 33010 33020 33030 33320 33330 33340 33350 33360 33370 33380 34010 34020 "
+                  "34030 34040 34050 34060 34070 34310 34330 34340 34350 34380 34390 35010 35020 "
+                  "35030 35040 35050 35060 35320 35330 35340 35350 35360 35370 35380 36010 36020 "
+                  "36030 36040 36060 36320 36330 36350 36380 36400 36410 36420 36430 36450 36460 "
+                  "36470 36480 37010 37020 37030 37040 37050 37060 37070 37080 37090 37100 37320 "
+                  "37330 37340 37350 37360 37370 37380 37390 37400 37410 37420 37430 38010 38030 "
+                  "38050 38060 38070 38080 38090 38100 38310 38320 38330 38340 38350 38360 38370 "
+                  "38380 38390 38400 39").split()
 
 
 # 2026-09-08: 137개 도시가 전부 timed out 으로 죽은 일이 있었다.
@@ -129,20 +143,44 @@ def q(s):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--routes", required=True, help="D1 에서 뽑은 route_key 목록(json)")
+    ap.add_argument("--routes", help="D1 에서 뽑은 목록(json). 없으면 --cities 로 전체를 훑는다")
+    ap.add_argument("--cities", help="쉼표로 구분한 도시코드. 기본은 D1 에 들어 있는 137곳")
     ap.add_argument("--out", required=True, help="생성할 SQL 파일")
     ap.add_argument("--interval", action="store_true", help="배차(intervaltime)까지 노선별로 조회")
     ap.add_argument("--max-calls", type=int, default=9000, help="일일 트래픽 여유분")
     ap.add_argument("--chunk", type=int, default=2000, help="SQL 파일 하나에 담을 UPDATE 수")
+    ap.add_argument("--selftest", metavar="CITY", help="도시 하나만 불러 원문을 그대로 출력 (예: 23)")
     args = ap.parse_args()
 
     key = os.environ.get("TAGO_KEY", "").strip()
     if not key:
         sys.exit("TAGO_KEY 환경변수가 없습니다")
 
-    rows = json.load(open(args.routes, encoding="utf-8"))
-    if isinstance(rows, dict):                 # wrangler 출력 형태 흡수
-        rows = rows.get("results") or rows.get("rows") or []
+    # 2026-09-08: 연결이 되는지부터 확인하는 모드.
+    #   timed out 만 보고는 한도 초과인지 망 문제인지 구분이 안 돼서 만들었다.
+    if args.selftest:
+        city = args.selftest
+        url = (BASE + "/getRouteNoList?" + urllib.parse.urlencode(
+            {"serviceKey": key, "cityCode": city, "numOfRows": 3, "pageNo": 1, "_type": "json"}, safe="%"))
+        print("요청:", url.replace(key, "<KEY>"))
+        t0 = time.time()
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "gildongmu-loader/1.0"})
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                raw = r.read().decode("utf-8", "replace")
+            print(f"응답 {time.time()-t0:.1f}초 · {len(raw)}바이트")
+            print("── 원문 앞 800자 ──")
+            print(raw[:800])
+        except Exception as e:
+            print(f"실패 ({time.time()-t0:.1f}초): {type(e).__name__}: {e}")
+            raise SystemExit(2)
+        return
+
+    rows = []
+    if args.routes:
+        rows = json.load(open(args.routes, encoding="utf-8"))
+        if isinstance(rows, dict):             # wrangler 출력 형태 흡수
+            rows = rows.get("results") or rows.get("rows") or []
     want = {}                                   # route_key -> (city, routeid)
     done_itv = set()                            # 배차가 이미 D1 에 있는 노선
     for r in rows:
@@ -161,8 +199,12 @@ def main():
         want[rk] = (city, rid)
         if isinstance(r, dict) and r.get("itv_wd") not in (None, "", 0):
             done_itv.add(rid)
-    cities = sorted({c for c, _ in want.values()})
-    print(f"노선 {len(want)}개 / 도시 {len(cities)}곳: {', '.join(cities)}")
+    if want:
+        cities = sorted({c for c, _ in want.values()})
+        print(f"노선 {len(want)}개 / 도시 {len(cities)}곳")
+    else:
+        cities = [c.strip() for c in (args.cities.split(",") if args.cities else DEFAULT_CITIES) if c.strip()]
+        print(f"목록 없이 도시 {len(cities)}곳을 훑습니다 (D1 내보내기 불필요)")
 
     calls = 0
     bad = []                                    # 응답이 이상해 건너뛴 도시
@@ -198,6 +240,7 @@ def main():
                 if not rid:
                     continue
                 found[str(rid)] = {
+                    "city": city,
                     "start": hhmm(pick(d, "startvehicletime", "startVehicleTime")),
                     "end":   hhmm(pick(d, "endvehicletime", "endVehicleTime")),
                     "wd":  num(pick(d, "intervaltime", "intervalTime")),
@@ -243,17 +286,19 @@ def main():
 
     # ── SQL 생성 ────────────────────────────────────────────────
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    # UPDATE 는 city_code + route_id 로 건다.
+    #   route_key 형식을 몰라도 되고, D1 목록을 안 뽑아도 된다.
     lines = []
-    for rk, (city, rid) in sorted(want.items()):
-        v = found.get(rid)
+    for rid, v in sorted(found.items()):
         if not v or not (v.get("start") or v.get("end") or v.get("wd")):
             continue
+        city = v.get("city") or ""
         lines.append(
             "UPDATE bus_routes SET "
             f"start_time={q(v.get('start'))}, end_time={q(v.get('end'))}, "
             f"itv_wd={v.get('wd') or 'NULL'}, itv_sat={v.get('sat') or 'NULL'}, "
             f"itv_sun={v.get('sun') or 'NULL'}, hours_at={q(now)} "
-            f"WHERE route_key={q(rk)};")
+            f"WHERE route_id={q(rid)}" + (f" AND city_code={q(city)}" if city else "") + ";")
 
     # wrangler 는 한 파일에 2만 문장을 넣으면 타임아웃 난다. 조각내서 낸다.
     base = args.out[:-4] if args.out.endswith(".sql") else args.out
@@ -270,7 +315,7 @@ def main():
         open(fn, "w", encoding="utf-8").write("-- 적재할 내용 없음 · " + now + "\n")
         files.append(fn)
 
-    miss = len(want) - len(lines)
+    miss = (len(want) - len(lines)) if want else 0
     if bad:
         print("건너뛴 도시:", ", ".join(bad))
     print(f"\nAPI 호출 {calls}회 · 적재 대상 {len(lines)}개 · 못 채운 노선 {miss}개")
