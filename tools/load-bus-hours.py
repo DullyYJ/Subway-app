@@ -110,9 +110,15 @@ def main():
     done_itv = set()                            # 배차가 이미 D1 에 있는 노선
     for r in rows:
         rk = r["route_key"] if isinstance(r, dict) else str(r)
-        if "_" not in rk:
-            continue
-        city, rid = rk.split("_", 1)
+        # 2026-09-08: bus_routes 에 city_code / route_id 컬럼이 이미 있다.
+        #   route_key 를 쪼개는 것보다 컬럼을 그대로 쓰는 쪽이 안전하다
+        #   (형식이 다른 행이 섞여 있어도 놓치지 않는다).
+        city = str((r.get("city_code") if isinstance(r, dict) else "") or "").strip()
+        rid  = str((r.get("route_id")  if isinstance(r, dict) else "") or "").strip()
+        if not city or not rid:
+            if "_" not in rk:
+                continue
+            city, rid = rk.split("_", 1)
         if not city.isdigit():
             continue
         want[rk] = (city, rid)
