@@ -41,18 +41,38 @@ def call(op, params, key, tries=3):
 
 
 def items_of(js):
-    """TAGO 응답은 항목이 1개면 dict, 여러 개면 list 로 온다."""
-    try:
-        body = js["response"]["body"]
-    except Exception:
+    """TAGO 응답 파싱.
+
+    2026-09-08: 결과가 0건인 도시는 items 를 빈 문자열 ""로 준다. 그런데 그 습관이
+      한 단계 위에서도 나와서, body 자체가 문자열로 오는 도시가 있었다(35060 다음).
+      dict 가 아닌 것은 전부 '결과 없음'으로 본다.
+      항목이 1개면 dict, 여러 개면 list 로 오는 것도 여기서 흡수한다.
+    """
+    if not isinstance(js, dict):
         return []
-    it = (body.get("items") or {})
-    if not it:
+    resp = js.get("response")
+    if not isinstance(resp, dict):
         return []
-    it = it.get("item", [])
+    body = resp.get("body")
+    if not isinstance(body, dict):
+        return []
+    it = body.get("items")
+    if not isinstance(it, dict):
+        return []
+    it = it.get("item")
     if isinstance(it, dict):
         return [it]
-    return it or []
+    if isinstance(it, list):
+        return [x for x in it if isinstance(x, dict)]
+    return []
+
+
+def total_of(js):
+    """전체 건수. 못 읽으면 0."""
+    try:
+        return int(js["response"]["body"].get("totalCount") or 0)
+    except Exception:
+        return 0
 
 
 def pick(d, *names):
@@ -128,6 +148,7 @@ def main():
     print(f"노선 {len(want)}개 / 도시 {len(cities)}곳: {', '.join(cities)}")
 
     calls = 0
+    bad = []                                    # 응답이 이상해 건너뛴 도시
     found = {}                                  # routeid -> dict(start,end,itv...)
 
     # ── 1단계: 도시별 노선목록 (첫차·막차) ──────────────────────────
@@ -136,7 +157,11 @@ def main():
         while True:
             if calls >= args.max_calls:
                 print("트래픽 상한 도달 — 여기까지만 적재합니다"); break
-            js = call("getRouteNoList", {"cityCode": city, "numOfRows": PAGE, "pageNo": page}, key)
+            try:
+                js = call("getRouteNoList", {"cityCode": city, "numOfRows": PAGE, "pageNo": page}, key)
+            except Exception as e:
+                print(f"  [{city}] 조회 실패 — 건너뜀: {e}")
+                bad.append(city); break
             calls += 1; time.sleep(SLEEP)
             its = items_of(js)
             for d in its:
@@ -150,9 +175,7 @@ def main():
                     "sat": num(pick(d, "intervalsaturtime", "intervalSaturTime")),
                     "sun": num(pick(d, "intervalsuntime", "intervalSunTime")),
                 }
-            total = 0
-            try: total = int(js["response"]["body"].get("totalCount") or 0)
-            except Exception: pass
+            total = total_of(js)
             print(f"  [{city}] page {page}: {len(its)}행 (누적 {len(found)} / 전체 {total})")
             if len(its) < PAGE or page * PAGE >= total:
                 break
@@ -212,6 +235,8 @@ def main():
         files.append(fn)
 
     miss = len(want) - len(lines)
+    if bad:
+        print("건너뛴 도시:", ", ".join(bad))
     print(f"\nAPI 호출 {calls}회 · 적재 대상 {len(lines)}개 · 못 채운 노선 {miss}개")
     print("SQL 파일:", ", ".join(files))
 
