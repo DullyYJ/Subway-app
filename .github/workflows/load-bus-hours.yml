@@ -53,7 +53,7 @@ jobs:
         run: |
           set -o pipefail
           npx --yes wrangler@3 d1 execute subway-db --remote --json \
-            --command "SELECT route_key, itv_wd FROM bus_routes" > d1.raw 2> d1.err || {
+            --command "SELECT route_key, city_code, route_id, itv_wd FROM bus_routes" > d1.raw 2> d1.err || {
               echo "::error::wrangler d1 execute 실패"; tail -40 d1.err; exit 1; }
           echo "── d1.raw 앞 200자"; head -c 200 d1.raw; echo
           node -e "
