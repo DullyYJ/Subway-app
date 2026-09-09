@@ -7485,6 +7485,7 @@ function openTransitDetail() {
     modal.style.display = 'flex';                 // 시트를 먼저 띄우고
     requestAnimationFrame(function(){             // 그리는 건 다음 프레임에
       try{ _buildTransitDetailNow(); }catch(e){}
+      try{ _svcInjectDetail(); }catch(e){}
     });
     return;
   }
@@ -8193,6 +8194,8 @@ window._hideRouteLoading = _hideRouteLoading;
         window._rtwStat = _r0 && _r0.rtwStat ? _r0.rtwStat : null;
         var _r1 = (results || []).find(function(r){ return r && r.liveStat; });
         window._liveStat = _r1 ? _r1.liveStat : null;
+        // ★ 2026-09-09: 엔진이 준 '가장 이른 첫차'를 야간 안내에서 쓴다
+        try{ window._engSvcFirstBus = (window._liveStat && window._liveStat.svcFirstBus) || null; }catch(e){}
         // ★ 2026-09-05: 버스 탭이 버스를 안 태우는 이유는 대개 엔진이 이미 알고 있다.
         //   자기점검(warnings)과 정류장 수집 현황(busDiag)을 그대로 꺼낸다.
         var _r2 = (results || []).find(function(r){ return r && (r.warnings || r.busDiag); });
@@ -9119,6 +9122,7 @@ function _doSelectRouteOption(type) {
   if(!routeObj){ toast('경로를 찾을 수 없습니다.'); return; }
   var data = { routes: [routeObj] };
   _renderTransitResultCard(data, _transitResultStart, _transitResultDest, 'engine_' + type);
+  try{ _svcApply(routeObj.sections, 'engine_' + type); }catch(e){}
 
   // ★ 즐겨찾기 정류장 승차 경로가 선택된 경우 1회 안내
   try{
@@ -9146,6 +9150,201 @@ function _doSelectRouteOption(type) {
   }
 }
 window._doSelectRouteOption = _doSelectRouteOption;
+
+// ══════════════════════════════════════════════════════════════════════
+// ★ 2026-09-08: 야간 운행종료 안내
+//   증상: 00:44 에 경로를 찾으면 991번 버스를 타라고 나온다. 카카오는
+//        "현재 운행 중인 열차가 없어요" 라고 알려 주는데 우리는 멀쩡히 안내했다.
+//   원인: 엔진은 배차 가정치로 언제든 차가 오는 것처럼 계산한다.
+//        지하철은 LINE_SCHEDULE 에 첫차·막차가 있는데도 경로 화면에서 안 봤고,
+//        버스는 노선별 시각표 자체가 없다.
+//   방침: · 지하철 — LINE_SCHEDULE 의 first/last 로 판정 (근거 있는 값)
+//        · 버스   — 시각표가 없으므로 '실측 도착정보가 있는가' 로 판정한다.
+//                   심야버스(N90 등)는 실제로 오고 있어 실측이 잡히므로 살아남는다.
+//        시각표가 없는 노선은 아무 말도 하지 않는다(억지 판정 금지).
+// ══════════════════════════════════════════════════════════════════════
+var _SVC_NIGHT_FROM = 23 * 60;      // 이 시각 이후 ~
+var _SVC_NIGHT_TO   = 5 * 60;       // 이 시각 이전을 '심야'로 본다
+var _SVC_SOON_MIN   = 60;           // 막차 n분 전이면 미리 알린다
+// ★ 2026-09-09: 엔진이 D1(TAGO 노선정보)에서 읽은 실제 첫차를 보내준다.
+//   그 전에는 '05:30 전후(노선마다 다름)' 로 얼버무렸다.
+//   값이 안 오면(옛 워커) 예전 문구로 돌아간다.
+var _SVC_BUS_FIRST_FALLBACK = '05:30';
+function _svcBusFirst(){
+  try{
+    var v = window._engSvcFirstBus;
+    if(v && /^[0-9]{1,2}:[0-9]{2}$/.test(v)) return v;
+  }catch(e){}
+  return null;
+}
+
+function _svcNowMin(){ var d = new Date(); return d.getHours()*60 + d.getMinutes(); }
+// 자정을 넘기는 운행시간(예: 05:30~00:40)도 맞게 판정한다
+function _svcRunning(f, l, now){ return (l < f) ? (now >= f || now <= l) : (now >= f && now <= l); }
+function _svcUntil(now, t){ var d = t - now; if(d < 0) d += 1440; return d; }
+function _svcIsNight(now){ return now >= _SVC_NIGHT_FROM || now < _SVC_NIGHT_TO; }
+
+function _svcLineOf(sg){
+  try{
+    var n = ((sg.transportation||{}).name || '').trim();
+    if(!n) return '';
+    if(typeof _TT_SCHED_ALIAS !== 'undefined' && _TT_SCHED_ALIAS[n]) return _TT_SCHED_ALIAS[n];
+    return n;
+  }catch(e){ return ''; }
+}
+
+// 경로 구간들을 훑어 '무엇이 끊겼는지'를 낸다. 판단할 근거가 없으면 null.
+function _svcCheck(sections){
+  try{
+    var now = _svcNowMin();
+    var endedSub = [], soonSub = [], endedBus = [], firstMin = null;
+    (sections || []).forEach(function(sg){
+      if(!sg || !sg.transportation) return;
+      var t = sg.transportation.type;
+      if(t === 1){
+        var ln = _svcLineOf(sg);
+        var sc = (typeof LINE_SCHEDULE !== 'undefined') ? LINE_SCHEDULE[ln] : null;
+        if(!sc || !sc.first || !sc.last) return;          // 시각표 없으면 판단 보류
+        var f = timeToMin(sc.first), l = timeToMin(sc.last);
+        if(firstMin === null || _svcUntil(now, f) < _svcUntil(now, firstMin)) firstMin = f;
+        if(!_svcRunning(f, l, now)) endedSub.push({ line: ln, first: sc.first, last: sc.last });
+        else if(_svcUntil(now, l) <= _SVC_SOON_MIN) soonSub.push({ line: ln, last: sc.last, inMin: _svcUntil(now, l) });
+      } else if(t === 2){
+        if(sg.waitReal || sg.waitLive) return;            // 실제로 오고 있다 → 운행 중
+        if(!_svcIsNight(now)) return;                     // 낮이면 그냥 정보 부족일 뿐
+        var no = (sg.transportation.name || '').trim();
+        if(no) endedBus.push({ no: no });
+      }
+    });
+    if(!endedSub.length && !soonSub.length && !endedBus.length) return null;
+    var modes = [];
+    if(endedSub.length) modes.push('지하철');
+    if(endedBus.length) modes.push('버스');
+    return {
+      endedSub: endedSub, soonSub: soonSub, endedBus: endedBus,
+      modes: modes,
+      ended: !!(endedSub.length || endedBus.length),
+      firstSub: firstMin != null ? minToTime(firstMin) : null,
+      firstBus: endedBus.length ? (_svcBusFirst() || _SVC_BUS_FIRST_FALLBACK) : null
+    };
+  }catch(e){ return null; }
+}
+window._svcCheck = _svcCheck;
+
+function _svcModeText(r){
+  if(r.modes.length === 2) return '지하철과 버스 모두';
+  if(r.modes.length === 1) return r.modes[0] + '이(가)';
+  return '일부 구간이';
+}
+function _svcLines(r){
+  var a = r.endedSub.map(function(x){ return x.line + ' (막차 ' + x.last + ')'; })
+        .concat(r.endedBus.map(function(x){ return x.no + '번'; }));
+  return a.join(' · ');
+}
+function _svcFirstText(r){
+  var p = [];
+  if(r.endedSub.length && r.firstSub) p.push('지하철 첫차 ' + r.firstSub);
+  if(r.endedBus.length){
+    var bf = _svcBusFirst();
+    p.push(bf ? ('버스 첫차 ' + bf) : ('버스 첫차 ' + _SVC_BUS_FIRST_FALLBACK + ' 전후(노선마다 다름)'));
+  }
+  return p.join(' · ');
+}
+
+// 경로 카드/세부경로에 얹는 띠. 근거를 그대로 적는다.
+function _svcBannerHtml(r){
+  if(!r) return '';
+  var warn = !r.ended;   // 아직 막차 전이면 '곧 끊김' 경고
+  var grad = warn ? 'linear-gradient(135deg,#f59e0b 0%,#ef4444 100%)'
+                  : 'linear-gradient(135deg,#4b5563 0%,#1f2937 60%,#312e81 100%)';
+  var head = warn
+    ? '곧 막차예요'
+    : _svcModeText(r) + ' 운행이 끝났어요';
+  var body = warn
+    ? r.soonSub.map(function(x){ return x.line + ' 막차 ' + x.last + ' (약 ' + x.inMin + '분 뒤)'; }).join(' · ')
+    : _svcLines(r);
+  var foot = warn ? '' : ('<div style="margin-top:6px;font-size:11px;opacity:.85;">아래 시각은 ' + (_svcFirstText(r) || '첫차') + ' 기준으로 안내해요.</div>');
+  return '<div id="svcBanner" style="background:' + grad + ';color:#fff;border-radius:12px;'
+       + 'padding:10px 12px;margin-bottom:8px;font-size:12px;line-height:1.5;">'
+       + '<div style="font-weight:800;font-size:13px;">' + head + '</div>'
+       + (body ? '<div style="margin-top:3px;opacity:.92;">' + body + '</div>' : '')
+       + foot + '</div>';
+}
+
+function _svcCloseModal(){
+  var m = document.getElementById('svcModal');
+  if(m && m.parentNode) m.parentNode.removeChild(m);
+}
+window._svcCloseModal = _svcCloseModal;
+
+function _svcShowModal(r){
+  try{
+    _svcCloseModal();
+    var warn = !r.ended;
+    var grad = warn ? 'linear-gradient(135deg,#f59e0b 0%,#ef4444 100%)'
+                    : 'linear-gradient(160deg,#1f2937 0%,#312e81 55%,#4c1d95 100%)';
+    var d = document.createElement('div');
+    d.id = 'svcModal';
+    d.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.5);'
+                    + 'display:flex;align-items:flex-end;justify-content:center;';
+    d.onclick = function(ev){ if(ev.target === d) _svcCloseModal(); };
+    d.innerHTML =
+      '<div style="width:100%;max-width:520px;background:' + grad + ';color:#fff;'
+      + 'border-radius:20px 20px 0 0;padding:20px 18px 22px;">'
+      + '<div style="font-size:17px;font-weight:800;line-height:1.4;">'
+      + (warn ? '곧 막차예요' : _svcModeText(r) + '<br>지금은 운행이 끝났어요') + '</div>'
+      + '<div style="margin-top:10px;font-size:13px;opacity:.92;line-height:1.6;">'
+      + (warn
+          ? r.soonSub.map(function(x){ return x.line + ' 막차 ' + x.last + ' — 약 ' + x.inMin + '분 남았어요.'; }).join('<br>')
+          : _svcLines(r) + '<br><br>아래 경로의 시각은 <b>' + (_svcFirstText(r) || '첫차') + '</b> 기준이에요.')
+      + '</div>'
+      + (r.endedBus.length
+          ? '<div style="margin-top:10px;font-size:11px;opacity:.75;line-height:1.5;">'
+            + (_svcBusFirst()
+                ? '주변 노선 중 가장 이른 첫차 기준이에요. 노선마다 첫차가 다르니 노선도 &gt; 버스 탭에서 확인해 주세요.'
+                : '버스는 노선마다 첫차가 달라 정확한 시각을 알려드리지 못해요. 노선도 &gt; 버스 탭에서 정류장별 도착정보를 확인해 주세요.')
+            + '</div>'
+          : '')
+      + '<button onclick="_svcCloseModal()" style="margin-top:16px;width:100%;padding:13px;'
+      + 'background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.3);border-radius:12px;'
+      + 'color:#fff;font-size:14px;font-weight:800;cursor:pointer;">확인</button>'
+      + '</div>';
+    document.body.appendChild(d);
+  }catch(e){}
+}
+
+// 경로를 그린 직후 호출. 같은 경로로는 팝업을 한 번만 띄운다.
+function _svcApply(sections, key){
+  try{
+    window._svcLast = _svcCheck(sections);
+    var r = window._svcLast;
+    var old = document.getElementById('svcBanner');
+    if(old && old.parentNode) old.parentNode.removeChild(old);
+    if(!r) return;
+    var wrap = document.getElementById('transitHtlWrap');
+    if(wrap && wrap.parentNode) wrap.insertAdjacentHTML('beforebegin', _svcBannerHtml(r));
+    var k = (key || '') + '|' + (r.ended ? 'end' : 'soon') + '|' + _svcLines(r);
+    if(window._svcModalKey === k) return;
+    window._svcModalKey = k;
+    _svcShowModal(r);
+  }catch(e){}
+}
+window._svcApply = _svcApply;
+
+// 세부경로 시트에도 같은 띠를 얹는다
+function _svcInjectDetail(){
+  try{
+    var host = document.getElementById('transitDetailSections');
+    if(!host) return;
+    var old = host.querySelector('#svcBannerDetail');
+    if(old && old.parentNode) old.parentNode.removeChild(old);
+    var r = window._svcLast;
+    if(!r) return;
+    host.insertAdjacentHTML('afterbegin', _svcBannerHtml(r).replace('id="svcBanner"', 'id="svcBannerDetail"'));
+  }catch(e){}
+}
+window._svcInjectDetail = _svcInjectDetail;
+
 
 // 경로 탭 하이라이트 (활성/비활성 스타일)
 // ★ 경로 타임라인의 '마지막 도착 시각'(ms) — AI 안내와 값을 맞추기 위한 단일 기준
@@ -16104,6 +16303,11 @@ window._bgDiag = async function(){
       if(_ls && (_ls.preOk != null || _ls.preErr)){
         add('탐색 전 사전조회: 정류장 ' + (_ls.preStops||0) + '곳 중 ' + (_ls.preOk||0) + '곳 응답'
             + (_ls.preErr ? (' / 오류 ' + _ls.preErr) : ''));
+        if(_ls.svcOff){
+          add('운행 끝나 제외한 노선: ' + _ls.svcOff + '개'
+              + ((_ls.svcOffList||[]).length ? (' (' + _ls.svcOffList.join(', ') + ')') : ''));
+        }
+        if(_ls.svcFirstBus) add('가장 이른 버스 첫차: ' + _ls.svcFirstBus);
         if(_ls.tabs && _ls.tabs.length){ add('탭별 결과:'); _ls.tabs.forEach(function(t){ add('  · ' + t); }); }
         if(_ls.stillMissing && _ls.stillMissing.length) add('  · 합쳐도 끝내 안 나온 노선: ' + _ls.stillMissing.join(' / '));
         if(_ls.aliasUsed) add('  · 형제 id 병합 ' + _ls.aliasUsed + '회');
