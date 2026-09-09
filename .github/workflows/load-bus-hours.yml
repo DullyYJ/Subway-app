@@ -1,39 +1,45 @@
 name: Load bus hours
 
-# 수동 실행 전용. 버스 첫차·막차·배차를 D1 에 채워 넣는다.
-#   Settings > Secrets and variables > Actions 에 두 개가 필요하다:
-#     TAGO_KEY              공공데이터포털 '일반 인증키(Decoding)'
-#     CLOUDFLARE_API_TOKEN  D1 편집 권한 토큰
-#     CLOUDFLARE_ACCOUNT_ID
+# 버스 첫차·막차·배차를 D1(subway-db)의 bus_routes 에 채워 넣는다. 수동 실행 전용.
+#
+# 필요한 Secrets (Settings > Secrets and variables > Actions)
+#   TAGO_KEY        공공데이터포털 '일반 인증키(Decoding)'   ← 새로 추가해야 함
+#   CF_API_TOKEN    이미 있음
+#   CF_ACCOUNT_ID   이미 있음
+#
+# 노선이 21,485개라 배차(interval)는 하루 트래픽 1만으로 한 번에 못 끝낸다.
+# 이미 채워진 노선은 건너뛰므로, interval 을 켠 채로 며칠에 걸쳐 여러 번 돌리면 된다.
 on:
   workflow_dispatch:
     inputs:
       interval:
-        description: '배차(intervaltime)까지 노선별로 조회 (오래 걸림)'
+        description: '배차까지 채우기 (노선별 조회 · 하루 최대 9000개씩 이어서)'
         type: boolean
         default: false
 
 jobs:
   load:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: D1 에서 route_key 목록 뽑기
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: D1 에서 노선 목록 뽑기
         run: |
           npx wrangler@3 d1 execute subway-db --remote --json \
-            --command "SELECT route_key FROM bus_routes" > d1.json
+            --command "SELECT route_key, itv_wd FROM bus_routes" > d1.json
           node -e "
             const j=JSON.parse(require('fs').readFileSync('d1.json','utf8'));
             const rows=(Array.isArray(j)?j[0]:j).results||[];
             require('fs').writeFileSync('routes.json', JSON.stringify(rows));
-            console.log('route_key', rows.length, '개');
+            const done=rows.filter(r=>r.itv_wd).length;
+            console.log('노선', rows.length, '개 / 배차 이미 채워짐', done, '개');
           "
 
       - name: TAGO 조회 → SQL 생성
@@ -41,21 +47,25 @@ jobs:
           TAGO_KEY: ${{ secrets.TAGO_KEY }}
         run: |
           python3 tools/load-bus-hours.py \
-            --routes routes.json --out fill.sql \
+            --routes routes.json --out fill.sql --chunk 2000 \
             ${{ inputs.interval && '--interval' || '' }}
-          echo "=== 앞 20줄 ==="; head -20 fill.sql; wc -l fill.sql
+          ls -la fill.*.sql
+          echo "=== 첫 파일 앞 5줄 ==="; head -5 fill.001.sql
 
       - name: D1 에 적용
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          npx wrangler@3 d1 execute subway-db --remote --file=fill.sql
-          npx wrangler@3 d1 execute subway-db --remote \
-            --command "SELECT COUNT(*) total, SUM(CASE WHEN start_time IS NOT NULL THEN 1 ELSE 0 END) filled FROM bus_routes"
+          for f in fill.*.sql; do
+            echo "── $f"
+            npx wrangler@3 d1 execute subway-db --remote --file="$f"
+          done
+
+      - name: 결과 확인
+        run: |
+          npx wrangler@3 d1 execute subway-db --remote --command \
+            "SELECT COUNT(*) total, SUM(CASE WHEN start_time IS NOT NULL THEN 1 ELSE 0 END) hours, SUM(CASE WHEN itv_wd IS NOT NULL THEN 1 ELSE 0 END) itv FROM bus_routes"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: fill-sql
-          path: fill.sql
+          path: fill.*.sql
