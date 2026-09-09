@@ -96,6 +96,7 @@ def main():
     ap.add_argument("--out", required=True, help="생성할 SQL 파일")
     ap.add_argument("--interval", action="store_true", help="배차(intervaltime)까지 노선별로 조회")
     ap.add_argument("--max-calls", type=int, default=9000, help="일일 트래픽 여유분")
+    ap.add_argument("--chunk", type=int, default=2000, help="SQL 파일 하나에 담을 UPDATE 수")
     args = ap.parse_args()
 
     key = os.environ.get("TAGO_KEY", "").strip()
@@ -106,13 +107,17 @@ def main():
     if isinstance(rows, dict):                 # wrangler 출력 형태 흡수
         rows = rows.get("results") or rows.get("rows") or []
     want = {}                                   # route_key -> (city, routeid)
+    done_itv = set()                            # 배차가 이미 D1 에 있는 노선
     for r in rows:
         rk = r["route_key"] if isinstance(r, dict) else str(r)
         if "_" not in rk:
             continue
         city, rid = rk.split("_", 1)
-        if city.isdigit():
-            want[rk] = (city, rid)
+        if not city.isdigit():
+            continue
+        want[rk] = (city, rid)
+        if isinstance(r, dict) and r.get("itv_wd") not in (None, "", 0):
+            done_itv.add(rid)
     cities = sorted({c for c, _ in want.values()})
     print(f"노선 {len(want)}개 / 도시 {len(cities)}곳: {', '.join(cities)}")
 
@@ -149,8 +154,11 @@ def main():
 
     # ── 2단계: 배차가 비어 있는 노선만 개별 조회 ────────────────────
     if args.interval:
+        # 이미 D1 에 배차가 있거나 1단계에서 받은 노선은 건너뛴다.
+        #   노선이 2만 개가 넘어 하루 트래픽(1만)으로는 한 번에 못 끝낸다.
+        #   여러 날에 나눠 돌려도 남은 것부터 이어서 채워진다.
         need = [(rk, c, r) for rk, (c, r) in want.items()
-                if not (found.get(r, {}) or {}).get("wd")]
+                if r not in done_itv and not (found.get(r, {}) or {}).get("wd")]
         print(f"배차 미확보 {len(need)}개 — 개별 조회 (남은 트래픽 {args.max_calls - calls})")
         for rk, city, rid in need:
             if calls >= args.max_calls:
@@ -170,24 +178,36 @@ def main():
 
     # ── SQL 생성 ────────────────────────────────────────────────
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
-    n = 0
-    with open(args.out, "w", encoding="utf-8") as f:
-        f.write("-- load-bus-hours.py 생성 · " + now + "\n")
-        for rk, (city, rid) in sorted(want.items()):
-            v = found.get(rid)
-            if not v or not (v.get("start") or v.get("end") or v.get("wd")):
-                continue
-            f.write(
-                "UPDATE bus_routes SET "
-                f"start_time={q(v.get('start'))}, end_time={q(v.get('end'))}, "
-                f"itv_wd={v.get('wd') or 'NULL'}, itv_sat={v.get('sat') or 'NULL'}, "
-                f"itv_sun={v.get('sun') or 'NULL'}, hours_at={q(now)} "
-                f"WHERE route_key={q(rk)};\n")
-            n += 1
-    miss = len(want) - n
-    print(f"\nAPI 호출 {calls}회 · 적재 대상 {n}개 · 못 채운 노선 {miss}개")
-    print(f"→ {args.out}")
-    print("적용:  npx wrangler d1 execute subway-db --remote --file=" + args.out)
+    lines = []
+    for rk, (city, rid) in sorted(want.items()):
+        v = found.get(rid)
+        if not v or not (v.get("start") or v.get("end") or v.get("wd")):
+            continue
+        lines.append(
+            "UPDATE bus_routes SET "
+            f"start_time={q(v.get('start'))}, end_time={q(v.get('end'))}, "
+            f"itv_wd={v.get('wd') or 'NULL'}, itv_sat={v.get('sat') or 'NULL'}, "
+            f"itv_sun={v.get('sun') or 'NULL'}, hours_at={q(now)} "
+            f"WHERE route_key={q(rk)};")
+
+    # wrangler 는 한 파일에 2만 문장을 넣으면 타임아웃 난다. 조각내서 낸다.
+    base = args.out[:-4] if args.out.endswith(".sql") else args.out
+    files, i = [], 0
+    while i < len(lines):
+        part = lines[i:i + args.chunk]
+        fn = f"{base}.{len(files)+1:03d}.sql"
+        with open(fn, "w", encoding="utf-8") as f:
+            f.write("-- load-bus-hours.py 생성 · " + now + "\n")
+            f.write("\n".join(part) + "\n")
+        files.append(fn); i += args.chunk
+    if not files:                      # 빈 결과여도 파일 하나는 만든다
+        fn = f"{base}.001.sql"
+        open(fn, "w", encoding="utf-8").write("-- 적재할 내용 없음 · " + now + "\n")
+        files.append(fn)
+
+    miss = len(want) - len(lines)
+    print(f"\nAPI 호출 {calls}회 · 적재 대상 {len(lines)}개 · 못 채운 노선 {miss}개")
+    print("SQL 파일:", ", ".join(files))
 
 
 if __name__ == "__main__":
