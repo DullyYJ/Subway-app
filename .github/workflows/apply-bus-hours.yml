@@ -1,0 +1,53 @@
+name: Apply bus hours
+
+# 저장소의 sql/fill.*.sql 을 D1(subway-db)에 적용한다.
+#
+# 왜 나눴나 (2026-09-08)
+#   data.go.kr 이 깃허브 러너 IP 로의 접속을 막아서(전 도시 timed out)
+#   TAGO 조회는 PC 에서 하고, D1 적용만 여기서 한다.
+#   Cloudflare 는 막히지 않으므로 이 워크플로는 잘 돈다.
+#
+# 쓰는 법
+#   1) PC 에서:  python load-bus-hours.py --out fill.sql
+#   2) 생긴 fill.001.sql ... 을 저장소 sql/ 폴더에 올린다
+#   3) Actions > Apply bus hours > Run workflow
+on:
+  workflow_dispatch:
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 적용 전 상태
+        run: |
+          ls -la sql/ || { echo "::error::sql/ 폴더가 없습니다"; exit 1; }
+          shopt -s nullglob
+          files=(sql/fill.*.sql)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::sql/fill.*.sql 이 없습니다"; exit 1; }
+          echo "파일 ${#files[@]}개"
+          npx --yes wrangler@3 d1 execute subway-db --remote --command \
+            "SELECT COUNT(*) total, SUM(CASE WHEN start_time IS NOT NULL THEN 1 ELSE 0 END) hours, SUM(CASE WHEN itv_wd IS NOT NULL THEN 1 ELSE 0 END) itv FROM bus_routes"
+
+      - name: D1 에 적용
+        run: |
+          for f in sql/fill.*.sql; do
+            echo "── $f ($(wc -l < "$f") 줄)"
+            npx --yes wrangler@3 d1 execute subway-db --remote --file="$f"
+          done
+
+      - name: 적용 후 상태
+        if: always()
+        run: |
+          npx --yes wrangler@3 d1 execute subway-db --remote --command \
+            "SELECT COUNT(*) total, SUM(CASE WHEN start_time IS NOT NULL THEN 1 ELSE 0 END) hours, SUM(CASE WHEN itv_wd IS NOT NULL THEN 1 ELSE 0 END) itv FROM bus_routes"
+          npx --yes wrangler@3 d1 execute subway-db --remote --command \
+            "SELECT route_no, start_time, end_time FROM bus_routes WHERE city_code='23' AND start_time IS NOT NULL LIMIT 5"
