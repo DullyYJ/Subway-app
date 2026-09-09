@@ -19,12 +19,23 @@
 routes.json 은 D1 에서 뽑아 온 목록:
   SELECT route_key FROM bus_routes;      → [{"route_key":"23_ICB165000123"}, ...]
 """
-import argparse, json, os, sys, time, urllib.parse, urllib.request
+import argparse, functools, json, os, sys, time, urllib.parse, urllib.request
+
+# 2026-09-08: Actions 로그가 1번 줄만 보이던 이유.
+#   파이썬은 터미널이 아니면 출력을 모아뒀다 한꺼번에 내보낸다.
+#   한 시간짜리 작업이 아무 것도 안 찍히면 멈춘 건지 도는 건지 알 수가 없다.
+print = functools.partial(print, flush=True)
 
 BASE = "http://apis.data.go.kr/1613000/BusRouteInfoInqireService"
 PAGE = 1000          # 명세상 페이지당 최대
 SLEEP = 0.12         # 초당 30tps 상한을 넉넉히 밑돈다
 
+
+# 2026-09-08: 137개 도시가 전부 timed out 으로 죽은 일이 있었다.
+#   원인은 응답 본문에 있는데(트래픽 초과/키 미등록 등) 그걸 못 보고
+#   그냥 '실패'로만 찍어서 100분을 헛돌았다.
+#   → 타임아웃을 늘리고, JSON 이 아닌 응답은 앞부분을 그대로 보여준다.
+TIMEOUT = 45
 
 def call(op, params, key, tries=3):
     q = dict(params); q["serviceKey"] = key; q["_type"] = "json"
@@ -32,11 +43,17 @@ def call(op, params, key, tries=3):
     last = None
     for i in range(tries):
         try:
-            with urllib.request.urlopen(url, timeout=20) as r:
-                return json.loads(r.read().decode("utf-8"))
+            req = urllib.request.Request(url, headers={"User-Agent": "gildongmu-loader/1.0"})
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                raw = r.read().decode("utf-8", "replace")
+            try:
+                return json.loads(raw)
+            except Exception:
+                # XML 오류 응답이 그대로 오는 경우가 많다. 본문을 알려 준다.
+                raise RuntimeError("JSON 아님: " + " ".join(raw.split())[:200])
         except Exception as e:
             last = e
-            time.sleep(0.6 * (i + 1))
+            time.sleep(1.0 * (i + 1))
     raise RuntimeError(f"{op} 실패: {last}")
 
 
@@ -149,20 +166,32 @@ def main():
 
     calls = 0
     bad = []                                    # 응답이 이상해 건너뛴 도시
+    streak = 0                                  # 연속 실패 수
+    GIVE_UP = 8                                 # 이만큼 연속 실패하면 중단
     found = {}                                  # routeid -> dict(start,end,itv...)
 
     # ── 1단계: 도시별 노선목록 (첫차·막차) ──────────────────────────
+    MAX_PAGE = 20                               # TAGO 가 pageNo 를 무시하고 같은 쪽을
+                                                #   계속 주는 경우가 있어 안전장치를 둔다
     for city in cities:
         page = 1
-        while True:
+        while page <= MAX_PAGE:
             if calls >= args.max_calls:
                 print("트래픽 상한 도달 — 여기까지만 적재합니다"); break
             try:
                 js = call("getRouteNoList", {"cityCode": city, "numOfRows": PAGE, "pageNo": page}, key)
             except Exception as e:
                 print(f"  [{city}] 조회 실패 — 건너뜀: {e}")
-                bad.append(city); break
-            calls += 1; time.sleep(SLEEP)
+                bad.append(city); streak += 1
+                if streak >= GIVE_UP:
+                    print(f"\n연속 {streak}회 실패 — 여기서 중단합니다.")
+                    print("  · 트래픽(1만/일)을 이미 다 썼거나")
+                    print("  · 인증키가 이 API 에 등록되지 않았거나")
+                    print("  · TAGO 서버가 응답하지 않는 상태입니다.")
+                    print("  위 오류 메시지의 본문을 확인하세요.")
+                    raise SystemExit(2)
+                break
+            calls += 1; streak = 0; time.sleep(SLEEP)
             its = items_of(js)
             for d in its:
                 rid = pick(d, "routeid", "routeId")
@@ -180,6 +209,8 @@ def main():
             if len(its) < PAGE or page * PAGE >= total:
                 break
             page += 1
+            if page > MAX_PAGE:
+                print(f"  [{city}] 페이지 상한({MAX_PAGE}) 도달 — 다음 도시로")
 
     # ── 2단계: 배차가 비어 있는 노선만 개별 조회 ────────────────────
     if args.interval:
@@ -189,9 +220,14 @@ def main():
         need = [(rk, c, r) for rk, (c, r) in want.items()
                 if r not in done_itv and not (found.get(r, {}) or {}).get("wd")]
         print(f"배차 미확보 {len(need)}개 — 개별 조회 (남은 트래픽 {args.max_calls - calls})")
-        for rk, city, rid in need:
+        t0 = time.time()
+        for i, (rk, city, rid) in enumerate(need, 1):
             if calls >= args.max_calls:
                 print("트래픽 상한 도달 — 배차는 여기까지"); break
+            if i % 200 == 0:
+                el = time.time() - t0
+                left = (len(need) - i) * (el / i)
+                print(f"  {i}/{len(need)} · 경과 {el/60:.0f}분 · 남은 예상 {left/60:.0f}분")
             try:
                 js = call("getRouteInfoIem", {"cityCode": city, "routeId": rid}, key)
             except Exception as e:
